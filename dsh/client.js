@@ -74,7 +74,7 @@ window.__ModuleLoader__.load({
         else if (tab === "资产") setData(await invoke(scoped("/api/library-entries", { kind, search: query, offset, limit: 50 })));
         else if (tab === "参考资料") setData(await invoke(scoped("/api/references", { search: query, offset, limit: 50 })));
         else if (tab === "学习") { const [learning, styles] = await Promise.all([invoke(scoped("/api/learning", { contentType: "all", domain: "all" })), invoke(scoped("/api/style-profiles"))]); setData({ ...learning, styleProfiles: styles.styleProfiles || [] }); }
-        else if (tab === "任务") setData(await invoke(scoped("/api/tasks", { limit: 50 })));
+      else if (tab === "任务") setData({ tasks: await invoke(scoped("/api/tasks", { limit: 50 })) });
         else if (tab === "设置") { const value = await invoke("/api/settings"); setSettings(value.settings || value); setData(value); }
       };
       useEffect(() => { if (sessionId) action(loadProjects); }, [sessionId]);
