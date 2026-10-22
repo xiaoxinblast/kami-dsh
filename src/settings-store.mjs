@@ -16,11 +16,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultSettings, sanitizeSettings } from "./settings.mjs";
+import { runtimeOptions } from "./runtime-context.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 function settingsPath() {
-  const directory = process.env.KAMI_PROVIDER_DIRECTORY || join(PROJECT_ROOT, "data", "runtime");
+  const directory = runtimeOptions().dataDirectory ? join(runtimeOptions().dataDirectory, "runtime") : process.env.KAMI_PROVIDER_DIRECTORY || join(PROJECT_ROOT, "data", "runtime");
   return join(directory, "settings.json");
 }
 

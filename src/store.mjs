@@ -1,4 +1,5 @@
 import { summarizeBatchSegments } from "../public/batch-status.js";
+import { runtimeOptions } from "./runtime-context.mjs";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -135,7 +136,7 @@ import {
   ,saveDirectusAssets
 } from "./directus-store.mjs";
 
-const ROOT = process.env.KAMI_DATA_DIR || fileURLToPath(new URL("../data", import.meta.url));
+const ROOT = runtimeOptions().dataDirectory || process.env.KAMI_DATA_DIR || fileURLToPath(new URL("../data", import.meta.url));
 
 async function readJson(path, fallback) {
   try {
@@ -2051,7 +2052,7 @@ export async function deleteResourceLibrary(projectId, libraryId) {
 }
 
 function usesDirectus() {
-  return process.env.KAMI_STORE === "directus";
+  return Boolean(runtimeOptions().store) || process.env.KAMI_STORE === "directus";
 }
 
 /**
@@ -2066,7 +2067,7 @@ function usesDirectus() {
  * JSON 存储仍然保留，但只服务于单元测试（不设置 KAMI_STORE 时启用）。
  */
 export async function initializeStore() {
-  if (process.env.KAMI_STORE !== "directus") return initializeJsonStore();
+  if (!usesDirectus()) return initializeJsonStore();
   try {
     await initializeDirectusStore();
   } catch (error) {

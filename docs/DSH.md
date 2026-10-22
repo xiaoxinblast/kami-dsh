@@ -1,0 +1,63 @@
+# DSH 本地翻译工作台
+
+`kami-dsh` 是 `xiaoxinblast/kami` 的独立衍生项目，保留上游 Git 历史。目标语向为日语→简体中文。
+
+## 安装
+
+当前验证目标为 DSH `0.2.1-rc.2`（桌面 Electron `44.7.0` / Node `24.21.0`）。
+
+1. 在 DSH 的“插件”→“添加插件”中填写 `https://github.com/xiaoxinblast/kami-dsh#main`，安装仓库中的当前版本。依赖由插件管理器安装。
+2. 开发时也可在仓库运行 `npm ci`、`npm run dsh:check` 后安装绝对目录；Creator 模式的 `plugin_manager` 使用 `action: install_bundle` 与同一安装地址。
+3. 新建会话并选择“ Kami 翻译工作台”预设。发送一条消息，确定会话模型。
+4. 从侧边栏打开“Kami 翻译工作台”，选择关联会话和翻译项目。
+
+插件只通过 DSH 的管理入口安装，不修改 `app.asar`。更新已加载的 Host 模块后，按插件管理结果处理需要的重启；不要把“依赖已保存”当作已经生效。
+
+GitHub 安装不是自动更新。后续在插件管理器中重新安装仓库地址来获取新代码；管理器会报告是否需要重启。也可安装明确的发布标签，例如地址末尾的 `#v0.8.0`，把运行版本固定到已验收的提交。更新程序包不会把本地数据库或上传文件放进 GitHub。
+
+## 本地数据
+
+数据位于 `$DSH_HOME/kami-dsh/<profile>/`，默认桌面 profile 为 `desktop`。
+
+- `kami.sqlite`：项目、术语、TM、QA、风格、参考资料和学习记录。
+- `uploads/`：导入原文件与参考资料。
+- `runtime/`：参数设置与日志，不保存模型 API Key。
+- `learning/`：配对评测检查点。
+- `exports/`：agent 导出的文件。
+- `backups/`：从工作台创建的数据库备份。
+
+数据库备份使用 SQLite 在线备份接口；迁移和完整人工备份还需保留 `uploads/`、`learning/` 与 `runtime/settings.json`。恢复应在插件停用时进行，使用备份数据库替换 `kami.sqlite`，同时恢复对应文件目录。
+
+正常工作不启动 Kami HTTP 服务，不连接 Directus，也不依赖 Docker。业务入口在 DSH Host 内执行，SQLite 是正式存储。旧仓库的 HTTP 路由被复用为进程内操作分发，以保留现有翻译、QA、学习与导出行为。
+
+## 一次性迁移
+
+仅迁移时需要旧 Directus 临时可用。先关闭旧工作台的写入操作，再运行：
+
+```powershell
+npm run migrate:local -- --source-env '<旧项目>\directus\.env' --source-data '<旧运行目录>\data' --source-data '<旧源码目录>\data'
+```
+
+可用 `--destination '<目标数据目录>'` 指定独立目录。工具仅读取旧后台，不更改旧记录；会逐集合读取两遍并比较内容哈希，校验引用文件和数据库完整性后才发布正式数据库。重复执行仅接受与源数据完全相同的目标库，已有不同内容会拒绝覆盖。
+
+结果写入本地 `migration-report.json`。`status: verified` 才表示完成；缺文件、冲突、权限不足或源数据变化均使迁移失败。账号凭据和旧分享链接不迁入。
+
+## 翻译闭环
+
+先导入或粘贴文件，确认分段后开始翻译。任务保留文件级工作术语、句式一致性、硬 QA、AIQA、修订和批次检查。用户可修改译文并主动采纳为正式译法，写入人工批准 TM 与学习证据；风格和策略仍走既有配对评测及激活门禁。
+
+模型使用关联会话最近一次请求的 provider/model，并经 DSH 的模型服务调用；不另存模型 Key。固定 seed 不可用会明确标记，截断、错误和取消会转为失败，不能算作成功译文。图片识别通过 DSH 附件协议保存和发送图片，需要关联会话所选模型支持图像输入；不支持时任务报告失败。
+
+工具和页面调用相同业务操作。页面通过 DSH Commands Remote 调用；agent 使用 `kami_workbench`、`kami_file_import`、`kami_help`。批准、正式采纳、激活和删除保留为用户操作。大结果分页读取；导出文件返回本地路径，不把二进制塞进模型上下文。
+
+## 验证
+
+```powershell
+npm test
+npm run dsh:check
+npm pack --dry-run
+```
+
+`tests/dsh-workbench.test.mjs` 使用隔离数据库验证项目创建、文件解析和原格式导出；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。`tests/dsh-model-adapter.test.mjs` 在 DSH SDK 模块可解析时验证真实消息协议。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
+
+UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。

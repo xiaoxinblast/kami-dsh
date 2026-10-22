@@ -1,4 +1,5 @@
 import { MODEL_THINKING_ROLES, loadProviderConfig, normalizeProviderProtocol, saveProviderConfig } from "./provider-store.mjs";
+import { runtimeOptions } from "./runtime-context.mjs";
 import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-qa.mjs";
 import { contextBriefMessages, parseContextBriefPart } from "./context-brief.mjs";
@@ -7,7 +8,7 @@ import { parseTermAlign, parseTermSurvey, termAlignMessages, termSurveyMessages 
 import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
 import { parseModelJsonObject } from "./text.mjs";
 
-const loadedProvider = loadProviderConfig();
+const loadedProvider = runtimeOptions().embedded ? { config: {}, persistence: { mode: "dsh", persisted: false } } : loadProviderConfig();
 let persistence = loadedProvider.persistence;
 const THINKING_VALUES = new Set(["enabled", "disabled"]);
 const EFFORT_VALUES = new Set(["low", "high", "max"]);
@@ -127,6 +128,7 @@ export function describeJsonFailure(content, label = "模型返回") {
 }
 
 export function getProviderConfig() {
+  if (runtimeOptions().embedded) return { ...runtimeConfig, model: runtimeOptions().modelRoute?.model || "DSH 会话模型", baseUrl: "", apiKey: undefined, apiKeyConfigured: true, embeddingApiKey: undefined, persistence: { mode: "dsh", persisted: true } };
   return {
     ...runtimeConfig,
     apiKeyConfigured: Boolean(runtimeConfig.apiKey),
@@ -791,6 +793,12 @@ function normalizeChatResponse(protocol, payload) {
 
 async function chat(messages, config = runtimeConfig, options = {}) {
   const normalizedOptions = typeof options === "number" ? { temperature: options } : options;
+  const runtime = runtimeOptions();
+  if (runtime.modelAdapter) {
+    const result = await runtime.modelAdapter(messages, { ...normalizedOptions, route: runtime.modelRoute, signal: runtime.signal });
+    if (result.usage) normalizedOptions.onUsage?.(result.usage);
+    return normalizedOptions.returnMessage ? { content: result.content, toolCalls: result.toolCalls || [] } : result.content;
+  }
   const protocol = normalizeProviderProtocol(config.protocol);
   const temperature = normalizedOptions.temperature ?? 0.25;
   const timeoutMs = normalizedOptions.timeoutMs ?? 60_000;

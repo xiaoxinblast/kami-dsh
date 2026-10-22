@@ -1,4 +1,5 @@
 import http from "node:http";
+import { runtimeOptions } from "./src/runtime-context.mjs";
 import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -131,12 +132,14 @@ const runningBackgroundTasks = new Map();
 const CANCELLED = Symbol("taskCancelled");
 
 function beginBackgroundRun(taskId) {
-  const control = { cancelRequested: false };
+  let resolveSettled;
+  const control = { cancelRequested: false, settled: new Promise((resolve) => { resolveSettled = resolve; }), resolveSettled: () => resolveSettled() };
   if (taskId) runningBackgroundTasks.set(taskId, control);
   return control;
 }
 
 function endBackgroundRun(taskId) {
+  runningBackgroundTasks.get(taskId)?.resolveSettled();
   if (taskId) runningBackgroundTasks.delete(taskId);
 }
 
@@ -8358,7 +8361,7 @@ async function serveStatic(req, res, url) {
 
 // 工作台只在 Directus 资产后台上运行。JSON 存储仅供单元测试，
 // 用它跑真实翻译会在没有术语、记忆与风格规范的情况下静默产出低质译文。
-if (process.env.KAMI_STORE !== "directus") {
+if (!runtimeOptions().embedded && process.env.KAMI_STORE !== "directus") {
   console.error([
     "[Kami] 拒绝启动：KAMI_STORE 必须为 directus。",
     "本工作台的语言资产全部存放在 Directus，缺少它的翻译结果没有参考价值。",
@@ -8369,15 +8372,16 @@ if (process.env.KAMI_STORE !== "directus") {
 
 try {
   // 日志先接管 console，再初始化：启动阶段的报错也要留在日志里。
-  installConsoleCapture();
+  if (!runtimeOptions().embedded) installConsoleCapture();
   loadPreviousRunLogs();
   logInfo("工作台进程启动", { version: process.env.npm_package_version || "", port: PORT, pid: process.pid });
-  startHeapWatchdog();
+  if (!runtimeOptions().embedded) startHeapWatchdog();
   await initializeStore();
   await recoverInterruptedBatchWorkers();
   await recoverInterruptedImportTasks();
   await recoverLegacyReferenceIngestTasks();
 } catch (error) {
+  if (runtimeOptions().embedded) throw error;
   console.error(`[Kami] 启动失败\n${error.message}`);
   process.exit(1);
 }
@@ -8406,6 +8410,20 @@ const syncLearningJobTask = createLearningJobTaskBridge({
   },
   onError: (error) => console.warn(`[Kami] 评测任务同步到任务中心失败（不影响评测）：${error?.message || error}`)
 });
+
+async function disposeEmbeddedWorkbench() {
+  if (!runtimeOptions().embedded) return;
+  if (conflictScanTimer) clearInterval(conflictScanTimer);
+  for (const control of batchWorkers.values()) control.pauseRequested = true;
+  for (const control of runningBackgroundTasks.values()) control.cancelRequested = true;
+  await Promise.allSettled([
+    ...[...batchWorkers.values(), ...batchQaWorkers.values()].map((control) => control.promise),
+    ...contextAnalysisTasks.values(), ...consistencyCheckTasks.values(), ...termSurveyTasks.values(),
+    ...[...runningBackgroundTasks.values()].map((control) => control.settled),
+    ...referenceIngestQueues.values(), evaluationJobs.stop(), styleEvaluationJobs.stop()
+  ]);
+  await matcherPool.close();
+}
 
 const evaluationJobs = createEvaluationJobRunner({
   benchmark: benchmarkTranslationSkill,
@@ -8814,7 +8832,7 @@ async function shutdownManagedWorkbench() {
 }
 
 const HOST = process.env.KAMI_HOST || "127.0.0.1";
-server.listen(PORT, HOST, () => {
+if (!runtimeOptions().embedded) server.listen(PORT, HOST, () => {
   console.log(`Kami Localization Workbench: http://127.0.0.1:${PORT}`);
   rescheduleConflictScan();
   // 启动先扫一遍：上一次被重启打断的任务不该在任务中心永远转圈。
@@ -8834,3 +8852,5 @@ server.listen(PORT, HOST, () => {
     console.log(`[Kami] 关闭最后一个页面 ${WORKBENCH_CLOSE_GRACE_MS / 1000} 秒后自动停止；最小化挂机时心跳失联 ${Math.round(WORKBENCH_HEARTBEAT_GRACE_MS / 60_000)} 分钟才视为关闭，后台任务执行期间不会停止。`);
   }
 });
+
+export { apiHandler, disposeEmbeddedWorkbench };

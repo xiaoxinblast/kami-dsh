@@ -1,9 +1,10 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runtimeOptions } from "./runtime-context.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
-export const LOG_DIRECTORY = process.env.KAMI_LOG_DIRECTORY || join(PROJECT_ROOT, "data", "runtime", "logs");
+export const LOG_DIRECTORY = runtimeOptions().dataDirectory ? join(runtimeOptions().dataDirectory, "runtime", "logs") : process.env.KAMI_LOG_DIRECTORY || join(PROJECT_ROOT, "data", "runtime", "logs");
 export const LOG_FILE = join(LOG_DIRECTORY, "kami.log");
 const ROTATED_LOG_FILE = `${LOG_FILE}.1`;
 /** 单个日志文件的上限：超过就轮转成 .1，避免工作台长开把磁盘写满。 */

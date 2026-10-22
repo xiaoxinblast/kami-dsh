@@ -1,4 +1,5 @@
 import { summarizeBatchSegments } from "../public/batch-status.js";
+import { runtimeOptions } from "./runtime-context.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
@@ -86,6 +87,7 @@ const DIRECTUS_READ_ATTEMPTS = 3;
 const DIRECTUS_READ_TIMEOUT_MS = 30_000;
 
 async function request(path, { method = "GET", body, timeoutMs = 10_000 } = {}) {
+  if (runtimeOptions().store) return runtimeOptions().store.request(path, { method, body });
   const { baseUrl, token } = config();
   // 报错信息会被写进任务记录并显示在界面上：去掉查询串、截断长度，
   // 否则一条 431 里那几 KB 的过滤条件会把任务行撑爆。
@@ -304,6 +306,7 @@ function isMissingItem(error) {
 }
 
 export async function initializeDirectusStore() {
+  if (runtimeOptions().store) return;
   const health = await fetch(`${config().baseUrl}/server/ping`, { signal: AbortSignal.timeout(5_000) });
   if (!health.ok) throw new Error(`Directus health check failed (${health.status})`);
   await Promise.all([
@@ -3330,6 +3333,7 @@ export async function getDirectusTrainingRun(id) {
 }
 
 export function getDirectusMetadata() {
+  if (runtimeOptions().store) return { type: "sqlite", label: "本地 SQLite", directory: runtimeOptions().dataDirectory };
   const { baseUrl } = config();
   return {
     type: "directus",

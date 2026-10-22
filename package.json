@@ -1,11 +1,11 @@
 {
-  "name": "kami-localization-workbench",
-  "version": "0.7.0",
+  "name": "kami-dsh",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --use-system-ca --env-file=directus/.env server.mjs",
-    "dev": "node --use-system-ca --env-file=directus/.env --watch server.mjs",
+    "start": "node scripts/check-bundle.mjs",
+    "dev": "node --test --watch tests/sqlite-store.test.mjs tests/dsh-policy.test.mjs tests/dsh-workbench.test.mjs",
     "test": "node --import ./tests/setup-env.mjs --test",
     "directus:up": "docker compose --env-file directus/.env -f directus/docker-compose.yml up -d",
     "directus:down": "docker compose --env-file directus/.env -f directus/docker-compose.yml down",
@@ -15,10 +15,13 @@
     "directus:prune-history": "node --env-file=directus/.env scripts/prune-directus-revisions.mjs",
     "taxonomy:migrate": "node --env-file=directus/.env scripts/migrate-content-taxonomy.mjs",
     "directus:drop-shares": "node --env-file=directus/.env scripts/cleanup-shares-collection.mjs",
-    "directus:snapshot": "docker compose --env-file directus/.env -f directus/docker-compose.yml exec -T directus node /directus/cli.js schema snapshot --yes /directus/schema/snapshot.yaml"
+    "directus:snapshot": "docker compose --env-file directus/.env -f directus/docker-compose.yml exec -T directus node /directus/cli.js schema snapshot --yes /directus/schema/snapshot.yaml",
+    "dsh:check": "node scripts/check-bundle.mjs",
+    "migrate:local": "node scripts/migrate-local.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24.2",
+    "dsh": "0.2.1-rc.2"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.9",
@@ -29,5 +32,46 @@
   },
   "overrides": {
     "uuid": "11.1.1"
+  },
+  "description": "Local Japanese-to-Simplified-Chinese translation workbench for DeepSeek Harness",
+  "main": "./dsh/index.mjs",
+  "exports": {
+    ".": "./dsh/index.mjs",
+    "./agent": "./dsh/agent.mjs",
+    "./client": "./dsh/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./dsh/icon.svg",
+    "./agent/locale/*.json": "./locale/*.json",
+    "./agent/icon": "./dsh/icon.svg"
+  },
+  "files": [
+    "dsh/",
+    "src/",
+    "public/batch-status.js",
+    "server.mjs",
+    "cordis.patch.yml",
+    "locale/",
+    "scripts/migrate-local.mjs",
+    "docs/DSH.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-session"
+      ]
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiaoxinblast/kami-dsh.git"
   }
 }

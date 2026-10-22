@@ -10,6 +10,7 @@
  * object injected by the HTTP layer, which keeps it unit-testable with fakes
  * or a mock OpenAI server.
  */
+import { runtimeOptions, withRuntimeCall } from "./runtime-context.mjs";
 
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -122,6 +123,9 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
 
   const jobs = new Map();
   let running = false;
+  let runningPromise;
+  let stopping = false;
+  const callContexts = new Map();
   /** 同一个 job 的回调必须按顺序落地，否则后到的旧进度会盖掉新进度。 */
   const changeChains = new Map();
 
@@ -225,16 +229,16 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
   }
 
   function pumpQueue() {
-    if (running) return;
+    if (running || stopping) return;
     running = true;
-    (async () => {
+    runningPromise = (async () => {
       try {
-      while (true) {
+      while (!stopping) {
         const next = [...jobs.values()].find((job) => job.status === QUEUED);
         if (!next) break;
         // 收尾阶段的意外异常（例如检查点正好被别的句柄挡住）只记日志：
         // 已经有终态的评测不能被降级成失败，队列也不能因此停摆。
-        await execute(next).catch((error) => {
+        await withRuntimeCall(callContexts.get(next.jobId) || {}, () => execute(next)).catch((error) => {
           if ([COMPLETED, FAILED].includes(next.status)) {
             console.error("评测收尾异常（评测结论已落盘，保持原状态）", error);
             return undefined;
@@ -532,7 +536,21 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     async initialize() {
       await restoreFromDisk();
     },
+    async stop() {
+      stopping = true;
+      await runningPromise;
+      for (const job of jobs.values()) {
+        if (job.status !== QUEUED) continue;
+        job.status = INTERRUPTED;
+        job.error = "工作台已停止，可续跑剩余样本";
+        job.updatedAt = now();
+        await persist(job);
+        notifyChanged(job);
+      }
+      await Promise.allSettled([...changeChains.values()]);
+    },
     async create({ scope, champion, challenger, trajectories, requireCost = false, forceRegenerate = false }) {
+      if (stopping) throw new Error("评测队列已停止");
       const evaluationProfile = evaluationProfileForContentType(scope?.contentType);
       const [resolvedChampion, resolvedChallenger] = await Promise.all([
         deps.getSkill(String(champion.id || ""), scope),
@@ -569,6 +587,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         finishedAt: ""
       };
       jobs.set(job.jobId, job);
+      callContexts.set(job.jobId, runtimeOptions());
       await persist(job);
       notifyChanged(job);
       pumpQueue();
@@ -587,11 +606,13 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       return active ? publicJob(active) : null;
     },
     async resume(jobId) {
+      if (stopping) throw new Error("评测队列已停止");
       const job = jobs.get(String(jobId));
       if (!job) return null;
       if (!RESUMABLE_STATUSES.has(job.status)) return publicJob(job);
       if (Object.keys(job.caseSamples).length >= job.requestedCaseIds.length) return publicJob(job);
       job.status = QUEUED;
+      callContexts.set(job.jobId, runtimeOptions());
       job.error = "";
       job.updatedAt = now();
       await persist(job);
@@ -607,6 +628,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
      * 的 case，也就是刚才失败的那几组，已成功的样本原样沿用。
      */
     async retryFailed(jobId) {
+      if (stopping) throw new Error("评测队列已停止");
       const job = jobs.get(String(jobId));
       if (!job) return null;
       // 只有跑完/中断/失败的任务才谈得上"重试失败样本"：正在排队或正在跑的别插队。
@@ -628,6 +650,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       job.caseFailures = {};
       job.caseFailureCodes = {};
       job.status = QUEUED;
+      callContexts.set(job.jobId, runtimeOptions());
       job.error = "";
       job.finishedAt = "";
       job.updatedAt = now();

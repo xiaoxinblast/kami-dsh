@@ -1,0 +1,19 @@
+- insert:
+    - id: kami-workbench
+      name: kami-dsh
+    - id: preset-kami-translator
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: kami-translator
+        name: Kami 翻译工作台
+        description: 日语到简体中文的本地翻译、审校与学习工作台
+        order: 10
+        plugins:
+          - name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: 你是日语到简体中文的专业本地化 agent。
+          - name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - name: '@deepseek-ai/dsh-time-context'
+          - name: kami-dsh/agent

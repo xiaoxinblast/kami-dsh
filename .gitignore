@@ -3,6 +3,8 @@
 data/
 *.log
 node_modules/
+.cache/
+*.tgz
 directus/.env
 tmp/
 
