@@ -1,8 +1,13 @@
+export function sessionModelRoute(ctx, agent) {
+  const pending = ctx.sessionProjections.stateOf(agent.session, "modelSelection")?.pending;
+  return pending || agent.session.requestHeader()?.config || ctx.agentDefaultModel.currentSelection();
+}
+
 /** Convert the existing prompt protocol to DSH's provider-neutral message stream. */
 export function createModelAdapter(ctx, llm) {
   return async (messages, options = {}) => {
     const route = options.route;
-    if (!route?.provider || !route?.model) throw new Error("请先在 DSH 翻译会话中发送一条消息，以确定本次任务使用的模型");
+    if (!route?.provider || !route?.model) throw new Error("请先在 DSH 中配置并选择可用模型");
     const blocks = async (content) => typeof content === "string" ? (content ? [{ type: "text", text: content }] : []) : ctx.attachments.admitPromptContent((content || []).map((block) => {
       if (block.type === "text") return block;
       const image = block.type === "image_url" && /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(block.image_url?.url || "");

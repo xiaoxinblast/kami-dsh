@@ -1,6 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createModelAdapter } from "../dsh/model-adapter.mjs";
+import { createModelAdapter, sessionModelRoute } from "../dsh/model-adapter.mjs";
+
+test("new sessions use the DSH default model and pending selections override previous requests", () => {
+  let pending;
+  let header;
+  const ctx = { sessionProjections: { stateOf: () => ({ pending }) }, agentDefaultModel: { currentSelection: () => ({ provider: "configured", model: "default" }) } };
+  const agent = { session: { requestHeader: () => header } };
+  assert.equal(sessionModelRoute(ctx, agent).model, "default");
+  header = { config: { provider: "configured", model: "previous" } };
+  assert.equal(sessionModelRoute(ctx, agent).model, "previous");
+  pending = { provider: "configured", model: "selected" };
+  assert.equal(sessionModelRoute(ctx, agent).model, "selected");
+});
 
 let llm;
 try { llm = await import("@deepseek-ai/dsh-llm"); } catch {

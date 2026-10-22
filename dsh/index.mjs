@@ -2,9 +2,9 @@ import { join } from "node:path";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import * as llm from "@deepseek-ai/dsh-llm";
 import { createWorkbench } from "./workbench.mjs";
-import { createModelAdapter } from "./model-adapter.mjs";
+import { createModelAdapter, sessionModelRoute } from "./model-adapter.mjs";
 
-export const inject = ["llm", "commands", "attachments"];
+export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel"];
 
 export async function apply(ctx) {
   const profile = process.env.DSH_PROFILE || "desktop";
@@ -15,7 +15,7 @@ export async function apply(ctx) {
   const contextFor = (agent, signal, human = false) => ({
     human,
     cwd: agent?.session?.header?.cwd || agent?.session?.cwd || agent?.session?.workingDirectory,
-    modelRoute: agent?.session?.requestHeader()?.config,
+    modelRoute: sessionModelRoute(ctx, agent),
     signal: AbortSignal.any([abort.signal, signal || new AbortController().signal])
   });
   ctx.effect(() => ctx.reflect.provide("kamiWorkbench", { ready, contextFor }));

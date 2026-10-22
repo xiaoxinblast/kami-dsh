@@ -34,6 +34,8 @@ window.__ModuleLoader__.load({
       const sessions = Object.values(byId || {});
       const active = sessions.find((session) => session.retainedBy?.mainView > 0)?.id || sessions[0]?.id || "";
       const [session, setSession] = useState("");
+      const [sessionDirectory, setSessionDirectory] = useState("");
+      const [agentInstruction, setAgentInstruction] = useState("");
       const sessionId = session || active;
       const [project, setProject] = useState("");
       const [projects, setProjects] = useState([]);
@@ -158,11 +160,15 @@ window.__ModuleLoader__.load({
       return h("main", { className: "kami" }, h("style", null, css), h("header", null, h("div", { className: "kami-logo", "aria-hidden": true }, "K"), h("div", null, h("h1", null, t("Kami 翻译工作台")), h("p", null, t("日语 → 简体中文 · 本地资产与任务")))),
         h("div", { className: "kami-tools" }, h("select", { value: project, "aria-label": t("请选择项目"), onChange: (event) => { setProject(event.target.value); setRun(null); setOffset(0); } }, h("option", { value: "" }, t("请选择项目")), ...projects.map((item) => h("option", { key: item.id, value: item.id }, item.name))), h("input", { value: projectName, placeholder: t("新项目名称"), onChange: (event) => setProjectName(event.target.value) }), button("新建项目", async () => { const value = await invoke("/api/projects", "POST", { name: projectName }); await loadProjects(); setProject(value.project.id); setProjectName(""); }), button("刷新", refresh)),
         sessions.length > 0 && h("label", { className: "caption" }, t("关联会话"), " ", h("select", { value: sessionId, onChange: (event) => setSession(event.target.value) }, ...sessions.map((item) => h("option", { key: item.id, value: item.id }, item.title || item.id.slice(0, 8))))),
+        h("details", null, h("summary", null, "翻译 agent 会话"),
+          h("div", { className: "kami-tools" }, h("input", { placeholder: "工作目录（绝对路径）", "aria-label": "翻译工作目录", value: sessionDirectory, onChange: (event) => setSessionDirectory(event.target.value), style: { minWidth: 280 } }), button("新建翻译会话", async () => { if (!/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(sessionDirectory.trim())) throw new Error("请输入工作目录的绝对路径"); const value = await props.createSession(sessionDirectory.trim()); setSession(value.sessionId); setNotice("已创建 Kami 翻译预设会话"); })),
+          h("textarea", { "aria-label": "委托翻译 agent 的任务", placeholder: "描述要让 agent 完成的翻译、检索或 QA 任务", value: agentInstruction, onChange: (event) => setAgentInstruction(event.target.value) }),
+          button("发送给翻译 agent", async () => { if (!agentInstruction.trim()) throw new Error("请输入任务内容"); await props.prompt(sessionId, agentInstruction.trim()); setAgentInstruction(""); setNotice("任务已发送，可在关联会话中查看 agent 的工具调用和回复"); })),
         h("nav", { "aria-label": "Kami" }, ...["翻译", "资产", "审校", "参考资料", "学习", "任务", "设置"].map((label) => h("button", { key: label, "aria-selected": tab === label, onClick: () => { setTab(label); setOffset(0); } }, t(label)))),
         busy && h("p", { role: "status" }, t("准备中…")), error && h("div", { className: "notice error", role: "alert" }, error), notice && h("div", { className: "notice", role: "status" }, notice), content);
     }
     return {
-      inject: ["slots", "locale", "remote", "remote.commands", "layout"],
+      inject: ["slots", "locale", "remote", "remote.commands", "remote.session", "layout"],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register("kami-dsh", { zh, en: words }));
         const call = async (session, operation) => {
@@ -173,7 +179,9 @@ window.__ModuleLoader__.load({
           if (outcome?.kind !== "success") throw new Error(outcome?.text || "Kami command unavailable");
           return JSON.parse(outcome.text || "null");
         };
-        ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "kami-workbench", locale: "kami-dsh", inject: () => ({ call }) }, Workbench));
+        const createSession = async (cwd) => { const result = await ctx.remote.session.create({ cwd, agentPreset: "kami-translator" }); if (!result.ok) throw new Error(result.error.message); return result.value; };
+        const prompt = async (sessionId, text) => { const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
+        ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "kami-workbench", locale: "kami-dsh", inject: () => ({ call, createSession, prompt }) }, Workbench));
         ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({ name: "sidebar.panellist", id: "kami-workbench", label: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), order: 5, locale: "kami-dsh" }, () => h("span", { "aria-hidden": true }, "K")));
       }
     };
