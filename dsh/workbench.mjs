@@ -2,7 +2,7 @@ import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { join, resolve, isAbsolute, relative } from "node:path";
 import { readFile, writeFile, mkdir, realpath, stat } from "node:fs/promises";
-import { configureRuntime, withRuntimeCall } from "../src/runtime-context.mjs";
+import { configureRuntime, runtimeOptions, withRuntimeCall } from "../src/runtime-context.mjs";
 import { SqliteStore } from "../src/sqlite-store.mjs";
 
 const HUMAN_ACTION = /\/feedback\/accept$|\/term-import\/commit$|\/assets-import\/commit$|\/(?:activate|rollback|approve|accept|apply)$|\/qa\/resolve$/;
@@ -19,12 +19,12 @@ export function assertOperation({ method = "GET", path }, human = false) {
 
 export async function createWorkbench({ dataDirectory, modelAdapter }) {
   const store = new SqliteStore(join(dataDirectory, "kami.sqlite"));
-  configureRuntime({ embedded: true, dataDirectory, store, modelAdapter });
+  configureRuntime({ embedded: true, dataDirectory, store, modelAdapter, dispatch: (operation) => invoke(operation, { ...runtimeOptions(), human: true }) });
   let application;
   try { application = await import("../server.mjs"); }
   catch (error) { store.close(); throw error; }
   let closed = false;
-  const invoke = async (operation, context = {}) => {
+  async function invoke(operation, context = {}) {
     if (closed) throw new Error("Workbench is stopped");
     const method = operation.method || "GET";
     const url = assertOperation({ ...operation, method }, context.human);

@@ -2575,6 +2575,8 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
 }
 
 async function translateBatchSegment(body, path = "/api/translate") {
+  const dispatch = runtimeOptions().dispatch;
+  if (dispatch) return dispatch({ method: "POST", path, body });
   const response = await fetch(`http://127.0.0.1:${PORT}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },

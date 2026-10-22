@@ -127,7 +127,7 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
     listBatchRuns: async () => { const summary = summarizeBatchSegments(run.segments); return [{ ...run, segments: undefined, totalSegments: summary.total, completedSegments: summary.completed, failedSegments: summary.failed, qaPending: summary.qaIncomplete, status: summary.failed ? "needs_attention" : "completed" }]; },
     listQaTasks: async () => [], listBackgroundTasks: async () => [...tasks.values()], assertActiveLocale: (value) => value, ACTIVE_LOCALES: ["zh-CN"],
     settleReadSections,
-    readJsonBody, json, fetch, console
+    readJsonBody, json, fetch, console, runtimeOptions: () => ({})
   });
   vm.runInContext(stageCode, context);
   const handler = vm.runInContext(`(async (req, res, url) => { ${routeCode} })`, context);
