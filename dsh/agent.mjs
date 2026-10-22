@@ -4,7 +4,8 @@ import { readdir } from "node:fs/promises";
 export const inject = ["tools", "systemPrompt", "kamiWorkbench"];
 
 export function apply(ctx) {
-  ctx.effect(() => ctx.tools.restrict({ allow: [] }));
+  const inheritedTools = ctx.tools.schemas().map((tool) => tool.name).filter((name) => name !== "run_code");
+  if (inheritedTools.length) ctx.effect(() => ctx.tools.restrict({ deny: inheritedTools }));
   ctx.effect(() => ctx.tools.presentAs("native"));
   ctx.systemPrompt.section({
     name: "kami-translator",

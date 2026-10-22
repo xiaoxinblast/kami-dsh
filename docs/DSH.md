@@ -50,7 +50,7 @@ npm run migrate:local -- --source-env '<旧项目>\directus\.env' --source-data 
 
 工具和页面调用相同业务操作。页面通过 DSH Commands Remote 调用；agent 使用 `kami_workbench`、`kami_file_import`、`kami_help`。批准、正式采纳、激活和删除保留为用户操作。大结果分页读取；导出文件返回本地路径，不把二进制塞进模型上下文。
 
-专用预设隐藏从 Host 继承的通用工具，使用原生工具调用；该限制只作用于 Kami 预设。批次翻译与 QA 的内部调用也在进程内分发，不回调本机 HTTP 端口。
+专用预设过滤挂载时已有的 Host 通用工具，保留 Kami 工具向会话继承，并使用原生工具调用；该限制只作用于 Kami 预设。DSH 另行注入的会话级工具仍依宿主配置。批次翻译与 QA 的内部调用也在进程内分发，不回调本机 HTTP 端口。
 
 ## 验证
 

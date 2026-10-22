@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-test("Kami preset hides inherited Host tools and keeps its own native tools", { skip: !process.env.DSH_TEST_LLM_MODULE, timeout: 5000 }, async () => {
+test("Kami preset keeps its tools visible to child sessions while hiding inherited Host tools", { skip: !process.env.DSH_TEST_LLM_MODULE, timeout: 5000 }, async () => {
   const sdk = process.env.DSH_TEST_LLM_MODULE;
   const [{ Context }, { default: SystemPrompt }, { default: ToolRuntime, defineTool }, { createScope }] = await Promise.all([
     import(new URL("../../cordis/lib/index.js", sdk)),
@@ -25,6 +25,12 @@ test("Kami preset hides inherited Host tools and keeps its own native tools", { 
       const agent = await import(`data:text/javascript,${encodeURIComponent(source)}`);
       agent.apply(scope.ctx);
       assert.deepEqual(ctx.tools.schemas(key).map((tool) => tool.name).sort(), ["kami_file_import", "kami_help", "kami_workbench"]);
+      const sessionKey = {};
+      const session = createScope(ctx, sessionKey, { parent: key });
+      try {
+        assert.deepEqual(ctx.tools.schemas(sessionKey).map((tool) => tool.name).sort(), ["kami_file_import", "kami_help", "kami_workbench"]);
+        assert.equal(ctx.tools.modeFor(sessionKey), "native");
+      } finally { await session.dispose(); }
       assert.deepEqual(ctx.tools.schemas().map((tool) => tool.name), ["host_shell"]);
       assert.equal(ctx.tools.modeFor(key), "native");
       await scope.dispose();
