@@ -162,7 +162,7 @@ window.__ModuleLoader__.load({
         busy && h("p", { role: "status" }, t("准备中…")), error && h("div", { className: "notice error", role: "alert" }, error), notice && h("div", { className: "notice", role: "status" }, notice), content);
     }
     return {
-      inject: ["slots", "locale", "remote", "layout"],
+      inject: ["slots", "locale", "remote", "remote.commands", "layout"],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register("kami-dsh", { zh, en: words }));
         const call = async (session, operation) => {
