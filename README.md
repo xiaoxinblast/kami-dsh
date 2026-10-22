@@ -6,6 +6,6 @@
 
 安装、旧资产迁移、备份与验证方法见 [DSH 使用说明](docs/DSH.md)。
 
-在 DSH 插件页面添加 `https://github.com/xiaoxinblast/kami-dsh#main` 即可从 GitHub 安装；更新需在插件管理器中重新发起安装，并按提示重启。
+在 DSH 插件页面添加 `https://github.com/xiaoxinblast/kami-dsh#main` 即可从 GitHub 安装；更新时先卸载旧程序包，再从仓库安装，并按提示重启。本地资产保留在独立数据目录。
 
 本项目保留 Kami 的历史与业务代码。上游服务版说明保存在 [原版说明](docs/KAMI-UPSTREAM.md)。
