@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
       "Kami 翻译工作台": "Kami Workbench", "日语 → 简体中文 · 本地资产与任务": "Japanese → Simplified Chinese · Local assets and jobs",
       "翻译": "Translate", "资产": "Assets", "审校": "Review", "参考资料": "References", "学习": "Learning", "任务": "Jobs", "设置": "Settings",
       "新项目名称": "New project name", "新建项目": "New project", "请选择项目": "Select a project", "关联会话": "Session", "刷新": "Refresh",
-      "先建立翻译会话": "Start a translation session first", "请先选择 Kami 翻译预设并发送一条消息，再打开工作台。": "Select the Kami preset and send a message before opening the workbench.",
+      "先建立翻译会话": "Start a translation session first", "填写工作目录并新建翻译会话，或选择已有会话。": "Create a translation session with a working directory, or select an existing session.",
       "导入待译文件": "Import a file", "粘贴日语原文": "Paste Japanese source", "创建批次": "Create batch", "文件队列": "Files", "暂无文件": "No files yet",
       "开始 / 续跑": "Start / resume", "暂停": "Pause", "导出文件": "Export", "保存修改": "Save edits", "原文": "Source", "译文": "Translation", "采纳为正式译法": "Approve translation",
       "段": "segments", "术语": "Terms", "翻译记忆": "Translation memory", "搜索": "Search", "上一页": "Previous", "下一页": "Next", "已显示": "Showing", "共": "of",
@@ -106,7 +106,7 @@ window.__ModuleLoader__.load({
       const empty = (label = "暂无条目") => h("div", { className: "empty" }, t(label));
       const table = (items) => items?.length ? h("table", null, h("thead", null, h("tr", null, ...["原文", "译文", "状态"].map((label) => h("th", { key: label }, t(label))))), h("tbody", null, ...items.map((item, index) => h("tr", { key: item.id || index }, h("td", null, item.source || item.name || item.filename || item.title), h("td", null, item.target || item.translation || item.description || item.instruction || ""), h("td", null, item.status || item.qualityStatus || item.runState || ""))))) : empty();
       let content;
-      if (!sessionId) content = h("section", { className: "card" }, h("h3", null, t("先建立翻译会话")), h("p", null, t("请先选择 Kami 翻译预设并发送一条消息，再打开工作台。")));
+      if (!sessionId) content = h("section", { className: "card" }, h("h3", null, t("先建立翻译会话")), h("p", null, t("填写工作目录并新建翻译会话，或选择已有会话。")));
       else if (!project) content = empty("请选择项目后继续");
       else if (tab === "翻译") content = h("div", { className: "split" },
         h("aside", null, h("h3", null, t("文件队列")), ...files.map((file) => h("button", { key: file.batchId || file.id, className: "file", onClick: () => action(() => { setSegmentPage(0); return loadRun(file.batchId || file.id); }) }, file.filename || file.title, h("p", { className: "caption" }, file.runState || file.status))), !files.length && empty("暂无文件"), upload("导入待译文件", "batch", ".txt,.md,.csv,.docx,.xlsx,.xliff,.mqxliff")),
@@ -159,7 +159,7 @@ window.__ModuleLoader__.load({
         button("保存设置", async () => { const result = await invoke("/api/settings", "POST", settings); setSettings(result.settings); setNotice(result.notes?.map((item) => `${item.label}：${item.note}`).join("；") || t("已保存")); })));
       return h("main", { className: "kami" }, h("style", null, css), h("header", null, h("div", { className: "kami-logo", "aria-hidden": true }, "K"), h("div", null, h("h1", null, t("Kami 翻译工作台")), h("p", null, t("日语 → 简体中文 · 本地资产与任务")))),
         h("div", { className: "kami-tools" }, h("select", { value: project, "aria-label": t("请选择项目"), onChange: (event) => { setProject(event.target.value); setRun(null); setOffset(0); } }, h("option", { value: "" }, t("请选择项目")), ...projects.map((item) => h("option", { key: item.id, value: item.id }, item.name))), h("input", { value: projectName, placeholder: t("新项目名称"), onChange: (event) => setProjectName(event.target.value) }), button("新建项目", async () => { const value = await invoke("/api/projects", "POST", { name: projectName }); await loadProjects(); setProject(value.project.id); setProjectName(""); }), button("刷新", refresh)),
-        sessions.length > 0 && h("label", { className: "caption" }, t("关联会话"), " ", h("select", { value: sessionId, onChange: (event) => setSession(event.target.value) }, ...sessions.map((item) => h("option", { key: item.id, value: item.id }, item.title || item.id.slice(0, 8))))),
+        sessions.length > 0 && h("label", { className: "caption" }, t("关联会话"), " ", h("select", { value: sessionId, onChange: (event) => setSession(event.target.value) }, ...sessions.map((item) => h("option", { key: item.id, value: item.id }, item.title || item.id.replace(/^session-/, "").slice(0, 8))))),
         h("details", null, h("summary", null, "翻译 agent 会话"),
           h("div", { className: "kami-tools" }, h("input", { placeholder: "工作目录（绝对路径）", "aria-label": "翻译工作目录", value: sessionDirectory, onChange: (event) => setSessionDirectory(event.target.value), style: { minWidth: 280 } }), button("新建翻译会话", async () => { if (!/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(sessionDirectory.trim())) throw new Error("请输入工作目录的绝对路径"); const value = await props.createSession(sessionDirectory.trim()); setSession(value.sessionId); setNotice("已创建 Kami 翻译预设会话"); })),
           h("textarea", { "aria-label": "委托翻译 agent 的任务", placeholder: "描述要让 agent 完成的翻译、检索或 QA 任务", value: agentInstruction, onChange: (event) => setAgentInstruction(event.target.value) }),

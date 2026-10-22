@@ -50,6 +50,8 @@ npm run migrate:local -- --source-env '<旧项目>\directus\.env' --source-data 
 
 工具和页面调用相同业务操作。页面通过 DSH Commands Remote 调用；agent 使用 `kami_workbench`、`kami_file_import`、`kami_help`。批准、正式采纳、激活和删除保留为用户操作。大结果分页读取；导出文件返回本地路径，不把二进制塞进模型上下文。
 
+专用预设隐藏从 Host 继承的通用工具，使用原生工具调用；该限制只作用于 Kami 预设。批次翻译与 QA 的内部调用也在进程内分发，不回调本机 HTTP 端口。
+
 ## 验证
 
 ```powershell
@@ -58,7 +60,7 @@ npm run dsh:check
 npm pack --dry-run
 ```
 
-`tests/dsh-workbench.test.mjs` 使用隔离数据库验证项目创建、文件解析和原格式导出；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。`tests/dsh-model-adapter.test.mjs` 在 DSH SDK 模块可解析时验证真实消息协议。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
+`tests/dsh-workbench.test.mjs` 在禁止 HTTP 的条件下用隔离数据库验证项目创建、批次翻译、原格式导出和数据库重开；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。DSH SDK 可用时，`tests/dsh-model-adapter.test.mjs` 验证消息协议，`tests/dsh-agent.test.mjs` 验证预设工具范围。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
 
 UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。
 

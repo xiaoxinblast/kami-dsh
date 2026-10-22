@@ -1,5 +1,6 @@
 .docx-review-*/
 .reasonix/
+.dsh-meow/
 data/
 *.log
 node_modules/

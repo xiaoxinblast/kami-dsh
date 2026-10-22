@@ -4,6 +4,8 @@ import { readdir } from "node:fs/promises";
 export const inject = ["tools", "systemPrompt", "kamiWorkbench"];
 
 export function apply(ctx) {
+  ctx.effect(() => ctx.tools.restrict({ allow: [] }));
+  ctx.effect(() => ctx.tools.presentAs("native"));
   ctx.systemPrompt.section({
     name: "kami-translator",
     order: 50,
@@ -27,11 +29,11 @@ export function apply(ctx) {
       const limit = Math.max(1, Math.min(30, args.limit ?? 10));
       const offset = Math.max(0, args.offset ?? 0);
       const pagination = {};
-      const bounded = value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).map(([key, item]) => {
-        if (!Array.isArray(item)) return [key, item];
+      const page = (key, item) => {
         pagination[key] = { total: item.length, offset, limit, nextOffset: offset + limit < item.length ? offset + limit : null };
-        return [key, item.slice(offset, offset + limit)];
-      })) : value;
+        return item.slice(offset, offset + limit);
+      };
+      const bounded = Array.isArray(value) ? page("items", value) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, Array.isArray(item) ? page(key, item) : item])) : value;
       const text = JSON.stringify(bounded);
       if (text.length > 24_000) throw new Error("结果超过 24000 字符，请使用 limit/offset、搜索或记录 ID 缩小查询");
       return { value: bounded, pagination };
