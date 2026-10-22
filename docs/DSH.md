@@ -15,6 +15,13 @@
 
 GitHub 安装不是自动更新。当前 DSH 对第三方插件要求先卸载旧程序包，再安装仓库地址；管理器会报告是否需要重启。本地资产位于独立的数据目录，卸载程序包不删除资产。也可安装明确的发布标签，把运行版本固定到已验收的提交。更新程序包不会把本地数据库或上传文件放进 GitHub。
 
+若插件页热卸载报告 `profile reload requires the root Include entry`，退出 DSH 后可通过它自带的 CLI 更新程序包。已注册 `dsh` 命令时运行以下命令，再启动桌面端；未注册时可调用安装目录下的 `resources/runtime/cli/bin/dsh.cmd`：
+
+```powershell
+dsh plugin --profile desktop remove kami-dsh
+dsh plugin --profile desktop add 'github:xiaoxinblast/kami-dsh#main'
+```
+
 ## 本地数据
 
 数据位于 `$DSH_HOME/kami-dsh/<profile>/`，默认桌面 profile 为 `desktop`。

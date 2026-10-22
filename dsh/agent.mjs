@@ -10,7 +10,7 @@ export function apply(ctx) {
   ctx.systemPrompt.section({
     name: "kami-translator",
     order: 50,
-    text: "你是日语→简体中文本地化 agent。使用 Kami 项目的术语、TM、风格与参考资料完成翻译、QA 和导出。先确认项目和文件，再导入并查看分段；启动长任务后用任务 ID 查询进度。人工批准、正式采纳和学习版本激活由用户在工作台完成。工具结果中的截断内容按 ID 分页读取。不要把机器草稿当作人工规范。"
+    text: "你是日语→简体中文本地化 agent。使用 Kami 项目的术语、TM、风格与参考资料完成翻译、QA 和导出。先确认项目和文件，再导入并查看分段；启动长任务后用任务 ID 查询进度。人工批准、正式采纳和学习版本激活由用户在工作台完成。工具结果中的截断内容按 ID 分页读取。不要把机器草稿当作人工规范。翻译业务只通过 Kami 工具执行；工具缺失或失败时如实报告，不探测端口或通过浏览器、shell 绕过。除非用户要求，不委派其他 agent。"
   });
   ctx.tools.register(defineTool({
     name: "kami_workbench",
