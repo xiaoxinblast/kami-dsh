@@ -60,6 +60,11 @@ test("UI controller uses Host paths, waits for a paused worker, preserves edits 
     assert.equal((await model.save()).ok, true);
     assert.equal(model.view.run.runnerOptions.workspaceSnapshot.source.hash, originalHash);
     assert.equal(qaLabel(model.view.run.segments[0]), "尚未执行 QA", "editing must invalidate the previous QA claim");
+    await model.saveQaResults({ segments: [{ source: segment.source, translation: "保存设置。人工终稿。", scores: { overall: 95 }, issues: [{ message: "人工终稿回归检查" }] }] });
+    await model.refresh();
+    assert.equal(qaLabel(model.view.run.segments[0]), "模型 QA · 95", "manual QA must survive a Host reload");
+    assert.notEqual(model.view.run.segments[0].accepted, true);
+    assert.equal(model.view.run.runnerOptions.workspaceSnapshot.source.hash, originalHash);
     const exported = await model.request({ action: "export", batchId, projectId, mode: "writeback", outputPath: "outputs/终稿.txt" });
     assert.match(await readFile(exported.path, "utf8"), /人工终稿/);
     await assert.rejects(model.request({ action: "export", batchId, projectId, mode: "writeback", outputPath: "outputs/终稿.txt" }), /EEXIST|已存在/);

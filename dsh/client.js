@@ -162,16 +162,27 @@ window.__ModuleLoader__.load({
         const run = this.view.run;
         if (!run) return null;
         const drafts = this.view.drafts[run.batchId] || {};
-        const report = this.view.sections[`qa:${run.batchId}`];
         return { ...run, segments: (run.segments || []).map((segment) => {
-          const checked = report?.segments?.find((item) => item.source === segment.source && item.translation === segment.translation);
-          const score = checked?.scores?.overall;
-          const value = checked && report.sourceKind !== "batch" ? { ...segment, result: { ...segment.result, issues: checked.issues || [], qa: null,
-            qaScore: Number.isFinite(score) ? score : null, aiQa: { used: !checked.fallbackReason, status: checked.fallbackReason ? "failed" : "completed", score: score ?? null, fallbackReason: checked.fallbackReason || "" } } } : segment;
           const approved = this.view.approvals[`${run.batchId}:${segment.id}`] === segment.translation;
-          return Object.hasOwn(drafts, segment.id) ? { ...value, translation: drafts[segment.id], draft: true, accepted: false,
-            result: { ...value.result, issues: [], qa: null, qaScore: null, aiQa: { status: "not_run", used: false, score: null } } } : { ...value, accepted: value.accepted || approved };
+          return Object.hasOwn(drafts, segment.id) ? { ...segment, translation: drafts[segment.id], draft: true, accepted: false,
+            result: { ...segment.result, issues: [], qa: null, qaScore: null, aiQa: { status: "not_run", used: false, score: null } } } : { ...segment, accepted: segment.accepted || approved };
         }) };
+      }
+      async saveQaResults(report, token = this.capture(), id = token.view.selectedId) {
+        const response = await this.invoke(this.path(`/api/batch/run/${encodeURIComponent(id)}`, {}, token), "GET", undefined, token);
+        const latest = response.run || response;
+        if (editingLocked(latest)) throw new Error("当前翻译或 QA 尚未结束，报告已保留，请稍后重试");
+        let changed = false;
+        const segments = latest.segments.map((segment) => {
+          const checked = (report.segments || []).find((item) => item.source === segment.source && item.translation === segment.translation);
+          if (!checked) return segment;
+          changed = true;
+          const score = Number.isFinite(checked.scores?.overall) ? checked.scores.overall : null, failed = Boolean(checked.fallbackReason);
+          return { ...segment, result: { ...segment.result, qa: null, issues: checked.issues || [], qaScore: score,
+            aiQa: { used: score !== null && !failed, status: failed ? "failed" : score !== null ? "completed" : "not_run", score, fallbackReason: checked.fallbackReason || "" } } };
+        });
+        if (changed) await this.invoke("/api/batch/run", "POST", this.body({ batchId: id, segments }, token), token);
+        await this.loadRun(token, id);
       }
       edit(id, value) {
         if (editingLocked(this.view.run)) return false;
@@ -417,7 +428,7 @@ window.__ModuleLoader__.load({
       useEffect(() => { const node = nodes.current.get(focus); if (node) { node.scrollIntoView({ block: "nearest" }); node.focus({ preventScroll: true }); } }, [focus, pageStart]);
       const inspect = () => model.perform(qaKey, async (token) => {
         const value = await model.invoke("/api/auto-qa", "POST", scopeArgs(model, token, { batchId: id, source: run.segments.map((segment) => segment.source).join("\n"), translation: run.segments.map((segment) => segment.translation || "").join("\n") }), token);
-        token.view.sections[qaKey] = value; await model.loadRun(token, id);
+        token.view.sections[qaKey] = value; await model.saveQaResults(value, token, id);
       });
       const savedReport = () => model.loadSection(qaKey, (token) => model.invoke(model.path(`/api/qa/batch/${encodeURIComponent(id)}`, {}, token), "GET", undefined, token));
       const approve = (segment) => model.perform(`approve:${id}:${segment.id}`, async (token) => {

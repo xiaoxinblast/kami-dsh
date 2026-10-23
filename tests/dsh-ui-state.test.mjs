@@ -90,6 +90,25 @@ test("QA stage follows current segment results and a manual check stays visibly 
   assert.equal(qaSummary(run).label, "尚未执行 QA");
 });
 
+test("manual QA survives reopening and never attaches to a translation changed during the check", async () => {
+  const { WorkbenchModel, qaLabel } = await modelModule();
+  const f = fixture(WorkbenchModel);
+  await f.model.refresh(); await f.model.select("old");
+  const report = { segments: [{ source: "保存", translation: "旧译文", scores: { overall: 93 }, issues: [{ severity: "minor", message: "术语不一致" }] }] };
+  await f.model.saveQaResults(report);
+  const reopened = new WorkbenchModel({ sessionId: "reopened", call: f.model.call });
+  await reopened.refresh(); await reopened.select("old");
+  assert.equal(qaLabel(reopened.displayRun().segments[0]), "模型 QA · 93");
+  assert.equal(reopened.displayRun().segments[0].result.issues[0].message, "术语不一致");
+  assert.notEqual(reopened.displayRun().segments[0].accepted, true, "QA must not approve a translation");
+  f.runs.old.segments[0] = { ...f.runs.old.segments[0], translation: "另一会话的新译文", result: null };
+  await f.model.saveQaResults(report);
+  assert.equal(f.runs.old.segments[0].translation, "另一会话的新译文");
+  assert.equal(f.runs.old.segments[0].result, null, "a stale report must not check a different target");
+  f.runs.old.workflow.writeBusy = true;
+  await assert.rejects(f.model.saveQaResults(report), /尚未结束/);
+});
+
 test("polling discovers agent-created batches without switching a manually reviewed task", async () => {
   const { WorkbenchModel } = await modelModule();
   const f = fixture(WorkbenchModel);
