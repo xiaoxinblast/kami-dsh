@@ -22,7 +22,8 @@ test("DSH page requests use a direct Remote instead of recording slash commands"
   await plugin.apply({
     inject(_keys, callback) { return callback(this); },
     remote, effect: (callback) => callback(), locale: { register() {} },
-    slots: { inject: (_name, callback) => callback(), register: (options) => { if (options.name === "main") props = options.inject(); } }
+    sidebarRightTabs: { register: () => () => {} },
+    slots: { inject: (_name, callback) => callback(), register: (options) => { if (options.name === "sidebar.right.pane.tab") props = options.inject(); } }
   });
   assert.deepEqual(await props.call("working-session", { path: "/api/projects" }), { projects: [] });
   assert.equal(calls.length, 1);
@@ -91,7 +92,8 @@ test("installed DSH Client and Host keep workbench reads and human imports out o
       await plugin.apply({
         inject(keys, callback) { return ctx.inject(keys, (child) => callback({ ...this, remote: child.remote })); },
         remote: ctx.remote, effect: (callback) => ctx.effect(callback), locale: { register() {} },
-        slots: { inject: (_name, callback) => callback(), register: (options) => { if (options.name === "main") props = options.inject(); } }
+        sidebarRightTabs: { register: () => () => {} },
+        slots: { inject: (_name, callback) => callback(), register: (options) => { if (options.name === "sidebar.right.pane.tab") props = options.inject(); } }
       });
       const invoke = (operation, agentId = "working-session") => props.call(agentId, operation);
       const project = (await invoke({ method: "POST", path: "/api/projects", body: { name: "隔离验收项目" } })).project;

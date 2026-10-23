@@ -32,15 +32,16 @@ async function mountClient(call) {
   await plugin.apply({
     inject(_keys, callback) { return callback(this); },
     effect: (callback) => callback(), locale: { register() {} }, remote: { async $mount() { return () => {}; } },
-    slots: { inject: (_name, callback) => callback(), register: (options, value) => { if (options.name === "main") component = value; } }
+    sidebarRightTabs: { register: () => () => {} },
+    slots: { inject: (_name, callback) => callback(), register: (options, value) => { if (options.name === "sidebar.right.pane.tab") component = value; } }
   });
-  const props = { call: async (...args) => { pending++; try { return await call(...args); } finally { pending--; } }, useSessions: (select) => select({ byId: { session: { id: "session", retainedBy: { mainView: 1 } } } }) };
+  const props = { sessionId: "session", useTabInfo: () => ({ tab: { visible: true } }), call: async (...args) => { pending++; try { return await call(...args); } finally { pending--; } }, useSessions: (select) => select({ byId: { session: { projectionValues: { agentPreset: "kami-translator" } } } }) };
   const nodes = (node) => node && typeof node === "object" ? [node, ...node.children.flatMap(nodes)] : [];
   const text = (node) => node && typeof node === "object" ? node.children.map(text).join("") : typeof node === "string" ? node : "";
   return {
     async flush() {
       for (let round = 0; round < 300; round++) {
-        if (dirty) { dirty = false; cursor = 0; tree = component(props); }
+        if (dirty) { dirty = false; cursor = 0; tree = component(props); if (typeof tree?.type === "function") tree = tree.type(tree.props); }
         for (const callback of effects.splice(0)) callback();
         await new Promise((resolve) => setTimeout(resolve, 2));
         if (!dirty && !effects.length && !pending) return;
@@ -63,7 +64,7 @@ test("workspace guide UI uses paths, preserves legacy guides, and renders every 
   const { fs, close } = await workspaceFs();
   const calls = [];
   const workbench = await createWorkbench({ dataDirectory: join(directory, "data") });
-  const context = { human: true, cwd: workspace, fs, isKamiSession: false };
+  const context = { human: true, cwd: workspace, fs, isKamiSession: true };
   try {
     await mkdir(join(workspace, "rules"), { recursive: true });
     await writeFile(join(workspace, "rules/style.md"), "工作区指南：译文保持简洁。末尾校验。");
@@ -73,8 +74,7 @@ test("workspace guide UI uses paths, preserves legacy guides, and renders every 
     const client = await mountClient(async (_session, operation) => { calls.push(operation); return workbench.perform(operation, context); });
     await client.flush();
     assert.match(client.text(), /已绑定：界面验收/);
-    assert.equal(client.find("button", "发送给翻译 agent").props.disabled, true);
-    assert.ok(client.find("button", "新建翻译会话"));
+    assert.equal(client.find("button", "发送给翻译 agent").props.disabled, false);
     client.find("button", "风格指南").props.onClick();
     await client.flush();
     assert.match(client.text(), /旧版规则/);

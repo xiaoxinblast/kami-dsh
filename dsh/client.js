@@ -4,8 +4,10 @@ window.__ModuleLoader__.load({
     const React = require("react");
     const h = React.createElement;
     const { useState, useEffect, useRef } = React;
+    const WORKBENCH_KIND = "kami-workbench";
+    const WORKBENCH_TYPE = "kami-dsh/workbench";
     const words = {
-      "Kami 翻译工作台": "Kami Workbench", "日语 → 简体中文 · 本地资产与任务": "Japanese → Simplified Chinese · Local assets and jobs",
+      "Kami 翻译工作台": "Kami Workbench", "打开 Kami 翻译工作台": "Open Kami Workbench", "日语 → 简体中文 · 本地资产与任务": "Japanese → Simplified Chinese · Local assets and jobs",
       "翻译": "Translate", "资产": "Assets", "审校": "Review", "参考资料": "References", "学习": "Learning", "任务": "Jobs", "设置": "Settings",
       "新项目名称": "New project name", "新建项目": "New project", "请选择项目": "Select a project", "关联会话": "Session", "刷新": "Refresh",
       "先建立翻译会话": "Start a translation session first", "填写工作目录并新建翻译会话，或选择已有会话。": "Create a translation session with a working directory, or select an existing session.",
@@ -22,20 +24,36 @@ window.__ModuleLoader__.load({
     };
     const zh = Object.fromEntries(Object.keys(words).map((key) => [key, key]));
     const css = `
-      .kami{height:100%;overflow:auto;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;padding:calc(var(--dsh-frame-top-clearance,24px) + 12px) 28px 32px;box-sizing:border-box}
-      .kami *{box-sizing:border-box}.kami header{display:flex;gap:14px;align-items:center;margin-bottom:26px}.kami h1{font-size:23px;letter-spacing:-.6px;margin:0 0 5px;font-weight:600}.kami p{margin:6px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.6}
+      .kami{height:100%;min-width:0;overflow:auto;container-type:inline-size;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;padding:16px;box-sizing:border-box}
+      .kami *{box-sizing:border-box}.kami header{display:flex;gap:14px;align-items:center;margin-bottom:26px}.kami header>div,.kami .split>*,.kami .pairs>*{min-width:0}.kami h1{font-size:23px;letter-spacing:-.6px;margin:0 0 5px;font-weight:600}.kami p{margin:6px 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
       .kami-logo{width:46px;height:46px;border-radius:14px;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);display:grid;place-items:center;font-size:29px;font-weight:600;font-family:Georgia,serif}.kami-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0}.kami nav{display:flex;gap:4px;border-bottom:1px solid var(--dsw-alias-border-l2);margin:18px 0 22px;padding-bottom:8px;flex-wrap:wrap}
-      .kami button,.kami select,.kami input{font:inherit;font-size:13px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 11px;color:inherit;background:var(--dsw-alias-bg-layer-2)}.kami button{cursor:pointer}.kami button:hover{background:var(--dsw-alias-interactive-bg-hover)}.kami button:disabled{opacity:.5;cursor:wait}.kami button[aria-selected=true],.kami .primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);border-color:transparent}.kami nav button{border:0;background:transparent}
+      .kami button,.kami select,.kami input{max-width:100%;font:inherit;font-size:13px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 11px;color:inherit;background:var(--dsw-alias-bg-layer-2)}.kami button{cursor:pointer}.kami button:hover{background:var(--dsw-alias-interactive-bg-hover)}.kami button:disabled{opacity:.5;cursor:wait}.kami button[aria-selected=true],.kami .primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);border-color:transparent}.kami nav button{border:0;background:transparent}
       .kami textarea{font:inherit;font-size:14px;line-height:1.7;color:inherit;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px;resize:vertical;width:100%;min-height:110px}.kami textarea:focus,.kami input:focus{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.kami .split{display:grid;grid-template-columns:220px minmax(0,1fr);gap:20px}.kami .pairs{display:grid;grid-template-columns:1fr 1fr;gap:16px}.kami .card{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:16px;margin-bottom:12px;background:var(--dsw-alias-bg-layer-2)}.kami .card h3{margin:0 0 9px;font-size:15px}.kami .file{display:block;width:100%;text-align:left;margin-bottom:8px;overflow-wrap:anywhere}.kami .caption{color:var(--dsw-alias-label-tertiary);font-size:12px}.kami .segment{border-top:1px solid var(--dsw-alias-border-l2);padding:17px 0}.kami .segment p{white-space:pre-wrap;color:inherit;font-size:14px}.kami .notice{padding:11px 14px;border-radius:8px;background:var(--dsw-alias-bg-layer-3);margin:12px 0;font-size:13px;overflow-wrap:anywhere}.kami .error{color:var(--dsw-alias-state-error-primary)}
       .kami table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}.kami td,.kami th{padding:12px 10px;border-bottom:1px solid var(--dsw-alias-border-l2);text-align:left;overflow-wrap:anywhere;vertical-align:top}.kami th{color:var(--dsw-alias-label-secondary);font-weight:500}.kami .empty{padding:30px 12px;color:var(--dsw-alias-label-tertiary);text-align:center}.kami .score{font-size:42px;letter-spacing:-2px;font-weight:600}.kami label{font-size:13px;display:block;margin:8px 0}.kami .list{display:grid;gap:10px}.kami input[type=checkbox]{accent-color:var(--dsw-alias-brand-primary)}.kami progress{width:100%;accent-color:var(--dsw-alias-brand-primary)}.kami details{margin:10px 0}.kami pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 monospace}.kami summary{cursor:pointer;font-size:13px}
-      @media(max-width:1000px){.kami{padding-left:16px;padding-right:16px}.kami .split{grid-template-columns:1fr}.kami .pairs{grid-template-columns:1fr}.kami .file{display:inline-block;width:auto;margin-right:6px}}
+      @container(max-width:640px){.kami .split{grid-template-columns:1fr}.kami .pairs{grid-template-columns:1fr}.kami .file{display:inline-block;width:auto;margin-right:6px}}
     `;
+    function KamiPanelPresence({ useKamiMounted, useSessions, openWorkbench, closeWorkbench }) {
+      const sessionId = useKamiMounted((value) => value);
+      const preset = useSessions((state) => state.byId[sessionId]?.projectionValues?.agentPreset);
+      useEffect(() => {
+        if (preset === "kami-translator") openWorkbench(sessionId);
+        else if (preset) closeWorkbench(sessionId);
+      }, [sessionId, preset, openWorkbench, closeWorkbench]);
+      return null;
+    }
+    function WorkbenchOpener({ sessionId, useSessions, openWorkbench, t }) {
+      const preset = useSessions((state) => state.byId[sessionId]?.projectionValues?.agentPreset);
+      if (preset !== "kami-translator") return null;
+      const label = t("打开 Kami 翻译工作台");
+      return h("button", { type: "button", title: label, "aria-label": label, onClick: () => openWorkbench(sessionId), style: { width: 28, height: 28, border: 0, borderRadius: 8, cursor: "pointer", font: "inherit", color: "var(--dsw-alias-label-secondary)", background: "transparent" } }, "K");
+    }
+    function WorkbenchTab(props) {
+      const preset = props.useSessions((state) => state.byId[props.sessionId]?.projectionValues?.agentPreset);
+      const { tab } = props.useTabInfo();
+      return preset === "kami-translator" ? h(Workbench, { ...props, key: props.sessionId, visible: tab.visible }) : null;
+    }
     function Workbench(props) {
       const t = props.t || ((key) => key);
-      const byId = props.useSessions ? props.useSessions((state) => state.byId) : {};
-      const sessions = Object.values(byId || {});
-      const active = sessions.find((session) => session.retainedBy?.mainView > 0)?.id || "";
-      const [session, setSession] = useState("");
       const [workspace, setWorkspace] = useState(null);
       const [bindingProject, setBindingProject] = useState("");
       const [paths, setPaths] = useState({});
@@ -43,7 +61,7 @@ window.__ModuleLoader__.load({
       const [outputPath, setOutputPath] = useState("");
       const scope = useRef({});
       const [agentInstruction, setAgentInstruction] = useState("");
-      const sessionId = session || active;
+      const sessionId = props.sessionId;
       if (scope.current.sessionId !== sessionId) scope.current = { sessionId };
       const [project, setProject] = useState("");
       const [projects, setProjects] = useState([]);
@@ -99,19 +117,19 @@ window.__ModuleLoader__.load({
       else if (tab === "任务") setData({ tasks: await invoke(scoped("/api/tasks", { limit: 50 })) });
         else if (tab === "设置") { const value = await invoke("/api/settings"); setSettings(value.settings || value); setData(value); }
       };
-      useEffect(() => { setSession(""); }, [active]);
       useEffect(() => {
         if (!sessionId) { setWorkspace(null); setProject(""); return; }
+        if (props.visible === false) return;
         action(loadWorkspace);
         const timer = setInterval(() => { loadWorkspace().catch((failure) => setError(failure.message)); }, 3000);
         return () => clearInterval(timer);
-      }, [sessionId]);
-      useEffect(() => { setData({}); if (sessionId && project) action(refresh); }, [sessionId, project, workspace?.workspace, tab, kind, offset]);
+      }, [sessionId, props.visible]);
+      useEffect(() => { if (props.visible === false) return; setData({}); if (sessionId && project) action(refresh); }, [sessionId, props.visible, project, workspace?.workspace, tab, kind, offset]);
       useEffect(() => {
-        if (!sessionId || !project || !["running", "queued"].includes(run?.runState)) return;
+        if (props.visible === false || !sessionId || !project || !["running", "queued"].includes(run?.runState)) return;
         const timer = setInterval(() => { loadRun(run.batchId).catch((failure) => setError(failure.message)); }, 5000);
         return () => clearInterval(timer);
-      }, [sessionId, project, run?.batchId, run?.runState]);
+      }, [sessionId, props.visible, project, run?.batchId, run?.runState]);
       const filePath = (label, purpose, placeholder) => h("section", { className: "card" }, h("h3", null, label),
         h("p", { className: "caption" }, "指定当前工作区内的相对路径。新建批次读取最新版；运行和续跑使用原快照。"),
         h("div", { className: "kami-tools" }, h("input", { value: paths[purpose] || "", placeholder, "aria-label": label + "路径", style: { flex: 1, minWidth: 180 }, onChange: (event) => setPaths({ ...paths, [purpose]: event.target.value }) }),
@@ -136,7 +154,7 @@ window.__ModuleLoader__.load({
       else if (!project) content = empty("请选择项目后继续");
       else if (tab === "翻译") content = h("div", { className: "split" },
         h("aside", null, h("h3", null, t("文件队列")), ...files.map((file) => h("button", { key: file.batchId || file.id, className: "file", onClick: () => action(() => { setSegmentPage(0); return loadRun(file.batchId || file.id); }) }, file.filename || file.title, h("p", { className: "caption" }, file.runState || file.status))), !files.length && empty("暂无文件"), filePath("待译文件", "translation", "source/dialogue.docx")),
-        h("div", null, !run ? h("section", { className: "card" }, h("h3", null, "从工作区开始"), h("p", null, "在左侧指定待译文件。可以先关联指南、术语、TM 和参考资料，再创建批次冻结本次任务资源。")) : h(React.Fragment, null,
+        h("div", null, !run ? h("section", { className: "card" }, h("h3", null, "从工作区开始"), h("p", null, "指定工作区待译文件。可以先关联指南、术语、TM 和参考资料，再创建批次冻结本次任务资源。")) : h(React.Fragment, null,
           h("h3", null, run.filename), h("p", null, `${run.segments?.length || 0} ${t("段")} · ${run.runState || "ready"}`),
           run.runnerOptions?.workspaceSnapshot && h("p", { className: "caption" }, `来源：${run.runnerOptions.workspaceSnapshot.source.path} · 快照 ${run.runnerOptions.workspaceSnapshot.createdAt}`),
           h("input", { "aria-label": "导出路径", placeholder: `${workspace?.config?.outputDirectory || "outputs"}/（默认生成新文件）`, value: outputPath, onChange: (event) => setOutputPath(event.target.value), style: { width: "100%" } }),
@@ -185,8 +203,7 @@ window.__ModuleLoader__.load({
             h("input", { value: projectName, placeholder: t("新项目名称"), onChange: (event) => setProjectName(event.target.value) }),
             button("新建并绑定", async () => { await call({ action: "workspace", actionType: "bind", name: projectName }); setProjectName(""); await loadWorkspace(); }, false, Boolean(projectName.trim())), button("刷新", async () => { await loadWorkspace(); await refresh(); }))),
         h("details", null, h("summary", null, "翻译 agent 会话"),
-          h("p", { className: "caption" }, workspace?.isKamiSession ? "当前为 Kami 翻译预设会话" : "当前会话未使用 Kami 翻译预设。创建翻译会话后发送任务。"),
-          !workspace?.isKamiSession && button("新建翻译会话", async () => { const value = await props.createSession(workspace.workspace); setSession(value.sessionId); setNotice("已创建当前工作区的 Kami 翻译会话"); }, true, Boolean(workspace?.workspace)),
+          h("p", { className: "caption" }, "当前为 Kami 翻译预设会话"),
           h("textarea", { "aria-label": "委托翻译 agent 的任务", placeholder: "用 rules/style.md 和 glossary.xlsx 翻译 source/dialogue.docx，结果放到 outputs/", value: agentInstruction, onChange: (event) => setAgentInstruction(event.target.value) }),
           button("发送给翻译 agent", async () => { if (!agentInstruction.trim()) throw new Error("请输入任务内容"); await props.prompt(sessionId, agentInstruction.trim(), workspace.workspace); setAgentInstruction(""); setNotice("任务已发送到当前工作区的 Kami 翻译会话"); }, false, Boolean(workspace?.isKamiSession && project))),
         h("nav", { "aria-label": "Kami" }, ...["翻译", "资产", "审校", "风格指南", "参考资料", "学习", "任务", "设置"].map((label) => h("button", { key: label, "aria-selected": tab === label, onClick: () => { setTab(label); setOffset(0); } }, t(label)))),
@@ -194,7 +211,7 @@ window.__ModuleLoader__.load({
         resourcePreview && h("section", { className: "card" }, h("h3", null, `${resourcePreview.path} · ${resourcePreview.size} bytes`), h("p", { className: "caption" }, `SHA-256 ${resourcePreview.hash}`), h("pre", null, typeof resourcePreview.preview === "string" ? resourcePreview.preview : JSON.stringify(resourcePreview.preview, null, 2)), button("关闭预览", async () => setResourcePreview(null))), content);
     }
     return {
-      inject: ["slots", "locale", "remote", "remote.session", "layout"],
+      inject: ["slots", "locale", "remote", "remote.session", "sessions", "sidebarRight", "sidebarRightTabs"],
       async apply(ctx) {
         ctx.effect(() => ctx.locale.register("kami-dsh", { zh, en: words }));
         const json = { mode: "strict", typeSymbol: "kami-dsh#Json", jsonSchema: {}, create: () => ({ parse(value) {
@@ -220,13 +237,24 @@ window.__ModuleLoader__.load({
             if (!result.ok) throw new Error(result.error.message);
             return result.value;
           };
-          const createSession = async (cwd) => { const result = await ctx.remote.session.create({ cwd, agentPreset: "kami-translator" }); if (!result.ok) throw new Error(result.error.message); return result.value; };
           const prompt = async (sessionId, text, workspace) => {
             const state = await call(sessionId, { action: "workspace" });
             if (!state.isKamiSession || state.workspace !== workspace) throw new Error("当前会话与工作区的 Kami 预设不匹配，请新建翻译会话");
             const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
-          ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "kami-workbench", locale: "kami-dsh", inject: () => ({ call, createSession, prompt }) }, Workbench));
-          ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({ name: "sidebar.panellist", id: "kami-workbench", label: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), order: 5, locale: "kami-dsh" }, () => h("span", { "aria-hidden": true }, "K")));
+          const openWorkbench = (sessionId) => {
+            if (!sessionId || ctx.sidebarRight.mounted.getSnapshot() !== sessionId || ctx.sessions.list.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset !== "kami-translator") return;
+            const existing = ctx.sidebarRight.openTabs.getSnapshot().find((tab) => tab.sessionId === sessionId && tab.kind === WORKBENCH_KIND);
+            if (existing) { ctx.sidebarRight.focus(existing.tabId); if (!ctx.sidebarRight.isExpanded()) ctx.sidebarRight.toggleExpanded(); }
+            else ctx.sidebarRight.openTab(WORKBENCH_KIND);
+          };
+          const closeWorkbench = (sessionId) => {
+            if (ctx.sidebarRight.mounted.getSnapshot() !== sessionId) return;
+            for (const tab of ctx.sidebarRight.openTabs.getSnapshot()) if (tab.sessionId === sessionId && tab.kind === WORKBENCH_KIND) ctx.sidebarRight.close(tab.tabId);
+          };
+          ctx.effect(() => ctx.sidebarRightTabs.register({ id: WORKBENCH_TYPE, kind: WORKBENCH_KIND, title: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), keepMounted: true }));
+          ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({ name: "sidebar.right.pane.tab", key: WORKBENCH_TYPE, locale: "kami-dsh", inject: () => ({ call, prompt }) }, WorkbenchTab));
+          ctx.slots.inject("shell.overlay", () => ctx.slots.register({ name: "shell.overlay", id: "kami-session-panel", inject: () => ({ hooks: { kamiMounted: ctx.sidebarRight.mounted }, openWorkbench, closeWorkbench }) }, KamiPanelPresence));
+          for (const name of ["conversation.hero.options", "conversation.session.header.utilities"]) ctx.slots.inject(name, () => ctx.slots.register({ name, id: "kami-workbench-open", locale: "kami-dsh", inject: () => ({ openWorkbench }) }, WorkbenchOpener));
         });
       }
     };
