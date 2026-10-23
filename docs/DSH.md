@@ -91,9 +91,9 @@ npm run migrate:local -- --source-env '<旧项目>\directus\.env' --source-data 
 - `kami_workspace`：`status` 查询；`bind` 指定已有 `projectId` 或明确新建的 `name`；`configure` 设置上述资源路径和输出目录。
 - `kami_file_import`：`{path,purpose}`，用途为 `translation`（默认）、`style-guide`、`terms`、`tm`、`reference`。原有 `{path,projectId}` 参数保留，项目必须与工作区绑定一致。`register:false` 只预览；创建待译批次时可用 `resources` 指定本次任务的资源数组覆盖。
 - `kami_workbench`：按批次 ID 启动、暂停、QA、检查进度与导出。`POST /api/batch/export` 可带 `outputPath`，返回工作区文件路径。
+- `kami_help`：操作索引与当前工作区状态。
 
 批次模型审校调用 `POST /api/auto-qa` 时携带 `batchId`、`projectId`、`locale`、`source` 和 `translation`，使用该批次冻结的指南和术语等资源；不存在的批次报错，不回退到当前文件。省略 `batchId` 则是独立审校，读取当前工作区的最新资源。
-- `kami_help`：操作索引与当前工作区状态。
 
 模型优先使用关联会话待生效的模型选择，其次是最近一次请求的 provider/model，新会话使用 DSH 默认模型。所有调用经过 DSH 模型服务，不另存模型 Key。固定 seed 不可用会明确标记，截断、错误和取消会转为失败，不能算作成功译文。图片识别通过 DSH 附件协议保存和发送图片，需要关联会话所选模型支持图像输入；不支持时任务报告失败。
 
