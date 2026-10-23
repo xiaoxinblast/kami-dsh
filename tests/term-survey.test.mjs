@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { alignSurveyToHumanFinal, decideTermWrite, normalizeSurveyTerms, pendingCandidateFromUnresolved, pendingReason, surveyPairs } from "../src/term-survey.mjs";
+import { alignSurveyToHumanFinal, decideTermWrite, normalizeSurveyTerms, parseTermAlign, pendingCandidateFromUnresolved, pendingReason, surveyPairs } from "../src/term-survey.mjs";
 
 /**
  * 翻译期术语普查 + 回填确认。核心安全边界：模型只负责"哪个词像术语"，
@@ -50,7 +50,7 @@ test("只有“库里没有 + 终稿逐字保留 + 形态合规”才自动入�
 
   const inferred = decideTermWrite({ ...base, verbatim: false }, { existingTerms });
   assert.equal(inferred.auto, false);
-  assert.match(inferred.reason, /人工终稿改动了/u);
+  assert.match(inferred.reason, /尚未核实|置信度不足/u);
 
   const conflict = decideTermWrite({ ...base, proposalAction: "resolve_conflict" }, { existingTerms });
   assert.equal(conflict.auto, false);
@@ -73,6 +73,22 @@ test("待审候选把入库判定与模型依据一起写清", () => {
   const reason = pendingReason({ reason: "地名，全篇一致" }, { reason: "人工终稿改动了 AI 建议的译法，需要人工确认" });
   assert.match(reason, /人工终稿改动了 AI 建议的译法/u);
   assert.match(reason, /模型依据：地名/u);
+});
+
+test("人工纠正译法可凭终稿证据入库，低置信、编造与多处冲突不能自动写入", () => {
+  const original = { source: "星屑結晶", suggestedTarget: "星尘结晶", segmentSource: "星屑結晶を使います。", humanFinal: "使用星屑晶石。" };
+  const parsed = parseTermAlign(JSON.stringify({ matches: [{ source: original.source, found: true, target: "星屑晶石", confidence: 0.99 }] }), { items: [original] });
+  assert.equal(parsed.matches.length, 1);
+  const candidate = parsed.matches[0];
+  assert.equal(candidate.humanFinalVerified, true);
+  assert.equal(decideTermWrite({ ...candidate, proposalAction: "create_term" }).auto, true);
+  assert.equal(decideTermWrite({ ...candidate, confidence: 0.4 }).auto, false);
+  assert.equal(parseTermAlign('{"matches":[{"source":"星屑結晶","found":true,"target":"凭空译法","confidence":1}]}', { items: [original] }).matches.length, 0);
+  const conflict = parseTermAlign('{"matches":[{"source":"星屑結晶","found":true,"target":"星屑晶石","confidence":1},{"source":"星屑結晶","found":true,"target":"晶石","confidence":1}]}', { items: [original] });
+  assert.equal(conflict.matches.length, 0);
+  const mixed = alignSurveyToHumanFinal({ terms: [{ source: "星屑結晶", suggestedTarget: "星尘结晶" }], pairs: [{ source: original.segmentSource, humanFinal: original.humanFinal }, { source: original.segmentSource, humanFinal: "使用星尘结晶。" }] });
+  assert.equal(mixed.confirmed.length, 0);
+  assert.equal(mixed.unresolved.length, 1);
 });
 
 test("普查只取已选中且有译文的句段", () => {

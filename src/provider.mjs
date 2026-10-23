@@ -1328,6 +1328,9 @@ export async function proposeSkillPatchFromGateReview({ locale, contentType = "g
 }
 
 export async function evaluateTranslationWithModel({ contextPack, translation, references = [], machineDrafts = [], qaCases = [], onUsage = null, temperature = 0.1, seed = undefined, onSeedUnsupported = null }) {
+  const strictFocus = contextPack.qualityTier === "strict"
+    ? "严苛审查重点：逐项核对原文的否定、条件、范围、承诺强度、指代、术语冲突和任务约束，结合文件语境检查漏译与歧义。只报告有原文或规则证据的问题，不为文风偏好反复改写。"
+    : "";
   const messages = [
     {
       role: "system",
@@ -1337,6 +1340,7 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
       role: "user",
       content: [
         contextPackText(contextPack, "review"),
+        strictFocus,
         `待审译文：\n${translation}`,
         `人工批准译例（只有同语种、同用途且语义相关时才可引用，且不能盲从）：${JSON.stringify(references.slice(0, 5))}`,
         `本系统此前的机器译文（只能用于发现同一文档内自相矛盾，不得当作正确与否的依据）：${JSON.stringify(machineDrafts.slice(0, 3))}`,
@@ -2456,7 +2460,7 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
     };
   }
 
-  const forceReflection = plan.route === "fact_guarded" ? true : (plan.route === "direct" ? false : reflect);
+  const forceReflection = plan.reflect === false ? false : (plan.route === "fact_guarded" ? true : (plan.route === "direct" ? false : reflect));
   const result = await translateWithReflection(contextPack, { reflect: forceReflection, onUsage, model: selectedModel, modelRole: plan.modelRole, toolRunner });
   return {
     ...result,

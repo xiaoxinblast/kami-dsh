@@ -65,6 +65,7 @@ test("QA labels never turn null scores or deterministic checks into model QA suc
   assert.equal(qaLabel({ result: { aiQa: { status: "deterministic_only", score: null } } }), "规则检查");
   assert.equal(qaLabel({ result: { aiQa: { used: true, score: 93 } } }), "模型 QA · 93");
   assert.equal(qaLabel({ result: { aiQa: { score: 100, fallbackReason: "timeout" } } }), "QA 未完成");
+  assert.equal(qaLabel({ accepted: true, result: { humanReview: { source: "external-review-import" }, aiQa: { used: false } } }), "memoQ 人工终稿");
   assert.equal(editingLocked({ runState: "paused", workflow: { writeBusy: true } }), true, "pause must wait for the active segment to settle");
   assert.equal(editingLocked({ runState: "completed", workflow: { qaRetryBusy: true } }), true);
   assert.equal(reportScore({ sourceKind: "batch", scores: { overall: 100 }, segments: [{ qaScore: null, aiQaStatus: "deterministic_only" }] }), null);
@@ -76,7 +77,7 @@ test("QA stage follows current segment results and a manual check stays visibly 
   const { qaSummary } = await modelModule();
   const segment = (aiQa) => ({ status: "done", translation: "译文", result: { aiQa } });
   const run = { segments: [segment({ used: true, score: 99 }), segment({ used: true, score: 100 })], workflow: { aiQa: { status: "completed", message: "0 段 AIQA 已检查" } } };
-  assert.deepEqual(JSON.parse(JSON.stringify(qaSummary(run))), { model: 2, rules: 0, incomplete: 0, busy: false, label: "已完成" });
+  assert.deepEqual(JSON.parse(JSON.stringify(qaSummary(run))), { model: 2, rules: 0, human: 0, incomplete: 0, busy: false, label: "已完成" });
   assert.equal(qaSummary(run, true).label, "正在处理");
   assert.equal(qaSummary(run, true).busy, true);
   run.segments[0].result.aiQa = { status: "not_run", used: false, score: null };

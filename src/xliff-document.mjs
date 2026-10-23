@@ -422,11 +422,11 @@ export function prepareXliffDocument(buffer, filename) {
 }
 
 /** Read existing bilingual XLIFF/MQXLIFF pairs for manual TM import. */
-export function extractXliffPairs(buffer, filename) {
+export function extractXliffPairs(buffer, filename, { includeEmptyTargets = false } = {}) {
   const extension = String(filename || "").toLowerCase().endsWith(".mqxliff") ? "mqxliff" : "xliff";
   const parsed = parseXliffXml(decodeXmlBuffer(buffer), extension);
   return parsed.units
-    .filter((unit) => unit.sourceText.trim() && unit.targetText.trim())
+    .filter((unit) => unit.sourceText.trim() && (includeEmptyTargets || unit.targetText.trim()))
     .map((unit) => ({
       entryId: unit.id,
       entryKey: unit.memoQContext || "",

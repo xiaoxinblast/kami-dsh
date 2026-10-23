@@ -36,7 +36,7 @@ test("导入时存档、导出时补存档：服务端两条路径都接上了",
   // 导入（/api/batch/prepare）时按批次存档
   assert.match(server, /const saved = await saveBatchOriginal\(\{ dataRoot: DATA_ROOT, batchId, filename: prepared\.filename \|\| body\.filename, buffer: originalBuffer \}\);/u);
   // 导出时优先用存档（用户不用再选）
-  assert.match(server, /const stored = await readBatchOriginal\(\{ dataRoot: DATA_ROOT, relativePath: run\?\.runnerOptions\?\.originalFile \}\);/u);
+  assert.match(server, /const stored = await readBatchOriginal\(\{ dataRoot: runtimeOptions\(\)\.dataDirectory \|\| DATA_ROOT, relativePath: run\?\.runnerOptions\?\.originalFile \}\);/u);
   // 老批次用户补选时顺手存档，下次免选
   assert.match(server, /已把用户补选的原文件存档到批次/u);
   assert.match(server, /if \(run && !run\.runnerOptions\?\.originalFile\) \{/u);

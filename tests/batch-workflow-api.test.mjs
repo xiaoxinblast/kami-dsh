@@ -73,7 +73,7 @@ test("批次详情不会把同原文另一句段的失败 QA 覆盖到已成功�
 test("没有在执行的收尾不会误显示为持续排队，旧任务也有明确手动入口提示", async () => {
   const load = vm.runInNewContext(`(${block("async function loadBatchWorkflow(", "async function finalizeBatchWorkflow(").trim()})`, {
     getSettings: () => ({ quality: {}, learning: {} }), buildBatchWorkflow, getBackgroundTask: async () => null,
-    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map()
+    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map()
   });
   const workflow = await load({ batchId: "old-batch", runState: "completed", segments: [{ id: "s1", selected: true, status: "done", translation: "译文" }] });
   assert.equal(workflow.qualityReport.status, "not_started");
@@ -110,7 +110,7 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
   const json = (res, status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); return true; };
   const context = vm.createContext({
     withRuntimeCall,
-    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchWorkflowWrites: new Map(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
+    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchWorkflowWrites: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = structuredClone(value); run.runnerOptions.batchSummary = summarizeBatchSegments(run.segments); },
     getBackgroundTask: async (id) => tasks.get(id),
     createBackgroundTask: async (input) => { const task = { ...input, id: `task-${tasks.size}`, status: "in_progress", createdAt: new Date().toISOString() }; tasks.set(task.id, task); return task; },

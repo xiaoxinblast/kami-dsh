@@ -84,7 +84,7 @@ export function alignSurveyToHumanFinal({ terms = [], pairs = [] } = {}) {
       continue;
     }
     const verbatim = hits.find((hit) => textContainsTerm(hit.humanFinal, suggestedTarget));
-    if (verbatim) {
+    if (verbatim && hits.every((hit) => textContainsTerm(hit.humanFinal, suggestedTarget))) {
       confirmed.push({
         source,
         target: suggestedTarget,
@@ -106,15 +106,16 @@ export function alignSurveyToHumanFinal({ terms = [], pairs = [] } = {}) {
       segmentId: hits[0].id,
       segmentSource: hits[0].source,
       machineTranslation: hits[0].machineTranslation,
-      humanFinal: hits[0].humanFinal
+      humanFinal: hits[0].humanFinal,
+      examples: hits.map((hit) => ({ segmentSource: hit.source, humanFinal: hit.humanFinal }))
     });
   }
   return { confirmed, unresolved, noEvidence };
 }
 
 /**
- * 入库分流：只有"库里没有这个源词 + 人工终稿逐字保留了 AI 建议译法 + 形态合规"
- * 才允许自动写入；其余一律进待审核。任何一条不满足都会给出中文原因，直接显示给用户。
+ * 入库分流：库里没有该源词、终稿译法已核实且形态合规时允许自动写入。
+ * 人工改过的译法还需高置信对齐；其余进待审核，并给出可见的中文原因。
  */
 export function decideTermWrite(candidate = {}, { existingTerms = [], autoWriteEnabled = true } = {}) {
   const source = text(candidate.source);
@@ -122,7 +123,7 @@ export function decideTermWrite(candidate = {}, { existingTerms = [], autoWriteE
   const proposalAction = text(candidate.proposalAction) || "create_term";
   if (!source || !target) return { auto: false, reason: "源词或译法为空" };
   if (!autoWriteEnabled) return { auto: false, reason: "自动入库已关闭" };
-  if (candidate.verbatim !== true) return { auto: false, reason: "人工终稿改动了 AI 建议的译法，需要人工确认" };
+  if (candidate.verbatim !== true && !(candidate.humanFinalVerified === true && Number(candidate.confidence) >= 0.9)) return { auto: false, reason: "终稿对应译法尚未核实或对齐置信度不足" };
   if (proposalAction !== "create_term") {
     const label = { add_alias: "库里已有相同译法，只需补别名", resolve_conflict: "与库里已有译法冲突", add_usage_evidence: "库里已有相同条目" }[proposalAction] || proposalAction;
     return { auto: false, reason: label };
@@ -133,7 +134,7 @@ export function decideTermWrite(candidate = {}, { existingTerms = [], autoWriteE
   const blocked = (Array.isArray(existingTerms) ? existingTerms : [])
     .some((term) => (Array.isArray(term?.forbidden) ? term.forbidden : []).some((phrase) => textContainsTerm(source, phrase) || textContainsTerm(target, phrase)));
   if (blocked) return { auto: false, reason: "撞上库里标注的禁用译法" };
-  return { auto: true, reason: "人工终稿逐字保留了该译法" };
+  return { auto: true, reason: "译法已由人工终稿证据确认" };
 }
 
 /** 待审候选的展示原因：把模型依据和入库判定合并成一句话。 */
@@ -194,7 +195,8 @@ export function termAlignMessages({ locale = "zh-CN", scope = {}, items = [] } =
     "对每一条，如果人工终稿里确实出现了该说法的对应译法，found 填 true 并把 target 写成终稿里的**原文片段**（逐字复制，不要改写）。",
     "如果终稿里没有对应写法（例如整句被改写、该说法被删掉、或它其实不是术语），found 填 false 并且不要编造 target。",
     "preserveSource 只在终稿里就是原文照抄时填 true。reason 用简体中文一句话说明依据。",
-    '只输出严格 JSON：{"matches":[{"source":"崩兆の片","found":true,"target":"崩兆之隅","preserveSource":false,"reason":"终稿里写作「崩兆之隅」"}]}',
+    '只输出严格 JSON：{"matches":[{"source":"崩兆の片","found":true,"target":"崩兆之隅","preserveSource":false,"confidence":0.95,"reason":"终稿里写作「崩兆之隅」"}]}',
+    "examples 是该源词在终稿中的多处用例，必须全部核对。译法不一致或语义对应不确定时不要给高置信结论。confidence 为 0 到 1。",
     "整个回答只能是一个 JSON 对象：禁止 Markdown、解释或代码围栏。"
   ].join("\n");
   const user = [
@@ -204,8 +206,9 @@ export function termAlignMessages({ locale = "zh-CN", scope = {}, items = [] } =
     JSON.stringify(items.map((item) => ({
       source: item.source,
       suggestedTarget: item.suggestedTarget,
-      segmentSource: String(item.segmentSource || "").slice(0, 400),
-      humanFinal: String(item.humanFinal || "").slice(0, 400)
+      segmentSource: String(item.segmentSource || ""),
+      humanFinal: String(item.humanFinal || ""),
+      examples: item.examples || []
     })))
   ].join("\n");
   return [
@@ -232,7 +235,8 @@ export function parseTermAlign(content, { items = [] } = {}) {
     if (item?.found === false || !target) continue;
     // 逐字校验：模型给的说法必须在人工终稿里真实存在，否则丢弃（宁可漏，不可错）。
     const effectiveTarget = preserveSource ? source : target;
-    if (!textContainsTerm(original.humanFinal, effectiveTarget)) continue;
+    if (!textContainsTerm(original.segmentSource, original.source) || !textContainsTerm(original.humanFinal, effectiveTarget)) continue;
+    if ((original.examples || []).some((example) => !textContainsTerm(example.humanFinal, effectiveTarget))) continue;
     matches.push({
       source: original.source,
       target: effectiveTarget,
@@ -240,12 +244,25 @@ export function parseTermAlign(content, { items = [] } = {}) {
       confidence: finiteConfidence(item?.confidence, 0.7),
       reason: text(item?.reason).slice(0, 200),
       verbatim: false,
+      humanFinalVerified: true,
       segmentId: original.segmentId || "",
       segmentSource: original.segmentSource || "",
       humanFinal: original.humanFinal || ""
     });
   }
-  return { matches };
+  const targets = new Map();
+  for (const match of matches) {
+    const key = normalizeSource(match.source);
+    if (!targets.has(key)) targets.set(key, new Set());
+    targets.get(key).add(match.target);
+  }
+  const seen = new Set();
+  return { matches: matches.filter((match) => {
+    const key = normalizeSource(match.source);
+    if (targets.get(key).size > 1 || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }) };
 }
 
 /**

@@ -5,6 +5,9 @@ import { configureRuntime, runtimeOptions, withRuntimeCall } from "../src/runtim
 
 test("agent cannot manufacture human approvals or access an external API", () => {
   assert.throws(() => assertOperation({ method: "POST", path: "/api/feedback/accept" }), /human/);
+  assert.throws(() => assertOperation({ method: "POST", path: "/api/batch/run/example/import-review" }), /human/);
+  assert.throws(() => assertOperation({ method: "POST", path: "/api/batch/run", body: { runnerOptions: { reviewFinal: { complete: true } } } }), /human/);
+  assert.throws(() => assertOperation({ method: "POST", path: "/api/batch/run", body: { segments: [{ accepted: true }] } }), /human/);
   assert.throws(() => assertOperation({ method: "POST", path: "/api/learning/skills/a/activate" }), /human/);
   assert.doesNotThrow(() => assertOperation({ method: "POST", path: "/api/learning/skills/a/activate" }, true));
   assert.throws(() => assertOperation({ path: "https://other.example/api/projects" }), /Only/);

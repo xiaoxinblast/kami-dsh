@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
         || ["aiQa", "qualityReport", "termSurvey"].some((stage) => ["in_progress", "waiting"].includes(run.workflow?.[stage]?.status));
     }
     function qaLabel(segment) {
+      if (segment.accepted && segment.result?.humanReview?.source === "external-review-import") return "memoQ 人工终稿";
       const qa = segment.result?.aiQa || {};
       if (qa.fallbackReason) return "QA 未完成";
       if (qa.status === "deterministic_only") return "规则检查";
@@ -51,12 +52,12 @@ window.__ModuleLoader__.load({
     }
     function qaSummary(run, pending = false) {
       const translated = (run.segments || []).filter((segment) => segment.selected !== false && segment.status === "done" && segment.translation?.trim());
-      const labels = translated.map(qaLabel), model = labels.filter((label) => label.startsWith("模型 QA · ")).length, rules = labels.filter((label) => label === "规则检查").length;
-      const incomplete = translated.length - model - rules, busy = pending || ["in_progress", "waiting"].includes(run.workflow?.aiQa?.status);
+      const labels = translated.map(qaLabel), model = labels.filter((label) => label.startsWith("模型 QA · ")).length, rules = labels.filter((label) => label === "规则检查").length, human = labels.filter((label) => label === "memoQ 人工终稿").length;
+      const incomplete = translated.length - model - rules - human, busy = pending || ["in_progress", "waiting"].includes(run.workflow?.aiQa?.status);
       const label = busy ? pending || run.workflow.aiQa.status === "in_progress" ? "正在处理" : "等待中"
         : labels.includes("QA 未完成") || (incomplete > 0 && model + rules > 0) ? "QA 未完成"
-        : rules > 0 && rules === translated.length ? "规则检查" : translated.length && !incomplete ? "已完成" : "尚未执行 QA";
-      return { model, rules, incomplete, busy, label };
+        : human > 0 && human === translated.length ? "memoQ 人工终稿" : rules > 0 && rules === translated.length ? "规则检查" : translated.length && !incomplete ? "已完成" : "尚未执行 QA";
+      return { model, rules, human, incomplete, busy, label };
     }
     function issuesOf(segment) {
       const issues = segment.result?.qa?.issues || segment.result?.issues || segment.result?.aiQa?.issues || [];
@@ -96,7 +97,7 @@ window.__ModuleLoader__.load({
         && gate?.latestRun?.skillId === candidateId && gate.latestRun.decision === "pass" && gate.assets?.coverage?.valid === true);
     }
     function newView(workspace = "", projectId = "") {
-      return { workspace, projectId, files: [], tasks: [], knownFiles: false, newBatches: [], selectedId: "", manual: false, run: null, drafts: {}, exports: {}, approvals: {},
+      return { workspace, projectId, files: [], tasks: [], knownFiles: false, newBatches: [], selectedId: "", manual: false, run: null, drafts: {}, exports: {},
         pendingSelection: null, operations: {}, sections: {}, loadSerial: 0 };
     }
     class WorkbenchModel {
@@ -210,9 +211,8 @@ window.__ModuleLoader__.load({
         if (!run) return null;
         const drafts = this.view.drafts[run.batchId] || {};
         return { ...run, segments: (run.segments || []).map((segment) => {
-          const approved = this.view.approvals[`${run.batchId}:${segment.id}`] === segment.translation;
           return Object.hasOwn(drafts, segment.id) ? { ...segment, translation: drafts[segment.id], draft: true, accepted: false,
-            result: { ...segment.result, issues: [], qa: null, qaScore: null, aiQa: { status: "not_run", used: false, score: null } } } : { ...segment, accepted: segment.accepted || approved };
+            result: { ...segment.result, issues: [], qa: null, qaScore: null, aiQa: { status: "not_run", used: false, score: null } } } : segment;
         }) };
       }
       async saveQaResults(report, token = this.capture(), id = token.view.selectedId) {
@@ -238,7 +238,6 @@ window.__ModuleLoader__.load({
         const drafts = this.view.drafts[run.batchId] ||= {};
         if (value === (original.translation || "")) delete drafts[id]; else drafts[id] = value;
         delete this.view.exports[run.batchId]; delete this.view.sections[`qa:${run.batchId}`];
-        delete this.view.approvals[`${run.batchId}:${id}`]; delete this.view.operations[`approve:${run.batchId}:${id}`];
         this.view.manual = true; this.emit(); return true;
       }
       async saveDrafts(token) {
@@ -250,11 +249,23 @@ window.__ModuleLoader__.load({
         if (editingLocked(latest)) throw new Error("当前翻译或 QA 尚未结束，草稿已保留，请稍后保存");
         const segments = latest.segments.map((segment) => !Object.hasOwn(drafts, segment.id) ? segment : { ...segment, translation: drafts[segment.id], status: drafts[segment.id].trim() ? "done" : "pending", error: "", accepted: false,
           result: { ...segment.result, translation: drafts[segment.id], qaScore: null, issues: [], qa: null, aiQa: { status: "not_run", used: false, score: null } } });
-        await this.invoke("/api/batch/run", "POST", this.body({ batchId: id, segments }, token), token);
+        await this.invoke("/api/batch/run", "POST", this.body({ batchId: id, segments,
+          ...(latest.runnerOptions?.reviewFinal ? { runnerOptions: { reviewFinal: { ...latest.runnerOptions.reviewFinal, complete: false, stale: true } } } : {}) }, token), token);
         for (const [segmentId, value] of Object.entries(drafts)) if (token.view.drafts[id]?.[segmentId] === value) delete token.view.drafts[id][segmentId];
         await this.loadRun(token, id);
       }
-      save() { return this.perform("save", async (token) => { await this.saveDrafts(token); return "译文已保存；人工采纳与导出需分别执行。"; }); }
+      save() { return this.perform("save", async (token) => { await this.saveDrafts(token); return "译文已保存，可导出到 memoQ 审校。"; }); }
+      linkReviewedFinal({ path, libraryId }) {
+        const id = this.view.selectedId;
+        return this.perform(`final:${id}`, async (token) => {
+          if (this.dirty(id)) throw new Error("请先保存或放弃当前译文草稿，再关联人工终稿");
+          const result = await this.request({ action: "review-final", batchId: id, projectId: token.view.projectId, path, libraryId }, token);
+          token.view.sections[`final:${id}`] = result;
+          delete token.view.sections[`qa:${id}`];
+          await this.loadRun(token, id); await this.refresh();
+          return result.alreadyLinked ? "当前终稿版本已关联" : result.failures?.length ? "终稿关联有未完成项目，请查看报告" : "已关联人工终稿，TM 与学习证据已更新";
+        });
+      }
       ask(text, key = "agent-read") {
         return this.perform(key, async (token) => {
           if (!this.prompt) throw new Error("当前会话的 Agent 入口不可用");
@@ -288,7 +299,7 @@ window.__ModuleLoader__.load({
       "新项目名称": "New project name", "新建项目": "New project", "请选择项目": "Select a project", "关联会话": "Session", "刷新": "Refresh",
       "先建立翻译会话": "Start a translation session first", "填写工作目录并新建翻译会话，或选择已有会话。": "Create a translation session with a working directory, or select an existing session.",
       "导入待译文件": "Import a file", "粘贴日语原文": "Paste Japanese source", "创建批次": "Create batch", "文件队列": "Files", "暂无文件": "No files yet",
-      "开始 / 续跑": "Start / resume", "暂停": "Pause", "导出文件": "Export", "保存修改": "Save edits", "原文": "Source", "译文": "Translation", "采纳为正式译法": "Approve translation",
+      "开始 / 续跑": "Start / resume", "暂停": "Pause", "导出文件": "Export", "保存修改": "Save edits", "原文": "Source", "译文": "Translation",
       "段": "segments", "术语": "Terms", "翻译记忆": "Translation memory", "搜索": "Search", "上一页": "Previous", "下一页": "Next", "已显示": "Showing", "共": "of",
       "导入双语资产": "Import bilingual assets", "确认入库": "Approve import", "条候选": "candidates", "暂无条目": "No entries", "状态": "Status",
       "运行 QA": "Run QA", "质量报告": "Quality report", "尚未运行": "Not run yet", "上传参考资料": "Upload reference", "生成候选策略": "Propose strategy",
@@ -314,7 +325,7 @@ window.__ModuleLoader__.load({
       "译文复核": "Review translations", "全部译段": "All segments", "仅看问题": "Issues only", "尚未翻译": "Untranslated", "定位问题译段": "Find an issue", "此筛选下没有译段": "No matching segments", "待重新检查": "QA needs rerun",
       "尚未执行 QA": "QA not run", "规则检查": "Rule checks", "QA 未完成": "QA incomplete", "模型 QA": "Model QA", "执行中只读；阶段结束后可编辑译文。": "Read-only while processing. Edit once the stage settles.",
       "有未保存的译文草稿": "Unsaved translation drafts", "切换批次前，保存或放弃当前草稿。": "Save or discard your drafts before switching batches.", "保存并切换": "Save and switch", "放弃并切换": "Discard and switch", "取消切换": "Cancel", "草稿保存在当前会话中，退出应用前请保存。": "Drafts stay in this session. Save before exiting the app.",
-      "译文已保存；人工采纳与导出需分别执行。": "Translations saved. Approval and export are separate actions.", "确认采纳": "Confirm approval", "已人工采纳": "Human approved", "保存译文后才能正式采纳。": "Save the translation before approving it.",
+      "译文已保存，可导出到 memoQ 审校。": "Translation saved. Export it for review in memoQ.",
       "检查本批次": "Check this batch", "查看上次报告": "View saved report", "上次保存的质量报告": "Last saved QA report", "当前任务快照": "Current task snapshot", "当前工作区最新资源": "Latest workspace resources", "报告没有评分": "No score available", "重试": "Retry",
       "工作区导出": "Export to workspace", "导出路径": "Output path", "留空使用工作区默认输出目录；同名文件会报错。": "Leave blank for the workspace output directory. Existing files are never overwritten.", "导出成功": "Exported", "任务记录": "Task history", "后台任务": "Background task", "独立审校": "Standalone QA", "翻译批次": "Translation batch", "打开批次": "Open batch", "关联批次": "Related batch", "任务 ID": "Task ID", "暂无任务记录": "No task history",
       "下次任务使用的资源": "Resources for the next task", "这些路径引用工作区原件；新建批次时读取最新版。": "These paths reference workspace originals. New batches read the latest content.", "工作区相对路径": "Workspace-relative path", "预览最新版": "Preview latest file", "关联到下次任务": "Use for the next task", "解除关联": "Unlink", "已关联": "Linked", "尚未关联文件": "No files linked", "工作区最新版预览": "Latest workspace preview", "关闭预览": "Close preview", "预览条数": "Preview items", "总条数": "Total items", "字符": "characters", "文件大小": "File size", "用途": "Purpose",
@@ -325,6 +336,18 @@ window.__ModuleLoader__.load({
       "发现新批次": "New batches found", "查看新批次": "View new batch", "复核译文": "Review translations", "重试未完成 QA": "Retry incomplete QA", "暂无已记录问题": "No recorded issues", "检查未完成，不表示通过": "Checks are incomplete. This is not a pass."
     });
     Object.assign(words, {"当前项目": "Current project", "选择候选": "Select candidate", "评测结果已保存": "Evaluation result saved", "交给 Agent 审校": "Ask agent to review", "返回译段列表": "Back to segments", "页": "Page", "跳转页码": "Go to page", "搜索原文、译文或段号": "Search source, translation or number", "搜索译段": "Search segments", "译段筛选": "Segment filter", "上个问题": "Previous issue", "下个问题": "Next issue", "译段列表": "Segments", "未保存": "Unsaved", "当前任务分区": "Task sections", "任务概览": "Overview", "工作区资源": "Workspace resources", "关联原文件，Agent 按任务需要查阅；新批次使用最新版本。": "Link original files. The agent reads them as needed; new batches use their latest versions.", "关联工作区文件": "Link a workspace file", "关联文件": "Link file", "个文件": "files", "搜索文件名或路径": "Search file names or paths", "搜索资源文件": "Search resource files", "全部文件": "All files", "上一级": "Parent folder", "让 Agent 查看原文件": "Ask agent to read original", "文件版本": "File version", "项目资产库": "Project libraries", "术语按库管理；TM 按库、来源文件和条目逐层浏览。": "Browse terms by library and TM by library, source file and entry.", "术语库": "Term bases", "记忆库 TM": "Translation memory", "个库": "libraries", "条": "entries", "全部库（合并视图）": "All libraries (merged)", "打开": "Open", "启用": "Enable", "主 TM": "Master TM", "工作 TM": "Working TM", "参考 TM": "Reference TM", "优先级": "Priority", "新增库": "New library", "库名称": "Library name", "库用途": "Library role", "创建库": "Create library", "全部库": "All libraries", "未标注来源": "Unspecified source", "搜索来源文件": "Search source files", "查看条目": "View entries", "条人工终稿": "human final translations", "人工确认": "Human approved", "机器译文": "Machine translation", "已批准": "Approved", "草稿": "Draft", "此库暂无来源文件": "No source files in this library", "翻译进度": "Translation progress", "启用的术语库参与翻译检索。": "Enabled term bases participate in translation retrieval.", "主 TM 保存人工确认译文，工作 TM 保存机器译文，参考 TM 提供检索参考。": "Master TM stores human-approved translations, working TM stores machine translations, and reference TM supports retrieval.", "学习中心": "Learning center", "按当前项目积累人工终稿；候选通过评测和门禁后，由你启用。": "Learn from human final translations in this project. Activate a candidate after evaluation and gate checks.", "学习流程": "Learning workflow", "生效版本": "Active version", "候选": "Candidate", "门禁": "Gate", "暂无记录": "No record", "尚未评测": "Not evaluated", "可以启用": "Ready to activate", "等待检查": "Waiting for checks", "当前生效版本": "Active version", "策略内容": "Strategy", "使用当前版本的默认策略": "Uses the version's default strategy", "查看候选": "View candidates", "候选版本": "Candidate versions", "选择并评测": "Select for evaluation", "变更内容": "Changes", "暂无候选": "No candidates", "从人工确认的终稿生成候选，不会自动替换生效版本。": "Generate a candidate from human-approved final translations. It does not replace the active version automatically.", "受测候选": "Candidate under test", "先生成候选": "Generate a candidate first", "生效版本与候选评测": "Compare active version and candidate", "使用未参与候选学习的人工终稿做配对评测。": "Evaluate paired outputs on human final translations excluded from candidate training.", "开始评测": "Start evaluation", "个配对样本": "paired samples", "指标": "Metric", "QA 分数": "QA score", "硬错误": "Hard errors", "术语准确率": "Term accuracy", "查看门禁": "View gate", "固定 Gold Set 与失败回归": "Fixed Gold Set and regression cases", "启用 Gold 样本": "Active Gold samples", "启用回归案例": "Active regression cases", "运行门禁": "Run gate", "管理固定质量资产": "Manage fixed quality assets", "从人工终稿预览 Gold Set": "Preview Gold Set from human finals", "个样本": "samples", "确认建立并启用": "Create and enable", "按最新证据重建回归集": "Rebuild regression suite", "启用候选": "Activate candidate", "当前候选评测和门禁已通过，可由你确认启用。": "This candidate has passed evaluation and current gate checks. You can activate it.", "需要当前候选的配对评测通过，且门禁结论覆盖最新质量资产。": "The candidate must pass paired evaluation and gate checks covering the current quality assets.", "确认启用候选": "Confirm activation", "确认启用": "Confirm activation", "规范内容": "Style instructions", "来源证据与变更原因": "Evidence and reasons for changes", "搜索原文、译文或来源": "Search source, translation or origin", "搜索学习证据": "Search learning evidence", "评测通过": "Evaluation passed", "需要复核": "Needs review", "未通过": "Failed", "已通过": "Passed", "已阻断": "Blocked", "证据不足": "Insufficient evidence", "交给 Agent 建批": "Ask agent to prepare batch", "直接解析建批": "Parse batch directly", "已交给当前会话的 Agent": "Sent to this session's agent", "已创建资源库": "Library created", "后台任务已提交，可在任务记录中查看进度。": "Background task submitted. Check task history for progress."});
+    Object.assign(words, {
+      "检查译文": "Check translation", "译文检查": "Translation checks", "终稿与学习": "Reviewed final", "待 memoQ 审校": "Awaiting memoQ review", "memoQ 人工终稿": "Human final from memoQ",
+      "已关联人工终稿": "Reviewed final linked", "关联人工终稿": "Link reviewed final", "人工终稿相对路径": "Reviewed file path", "终稿记忆库": "Final translation memory", "终稿关联报告": "Final file report", "更换或重新关联终稿": "Link an updated final",
+      "人工审校在 memoQ 完成，之后关联本地终稿。": "Review in memoQ, then link the local final file.",
+      "导入 memoQ 并完成人工审校后，将双语终稿放回工作区，再关联到本批次。": "Review the export in memoQ, place the bilingual final in the workspace and link it to this batch.",
+      "在 memoQ 完成人工审校后，关联本地双语终稿。整份终稿用于 TM，本批对应译段用于学习差异和术语更新。": "Link the local bilingual final after review in memoQ. The whole file supplies TM; matching batch segments supply learning and term updates.",
+      "请先保存或放弃当前译文草稿，再关联人工终稿": "Save or discard translation drafts before linking the final.", "当前终稿版本已关联": "This final version is already linked", "终稿关联有未完成项目，请查看报告": "Some updates are incomplete. Check the report.", "已关联人工终稿，TM 与学习证据已更新": "Final linked. TM and learning evidence updated.",
+      "TM 条目": "TM entries", "学习轨迹": "Learning samples", "术语更新": "Term updates", "待核对术语": "Terms to check", "对齐原批次": "Matched segments", "修改": "Changed", "条已审校轨迹": "reviewed learning samples",
+      "已记录的人工终稿可在学习中心生成项目风格候选。": "Use the linked final evidence to generate project style candidates in Learning.", "未采用的终稿条目": "Excluded final entries",
+      "已有译法冲突或证据不足的条目集中保留，核对后再更新术语库。": "Conflicting terms and uncertain evidence are collected here for checking before updating the term base.",
+      "人工终稿使用 MQXLIFF / XLIFF": "Use MQXLIFF / XLIFF for reviewed finals", "从 memoQ 导出双语原文件建批，可用条目身份准确接回人工终稿。": "Create the batch from a bilingual memoQ export so segment identities can align the reviewed final."
+    });
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
       .kami{height:100%;min-width:0;overflow:auto;container-type:inline-size;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;box-sizing:border-box;scrollbar-gutter:stable}
@@ -339,6 +362,7 @@ window.__ModuleLoader__.load({
       .kami .library-row>.library-actions{flex:0 0 auto;display:flex;gap:4px;justify-content:flex-end}.kami .library-actions button{min-width:30px}
       .kami .primary{background:#174d40;border-color:#174d40;color:#f5efdf}.kami .primary:not(:disabled):hover{background:#23654f}.kami .type-tabs button[aria-pressed=true]{box-shadow:inset 0 -2px #82ad98}.kami .learning-steps>button[aria-pressed=true]{border-color:#82ad98;box-shadow:inset 0 2px #82ad98}.kami .segment-row[aria-pressed=true]{box-shadow:inset 3px 0 #82ad98}
       .kami .learning-view .stack>button,.kami .preview>button{justify-self:start}
+      .kami .final-review .card{gap:10px}.kami .final-review p,.kami .final-review .metrics{margin:0}.kami .final-review details.card:not([open]){display:block}
       @container(min-width:860px){.kami .segment-editor{display:block}.kami .review-layout[data-editing=true] .review-index{display:block}.kami .review-back{display:none}.kami .review-layout{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}.kami .review-list{max-height:520px}.kami .segment-editor{position:sticky;top:160px}}
       @container(min-width:620px){.kami .pairs{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px}.kami .asset-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:18px}.kami .task-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:22px;align-items:start}.kami .task-grid>.task-main{min-width:0}.kami .task-grid>.task-side{min-width:0}.kami .workspace-bar{padding-top:12px}.kami .body{padding:22px 24px 32px}.kami .masthead{padding-left:24px;padding-right:24px}.kami .quick-submit{justify-content:flex-start}.kami .review-toolbar select{flex:none;min-width:140px}}
       @container(min-width:900px){.kami .task-grid{grid-template-columns:minmax(0,1fr) 260px}}
@@ -464,18 +488,19 @@ window.__ModuleLoader__.load({
       const translated = selected.filter((segment) => segment.status === "done" && segment.translation?.trim());
       const qaFailed = translated.some((segment) => segment.result?.aiQa?.fallbackReason);
       const qa = qaSummary(run, model.view.operations[`qa:${id}`]?.pending);
-      const qaDescription = `${qa.model} ${t("段")} ${t("模型 QA")} · ${qa.rules} ${t("段")} ${t("规则检查")} · ${qa.incomplete} ${t("段")} ${t("QA 未完成")}`;
+      const qaDescription = `${qa.model} ${t("段")} ${t("模型 QA")} · ${qa.rules} ${t("段")} ${t("规则检查")} · ${qa.human} ${t("段")} ${t("memoQ 人工终稿")} · ${qa.incomplete} ${t("段")} ${t("QA 未完成")}`;
       const command = (verb) => model.perform(`${verb}:${id}`, async (token) => {
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", scopeArgs(model, token), token);
         await model.loadRun(token, id);
       });
       return h("section", { className: "card" }, h("div", { className: "task-status" }, h("span", { className: "muted" }, t("当前任务")), h("span", { className: "badge" }, stateText(run.workflow?.overall?.status || run.runState || "ready", t))),
         h("h2", { className: "task-title" }, run.filename || id), h("progress", { max: Math.max(1, selected.length), value: done, "aria-label": t("翻译进度") }),
+        done > 0 && ["mqxliff", "xliff"].includes(run.format) && h("p", { className: "muted" }, t(run.runnerOptions?.reviewFinal?.complete ? "已关联人工终稿" : "待 memoQ 审校")),
         h("div", { className: "metrics" }, h("span", null, h("strong", null, `${done}/${selected.length}`), t("段")), h("span", null, h("strong", null, problems), t("问题")), failed > 0 && h("span", { className: "error" }, h("strong", null, failed), t("失败"))),
         h("div", { className: "stages" }, ...[["translation", "翻译"], ["aiQa", "质量检查"], ["qualityReport", "一致性"], ["termSurvey", "术语普查"]].map(([key, label]) => h("div", { className: "stage", key, "data-active": key === "aiQa" ? qa.busy : ["in_progress", "waiting"].includes(run.workflow?.[key]?.status), title: key === "aiQa" ? qaDescription : run.workflow?.[key]?.message || "" }, h("strong", null, t(label)), h("span", null, key === "aiQa" ? t(qa.label) : stateText(run.workflow?.[key]?.status, t))))),
         h("div", { className: "button-row" }, ["running", "queued"].includes(run.runState)
           ? h(Button, { onClick: () => command("pause"), busy: model.view.operations[`pause:${id}`]?.pending }, t("暂停"))
-          : done === selected.length && selected.length && !locked ? h(Button, { primary: true, disabled: pending || model.view.operations[`qa:${id}`]?.pending, busy: model.view.operations[`retry-qa:${id}`]?.pending, onClick: qaFailed ? () => command("retry-qa") : review }, t(qaFailed ? "重试未完成 QA" : "复核译文"))
+          : done === selected.length && selected.length && !locked ? h(Button, { primary: true, disabled: pending || model.view.operations[`qa:${id}`]?.pending, busy: model.view.operations[`retry-qa:${id}`]?.pending, onClick: qaFailed ? () => command("retry-qa") : review }, t(qaFailed ? "重试未完成 QA" : "检查译文"))
           : h(Button, { primary: true, onClick: () => command("start"), busy: model.view.operations[`start:${id}`]?.pending, disabled: locked || pending || model.view.operations[`qa:${id}`]?.pending || run.contextBriefPending || (run.requiresBrief && run.contextBrief?.status !== "ready") }, h(Glyph, { name: "arrow" }), t(locked ? "等待当前阶段结束" : done ? "继续翻译" : "开始翻译")),
           h(Button, { onClick: () => model.save(), disabled: !pending || locked, busy: model.view.operations.save?.pending }, t("保存修改")),
           done > 0 && h(Button, { onClick: exportFile, disabled: locked || pending, quiet: true }, t("工作区导出"))),
@@ -510,12 +535,7 @@ window.__ModuleLoader__.load({
         token.view.sections[qaKey] = value; await model.saveQaResults(value, token, id);
       });
       const savedReport = () => model.loadSection(qaKey, (token) => model.invoke(model.path(`/api/qa/batch/${encodeURIComponent(id)}`, {}, token), "GET", undefined, token));
-      const approve = (item) => model.perform(`approve:${id}:${item.id}`, async (token) => {
-        await model.invoke("/api/feedback/accept", "POST", scopeArgs(model, token, { source: item.source, translation: item.translation, batchId: id, trajectoryId: item.result?.trajectoryId, contentType: run.contentType, sourceFile: run.filename, entryId: item.id }), token);
-        token.view.approvals[`${id}:${item.id}`] = item.translation;
-        await model.loadRun(token, id); return "已人工采纳";
-      });
-      return h("section", { className: "stack" }, h("div", { className: "section-heading" }, h("h3", null, t("译文复核")), h("span", { className: "muted" }, `${page.total} / ${run.segments.length} ${t("段")}`)),
+      return h("section", { className: "stack" }, h("div", { className: "section-heading" }, h("h3", null, t("译文检查")), h("span", { className: "muted" }, `${page.total} / ${run.segments.length} ${t("段")}`)),
         h("div", { className: "review-toolbar" }, h("input", { type: "search", value: query, placeholder: t("搜索原文、译文或段号"), "aria-label": t("搜索译段"), onChange: (event) => { setQuery(event.target.value); setOffset(0); setEditing(false); } }),
           h("select", { value: filter, "aria-label": t("译段筛选"), onChange: (event) => { setFilter(event.target.value); setOffset(0); setEditing(false); } }, ...[["all", "全部译段"], ["issues", "仅看问题"], ["pending", "尚未翻译"]].map(([value, label]) => h("option", { key: value, value }, t(label))))),
         h("div", { className: "button-row" }, h(Button, { small: true, onClick: inspect, disabled: locked || model.dirty() || !run.segments.some((item) => item.translation?.trim()) }, t("检查本批次")), h(Button, { small: true, quiet: true, onClick: savedReport }, t("查看上次报告")),
@@ -529,11 +549,11 @@ window.__ModuleLoader__.load({
             locked && h("p", { className: "muted" }, t("执行中只读；阶段结束后可编辑译文。")),
             h("div", { className: "pairs" }, h("div", null, h("span", { className: "source-label" }, t("原文")), h("p", { className: "source-text" }, segment.source)), h("label", null, h("span", { className: "source-label" }, t("译文")), h("textarea", { value: segment.translation || "", readOnly: locked, "aria-label": `${t("译文")} ${current.number}`, onChange: (event) => model.edit(segment.id, event.target.value) }))),
             h("ul", { className: "issues" }, ...issuesOf(segment).map((issue, index) => h("li", { key: index }, issue.message || issue.description || ""))),
-            h("div", { className: "segment-footer" }, segment.accepted && !segment.draft ? h("span", { className: "badge" }, t("已人工采纳")) : h("details", null, h("summary", null, t("采纳为正式译法")), h("p", { className: "muted" }, t("将保存当前译文为人工批准的 TM，并写入学习证据。")), segment.draft && h("p", { className: "muted" }, t("保存译文后才能正式采纳。")), h(Button, { small: true, disabled: locked || segment.draft || !segment.translation?.trim(), busy: model.view.operations[`approve:${id}:${segment.id}`]?.pending, onClick: () => approve(segment) }, t("确认采纳")))),
-            h("div", { className: "button-row" }, h(Button, { primary: true, small: true, onClick: () => model.save(), disabled: !model.dirty() || locked, busy: model.view.operations.save?.pending }, t("保存修改"))), h(Feedback, { model, name: "save", t }), h(Feedback, { model, name: `approve:${id}:${segment.id}`, retry: () => approve(segment), t }))),
+            h("div", { className: "segment-footer" }, h("span", { className: "muted" }, t(segment.accepted && !segment.draft ? segment.result?.humanReview?.source === "external-review-import" ? "已关联人工终稿" : "人工确认" : "人工审校在 memoQ 完成，之后关联本地终稿。"))),
+            h("div", { className: "button-row" }, h(Button, { primary: true, small: true, onClick: () => model.save(), disabled: !model.dirty() || locked, busy: model.view.operations.save?.pending }, t("保存修改"))), h(Feedback, { model, name: "save", t }))),
         !page.total && h(Empty, { title: "此筛选下没有译段", t }));
     }
-    function ExportPanel({ model, run, t }) {
+    function ExportPanel({ model, run, t, onFinal }) {
       const [path, setPath] = useState(""), id = run.batchId, key = `export:${id}`, receipt = model.view.exports[id];
       const write = () => model.perform(key, async (token) => {
         const result = await model.request({ action: "export", batchId: id, projectId: token.view.projectId, mode: "writeback", outputPath: path.trim() }, token);
@@ -544,7 +564,32 @@ window.__ModuleLoader__.load({
         h("p", { className: "muted" }, t("留空使用工作区默认输出目录；同名文件会报错。")),
         h(Button, { onClick: write, busy: model.view.operations[key]?.pending, disabled: editingLocked(run) || model.dirty() || model.view.operations[`qa:${id}`]?.pending || !run.segments.some((segment) => segment.translation?.trim()) }, t("导出文件")),
         model.dirty() && h("p", { className: "muted" }, t("未保存译文不会用于检查或导出。")), h(Feedback, { model, name: key, retry: write, t }),
-        receipt && h("div", { className: "notice", role: "status" }, h("strong", null, t("导出成功")), h("p", null, h("code", null, receipt.path)), h("span", { className: "muted" }, `${sizeText(receipt.bytes)} · ${timeText(receipt.at)}`)));
+        receipt && h("div", { className: "notice", role: "status" }, h("strong", null, t("导出成功")), h("p", null, h("code", null, receipt.path)), h("span", { className: "muted" }, `${sizeText(receipt.bytes)} · ${timeText(receipt.at)}`)),
+        ["mqxliff", "xliff"].includes(run.format) && h("div", { className: "stack" }, h("p", { className: "muted" }, t("导入 memoQ 并完成人工审校后，将双语终稿放回工作区，再关联到本批次。")), h(Button, { onClick: onFinal, quiet: true }, t("关联人工终稿"))));
+    }
+    function FinalReviewPanel({ model, run, t }) {
+      const current = run.runnerOptions?.reviewFinal, id = run.batchId, key = `final:${id}`;
+      const libraries = (model.workspace?.libraries || []).filter((item) => item.kind === "translation_memory" && item.role !== "working" && item.enabled !== false);
+      const [path, setPath] = useState(current?.path || ""), [libraryId, setLibraryId] = useState(current?.libraryId || libraries.find((item) => item.role === "master")?.id || libraries[0]?.id || ""), [offset, setOffset] = useState(0);
+      const report = model.view.sections[key] || current?.report, terms = (report?.termSurvey?.review?.terms || []).filter((item) => item.action === "pending_review");
+      const link = () => model.linkReviewedFinal({ path: path.trim(), libraryId });
+      if (!["mqxliff", "xliff"].includes(run.format)) return h(Empty, { title: "人工终稿使用 MQXLIFF / XLIFF", description: "从 memoQ 导出双语原文件建批，可用条目身份准确接回人工终稿。", t });
+      return h("div", { className: "stack final-review" }, h("details", { className: "card stack", open: !current?.complete || undefined }, h("summary", { className: "section-heading" }, t(current?.complete ? "更换或重新关联终稿" : "关联人工终稿"), h("span", { className: "badge" }, t(current?.complete ? "已关联人工终稿" : "待 memoQ 审校"))),
+        h("p", { className: "muted" }, t("在 memoQ 完成人工审校后，关联本地双语终稿。整份终稿用于 TM，本批对应译段用于学习差异和术语更新。")),
+        h("label", null, t("人工终稿相对路径"), h("input", { value: path, placeholder: "reviewed/story.mqxliff", onChange: (event) => setPath(event.target.value) })),
+        h("label", null, t("终稿记忆库"), h("select", { value: libraryId, onChange: (event) => setLibraryId(event.target.value) }, ...libraries.map((library) => h("option", { key: library.id, value: library.id }, library.name)))),
+        h(Button, { primary: true, onClick: link, disabled: !path.trim() || !libraryId || editingLocked(run) || model.dirty(), busy: model.view.operations[key]?.pending }, t("关联人工终稿")),
+        model.dirty() && h("p", { className: "muted" }, t("请先保存或放弃当前译文草稿，再关联人工终稿")),
+        h(Feedback, { model, name: key, retry: link, t })),
+        report && h("section", { className: "card stack", "aria-label": t("终稿关联报告") }, h("h3", null, t("终稿关联报告")),
+          h("div", { className: "metrics" }, ...[["TM 条目", report.memoriesWritten], ["学习轨迹", (report.trajectoriesLinked || 0) + (report.trajectoriesUpdated || 0) + (report.trajectoryAcceptedUnchanged || 0)], ["术语更新", report.termSurvey?.autoWritten], ["待核对术语", report.termSurvey?.pendingReview]].map(([label, value]) => h("span", { key: label }, h("strong", null, value || 0), t(label)))),
+          h("p", { className: "muted" }, `${t("对齐原批次")} ${report.matched || 0} ${t("段")} · ${t("修改")} ${report.changed || 0} ${t("段")}`),
+          h("p", { className: "muted" }, t("已记录的人工终稿可在学习中心生成项目风格候选。")),
+          report.termSurvey?.warning && h("p", { className: "error", role: "alert" }, report.termSurvey.warning),
+          ...(report.failures || []).map((item, index) => h("p", { className: "error", key: index, role: "alert" }, item.reason)),
+          ((report.rejected?.unmatched?.length || 0) + (report.rejected?.ambiguous?.length || 0) > 0) && h("details", null, h("summary", null, t("未采用的终稿条目")), ...(report.rejected.unmatched || []).concat(report.rejected.ambiguous || []).slice(0, 20).map((item, index) => h("p", { key: index }, item.source, " · ", item.reason))),
+          current?.hash && h("details", null, h("summary", null, t("文件版本")), h("p", null, h("code", null, current.path)), h("code", null, current.hash), h("p", { className: "muted" }, timeText(current.at)))),
+        terms.length > 0 && h("section", { className: "card stack" }, h("h3", null, t("待核对术语")), h("p", { className: "muted" }, t("已有译法冲突或证据不足的条目集中保留，核对后再更新术语库。")), ...terms.slice(offset, offset + 20).map((item, index) => h("article", { className: "resource-row", key: index }, h("strong", null, `${item.source} → ${item.target}`), h("p", { className: "muted" }, item.reason))), h(Pager, { offset, total: terms.length, onChange: setOffset, t })));
     }
     function TaskHistory({ model, t }) {
       const [expanded, setExpanded] = useState(false), tasks = model.view.tasks;
@@ -568,8 +613,8 @@ window.__ModuleLoader__.load({
         notice === "draft" && h("div", { className: "notice", role: "status" }, t("有未保存的译文草稿"), h("p", { className: "muted" }, t("草稿保存在当前会话中，退出应用前请保存。"))),
         !run && !view.operations["task-load"]?.pending && h(Empty, { title: "从工作区开始", description: "指定原文、关联资源，然后开始第一批翻译。", artwork: true, t }),
         (!run || panel === "overview") && h(QuickBatch, { model, t }),
-        run && h("section", { className: "stack", key: run.batchId }, h("div", { className: "type-tabs", "aria-label": t("当前任务分区") }, ...[["overview", "任务概览"], ["review", "译文复核"], ["export", "工作区导出"]].map(([value, label]) => h("button", { type: "button", key: value, "aria-pressed": panel === value, onClick: () => setPanel(value) }, t(label)))),
-          panel === "overview" ? h(TaskSummary, { model, run, t, review: () => setPanel("review"), exportFile: () => setPanel("export") }) : panel === "review" ? h(ReviewPanel, { model, run, t, key: run.batchId }) : h(ExportPanel, { model, run, t, key: run.batchId })), h(TaskHistory, { model, t }));
+        run && h("section", { className: "stack", key: run.batchId }, h("div", { className: "type-tabs", "aria-label": t("当前任务分区") }, ...[["overview", "任务概览"], ["review", "译文检查"], ["export", "工作区导出"], ["final", "终稿与学习"]].map(([value, label]) => h("button", { type: "button", key: value, "aria-pressed": panel === value, onClick: () => setPanel(value) }, t(label)))),
+          panel === "overview" ? h(TaskSummary, { model, run, t, review: () => setPanel("review"), exportFile: () => setPanel("export") }) : panel === "review" ? h(ReviewPanel, { model, run, t, key: run.batchId }) : panel === "final" ? h(FinalReviewPanel, { model, run, t, key: run.batchId }) : h(ExportPanel, { model, run, t, key: run.batchId, onFinal: () => setPanel("final") })), h(TaskHistory, { model, t }));
     }
     function ResourcePreview({ model, preview, t, close }) {
       const key = `agent-read:${preview.purpose}:${preview.path}`;
@@ -657,7 +702,7 @@ window.__ModuleLoader__.load({
             mode === "files" && library ? h(LocalFiles, { model, purpose, library, t, key: libraryId }) : h(React.Fragment, null,
             h("form", { className: "button-row", onSubmit: (event) => { event.preventDefault(); setSearch(input); setOffset(0); if (search === input) model.loadSection(section, load); } }, h("input", { type: "search", value: input, placeholder: t(filesMode ? "搜索来源文件" : "搜索资产"), "aria-label": t(filesMode ? "搜索来源文件" : "搜索资产"), onChange: (event) => setInput(event.target.value) }), h(Button, { onClick: () => { setSearch(input); setOffset(0); if (search === input) model.loadSection(section, load); } }, t("搜索"))),
             h(Feedback, { model, name: `section:${section}`, retry: () => model.loadSection(section, load), t }),
-            h("div", null, ...rows.map((item, index) => filesMode ? h("article", { className: "library-row", key: item.sourceFile || index }, h("div", { className: "library-title" }, h("strong", null, item.sourceFile || t("未标注来源")), h("p", { className: "muted" }, `${item.entryCount || item.count || 0} ${t("条")} · ${item.learning?.humanReviewed || 0} ${t("条人工终稿")}`), item.batch && h("p", { className: "muted" }, `${t("翻译进度")} ${item.batch.completedSegments || 0} / ${item.batch.totalSegments || 0}`)), h(Button, { small: true, onClick: () => open(libraryId, item.sourceFile || "__none__") }, t("查看条目")))
+            h("div", null, ...rows.map((item, index) => filesMode ? h("article", { className: "library-row", key: item.sourceFile || index }, h("div", { className: "library-title" }, h("strong", null, item.sourceFile || t("未标注来源")), h("p", { className: "muted" }, `${item.entryCount || item.count || 0} ${t("条")} · ${item.learning?.humanReviewed || 0} ${t("条已审校轨迹")}`), item.batch && h("p", { className: "muted" }, `${t("翻译进度")} ${item.batch.completedSegments || 0} / ${item.batch.totalSegments || 0}`)), h(Button, { small: true, onClick: () => open(libraryId, item.sourceFile || "__none__") }, t("查看条目")))
               : h("article", { className: "asset-row", key: item.id || index }, h("div", null, h("span", { className: "muted" }, t("原文")), h("p", null, item.source || item.name || "")), h("div", null, h("span", { className: "muted" }, t("译文")), h("p", null, item.target || item.translation || "")), h("span", { className: "badge" }, t(({ human_approved: "人工确认", machine_verified: "机器译文", approved: "已批准", draft: "草稿" })[item.qualityStatus || item.status] || item.qualityStatus || item.status || "")))), !rows.length && !model.view.operations[`section:${section}`]?.pending && h(Empty, { title: filesMode ? "此库暂无来源文件" : "暂无正式资产", t })),
             h(Pager, { offset, total: data.total || 0, onChange: setOffset, t }))), !libraryId && h(Feedback, { model, name: priorityKey, t }));
     }

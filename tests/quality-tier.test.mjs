@@ -33,10 +33,13 @@ test("逐段自动判档：短标签走快速，事实与承诺走严苛，其�
   );
   assert.equal(selectQualityTier({ source: "ご利用規約に同意してください。", purpose: "general" }).tier, "strict");
   assert.equal(selectQualityTier({ source: "限时抢购，立刻购买！", purpose: "marketing" }).tier, "standard");
-  assert.equal(selectQualityTier({ source: "この先は危険です。", purpose: "dialogue" }).tier, "fast");
+  assert.equal(selectQualityTier({ source: "この先は危険です。", purpose: "dialogue" }).tier, "standard");
   const long = selectQualityTier({ source: "説明".repeat(200), purpose: "narrative" });
-  assert.equal(long.tier, "strict");
-  assert.match(long.reason, /信息密度/u);
+  assert.equal(long.tier, "standard");
+  assert.equal(selectQualityTier({ source: "HPは100、MPは50です。", purpose: "item_description", factCount: 2 }).tier, "standard");
+  assert.equal(selectQualityTier({ source: "確認", purpose: "ui", termConflicts: 1 }).tier, "standard");
+  assert.equal(selectQualityTier({ source: "確認", purpose: "ui", protectedTokens: ["{a}", "{b}", "{c}"] }).tier, "standard");
+  assert.equal(selectQualityTier({ source: "確認", purpose: "ui", metadata: [{ role: "constraint", value: "8 字" }, { role: "constraint", value: "两行以内" }] }).tier, "strict");
   const manual = selectQualityTier({ source: "確認", purpose: "ui", manualTier: "strict" });
   assert.equal(manual.tier, "strict");
   assert.equal(manual.manual, true);
@@ -86,13 +89,15 @@ test("质量档映射到执行计划：模型角色、候选数与修订轮次",
   assert.equal(strict.modelRole, "main");
   assert.equal(strict.modelFallback, true, "没配高质量模型时必须标注回落");
   assert.equal(strict.maxRevisions, 2);
+  assert.equal(strict.reflect, false, "严苛档由统一 QA 审查，不重复反思");
   assert.match(describeTierStrength({ tier: "strict", provider: {} }), /未启用更强模型/u);
 
   const creative = planQualityTier({ tier: "strict", purpose: "marketing", provider: { model: "main" } });
-  assert.equal(creative.route, "transcreation");
-  assert.equal(creative.candidateCount, 3);
+  assert.equal(creative.route, "fact_guarded");
+  assert.equal(creative.candidateCount, 1);
 
   const postEdit = planQualityTier({ tier: "strict", purpose: "announcement", provider: { model: "main", mtModel: "mt" } });
-  assert.equal(postEdit.route, "mt_post_edit");
+  assert.equal(postEdit.route, "fact_guarded");
+  assert.equal(planQualityTier({ tier: "strict", manualRoute: "multi_candidate" }).route, "multi_candidate");
   assert.match(describeTierStrength({ tier: "strict", provider: { qualityModel: "quality" } }), /quality/u);
 });

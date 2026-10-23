@@ -52,7 +52,7 @@ test("回填时用人工终稿确认术语，并按策略分流入库", () => {
   assert.match(server, /async function applyTermSurveyToReview\(\{ run, projectId, filename, applied, scope \}\)/u);
   assert.match(server, /alignSurveyToHumanFinal\(\{ terms: surveyed, pairs \}\)/u);
   assert.match(server, /async function persistTermCandidateInputs\(\{ locale, projectId, contentType = "general", domain = "general", batchId = "", filename = "", inputs = \[\], presetPending = \[\], sourceLabel = "术语候选" \}\)/u);
-  assert.match(server, /const decision = decideTermWrite\(\n\s*\{ source: candidate\.source, target: candidate\.target, proposalAction: candidate\.proposalAction, verbatim: input\.verbatim === true \},/u);
+  assert.match(server, /const decision = decideTermWrite\(\n\s*\{ source: candidate\.source, target: candidate\.target, proposalAction: candidate\.proposalAction, verbatim: input\.verbatim === true, humanFinalVerified: input\.humanFinalVerified === true, confidence: input\.confidence \},/u);
   assert.match(server, /termSurvey,/u, "回填响应要带回术语普查统计");
 });
 

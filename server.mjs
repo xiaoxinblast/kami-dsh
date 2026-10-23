@@ -124,6 +124,7 @@ const batchWorkers = new Map();
 const batchQaWorkers = new Map();
 const batchQaStarts = new Map();
 const batchWorkflowWrites = new Map();
+const reviewFinalLocks = new Set();
 /** 批中手动改过的工作术语：内存里比批次记录新，跑批循环每段会先看一眼。 */
 const workingGlossaryOverrides = new Map();
 /**
@@ -1624,8 +1625,10 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
     initialScore = score;
     while (score < passScore && iterations < maxRevisions) {
       const actionable = [...hardIssues.map((issue) => ({ severity: "critical", category: issue.type, message: issue.message })), ...aiIssues];
+      const previousTranslation = translation;
       translation = await reviseTranslationWithQa({ contextPack, translation, issues: actionable, references, qaCases });
       iterations += 1;
+      if (translation.trim() === previousTranslation.trim()) break;
       hardIssues = deterministicIssues(translation);
       aiIssues = await evaluateTranslationWithModel({ contextPack, translation, references: approvedReferences, machineDrafts, qaCases });
       score = calculateQaScore({ hardIssues, aiIssues });
@@ -2721,7 +2724,7 @@ async function translateBatchSegment(body, path = "/api/translate") {
  * 回填时把"翻译期术语普查"的结果用人工终稿确认，并按策略入库。
  *
  * 分工是刻意的：模型只负责"哪个词像术语"，译法一律以人工终稿为准。
- * 自动入库仅限"库里没有该源词 + 终稿逐字保留了 AI 建议译法"，其余进待审核批次。
+ * 新词以终稿逐字证据或高置信对齐结果入库；已有译法冲突与证据不足进待审核批次。
  */
 async function applyTermSurveyToReview({ run, projectId, filename, applied, scope }) {
   const stats = { surveyed: 0, confirmed: 0, resolved: 0, autoWritten: 0, pendingReview: 0, skipped: 0, libraryName: "", warning: "", batchId: "" };
@@ -2859,8 +2862,12 @@ async function persistTermCandidateInputs({ locale, projectId, contentType = "ge
       stats.unmatched += 1;
       continue;
     }
+    if (candidate.proposalAction === "add_usage_evidence") {
+      stats.items.push({ source: candidate.source, target: candidate.target, action: "unchanged", reason: "与库中译法一致" });
+      continue;
+    }
     const decision = decideTermWrite(
-      { source: candidate.source, target: candidate.target, proposalAction: candidate.proposalAction, verbatim: input.verbatim === true },
+      { source: candidate.source, target: candidate.target, proposalAction: candidate.proposalAction, verbatim: input.verbatim === true, humanFinalVerified: input.humanFinalVerified === true, confidence: input.confidence },
       { existingTerms, autoWriteEnabled }
     );
     const record = {
@@ -2982,7 +2989,21 @@ async function persistTermCandidateInputs({ locale, projectId, contentType = "ge
   return stats;
 }
 
-async function importBatchReview({ run, pairs, projectId, filename }) {
+async function importBatchReview(args) {
+  const run = await getBatchRun(args.run.batchId) || args.run;
+  if (run.projectId !== args.projectId) throw new Error("人工终稿与原批次项目不匹配");
+  const workflow = await loadBatchWorkflow(run);
+  if (workflow.writeBusy || reviewFinalLocks.has(run.batchId)) throw Object.assign(new Error("当前翻译、QA 或终稿关联尚未结束，请稍后重试"), { statusCode: 409 });
+  reviewFinalLocks.add(run.batchId);
+  try { return await applyBatchReview({ ...args, run }); }
+  finally { reviewFinalLocks.delete(run.batchId); }
+}
+
+async function applyBatchReview({ run, pairs, projectId, filename, libraryId = "", memoryPairs = null, reviewFile = null, rejected = null }) {
+  const libraries = await getResourceLibraries(projectId);
+  const masterTm = libraryId ? libraries.find((library) => library.id === libraryId && library.kind === "translation_memory")
+    : libraries.find((library) => library.kind === "translation_memory" && library.role === "master");
+  if (!masterTm || masterTm.enabled === false || masterTm.role === "working") throw new Error("请选择已启用的主 TM 或参考 TM 保存人工终稿");
   const segments = Array.isArray(run.segments) ? run.segments : [];
   const selected = segments.filter((segment) => segment.selected !== false);
   const matched = matchReviewPairsToSegments(selected, pairs);
@@ -2990,17 +3011,22 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
   const applied = matched.matches.map((match) => {
     const segment = selected[match.segmentIndex];
     const pair = pairs[match.pairIndex];
-    const previousTranslation = String(segment.translation || "");
+    const previousTranslation = String(segment.result?.humanReview?.previousTranslation ?? segment.translation ?? "");
     segment.translation = String(pair.target || "").trim();
+    segment.status = "done";
     segment.accepted = true;
     segment.result = {
       ...(segment.result || {}),
+      translation: segment.translation,
+      issues: [], qa: null, qaScore: null,
+      aiQa: { status: "external_review", used: false, score: null },
       humanReview: {
         source: "external-review-import",
         at: appliedAt,
         method: match.method,
         previousTranslation,
         sourceFile: filename,
+        sourceHash: reviewFile?.hash || "",
         sourceRow: pair.sourceRow || null
       }
     };
@@ -3008,8 +3034,6 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
   });
   if (applied.length) await saveBatchRun({ ...run, segments });
 
-  const libraries = await getResourceLibraries(projectId).catch(() => []);
-  const masterTm = libraries.find((library) => library.kind === "translation_memory" && library.role === "master");
   const trajectoryMatch = linkExternalReviewTrajectories(
     applied.map(({ pair }) => ({
       source: pair.source, target: pair.target,
@@ -3017,7 +3041,7 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
       sheet: pair.sheet || "", sourceRow: pair.sourceRow || null,
       previousSource: pair.previousSource || "", nextSource: pair.nextSource || ""
     })),
-    await trajectoriesForExternalReview(run.locale, projectId)
+    (await trajectoriesForExternalReview(run.locale, projectId)).filter((trajectory) => trajectory.batchId === run.batchId)
   );
   const linkByIndex = new Map(trajectoryMatch.links.map((link) => [link.candidateIndex, link]));
   // 已采纳过的轨迹也要能定位：终稿这次若有变化，学习语料必须跟着更新，不能只更新 TM。
@@ -3027,23 +3051,33 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
   let trajectoriesLinked = 0;
   let trajectoriesUpdated = 0;
   let acceptedUnchanged = 0;
-  for (const [index, { pair }] of applied.entries()) {
-    try {
-      await saveMemory(run.locale, {
+  const indexedPairs = memoryPairs || applied.map(({ pair }) => pair);
+  const failedSources = new Set();
+  try {
+    const saved = await saveMemories(run.locale, indexedPairs.map((pair) => ({
         source: pair.source, target: pair.target,
         domain: run.domain || "general", contentType: run.contentType || "general",
         qualityStatus: "human_approved", qaScore: 100,
         provenance: "external-review-import",
         sourceFile: filename, batchId: run.batchId,
-        projectId, project: projectId, libraryId: masterTm?.id || "",
-        entryId: pair.entryId || "", entryKey: pair.entryKey || "",
+        projectId, project: projectId, libraryId: masterTm.id,
+        entryId: pair.entryId || "", entryKey: pair.entryKey || (reviewFile && pair.entryId ? `${run.batchId}:${pair.entryId}` : ""),
         previousSource: pair.previousSource || "", nextSource: pair.nextSource || ""
-      });
-      memoriesWritten += 1;
-    } catch (error) {
-      failures.push({ source: pair.source, reason: `写入主 TM 失败：${error.message}` });
-      continue;
-    }
+    })));
+    saved.forEach((item, index) => {
+      if (item?.id && !item.error) memoriesWritten += 1;
+      else {
+        const source = indexedPairs[index].source;
+        failedSources.add(source);
+        failures.push({ source, reason: `写入 TM 失败：${item?.error || "未返回写入结果"}` });
+      }
+    });
+  } catch (error) {
+    for (const pair of indexedPairs) failedSources.add(pair.source);
+    failures.push({ source: "", reason: `写入 TM 失败：${error.message}` });
+  }
+  for (const [index, { pair }] of applied.entries()) {
+    if (failedSources.has(pair.source)) continue;
     const link = linkByIndex.get(index);
     if (link) {
       try {
@@ -3116,7 +3150,7 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
     console.error("审校回填后处理术语普查失败", error);
     termSurvey = { error: error.message };
   }
-  return {
+  const report = {
     batchId: run.batchId, filename, total: pairs.length,
     matched: matched.matches.length,
     changed: matched.matches.filter((match) => match.changed).length,
@@ -3132,6 +3166,7 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
     trajectoryAmbiguous: trajectoryMatch.ambiguous.length,
     regression,
     termSurvey,
+    rejected,
     // 本批解析时跳过的句段：回填里"原文不在批次中"的条目多半就是它们（锁定 / 已有译文），
     // 明细里带上原因，用户才看得懂为什么这几条进不来。
     skippedUnits: {
@@ -3144,6 +3179,12 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
       ambiguous: matched.ambiguous.slice(0, 50)
     }
   };
+  if (reviewFile) {
+    const latest = await getBatchRun(run.batchId) || run;
+    await saveBatchRun({ ...latest, runnerOptions: { ...latest.runnerOptions, reviewFinal: { ...reviewFile, at: appliedAt,
+      version: (latest.runnerOptions?.reviewFinal?.version || 0) + 1, complete: !failures.length, report } } });
+  }
+  return report;
 }
 
 /** 语境分析与一致性核对都是"整份文件"级任务：同一批次同时只允许跑一个。 */
@@ -4097,7 +4138,7 @@ async function loadBatchWorkflow(run, knownTasks = new Map()) {
       }
     }
   }
-  return { ...workflow, qaRetryBusy: batchQaWorkers.has(run.batchId), writeBusy: batchWorkers.has(run.batchId) || batchQaWorkers.has(run.batchId)
+  return { ...workflow, reviewFinalBusy: reviewFinalLocks.has(run.batchId), qaRetryBusy: batchQaWorkers.has(run.batchId), writeBusy: reviewFinalLocks.has(run.batchId) || batchWorkers.has(run.batchId) || batchQaWorkers.has(run.batchId)
     || batchQaStarts.has(run.batchId) || consistencyCheckTasks.has(run.batchId) || termSurveyTasks.has(run.batchId) };
 }
 
@@ -4241,6 +4282,8 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
 }
 
 async function apiHandler(req, res, url) {
+  const lockedBatch = /^\/api\/batch\/run\/([^/]+)/u.exec(url.pathname)?.[1];
+  if (req.method !== "GET" && lockedBatch && reviewFinalLocks.has(decodeURIComponent(lockedBatch))) return json(res, 409, { error: "人工终稿正在关联，请稍后重试" });
   if (req.method === "GET" && url.pathname === "/api/health") {
     return json(res, 200, { ok: true, version: "0.7.0", locales: ACTIVE_LOCALES, backend: getStoreMetadata() });
   }
@@ -4511,8 +4554,10 @@ async function apiHandler(req, res, url) {
       libraryId, total: files.length, offset, limit,
       files: files.slice(offset, offset + limit).map((file) => {
         const name = String(file.sourceFile || "").trim();
-        const run = name ? runByFile.get(name) : null;
-        const learning = learningByFile.get(name);
+        const run = runs.find((item) => item.batchId === file.batchId) || (name ? runByFile.get(name) : null);
+        const final = run?.runnerOptions?.reviewFinal;
+        const reviewed = (final?.report?.trajectoriesLinked || 0) + (final?.report?.trajectoriesUpdated || 0) + (final?.report?.trajectoryAcceptedUnchanged || 0);
+        const learning = final?.path === name ? { count: reviewed, humanReviewed: reviewed } : learningByFile.get(name) || learningByFile.get(run?.filename);
         return {
           ...file,
           batch: run ? {
@@ -6591,6 +6636,7 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
     const body = await readJsonBody(req);
+    if (reviewFinalLocks.has(body.batchId)) return json(res, 409, { error: "人工终稿正在关联，请稍后重试" });
     const existing = body.batchId ? await getBatchRun(body.batchId) : null;
     if (existing && Array.isArray(body.segments) && (await loadBatchWorkflow(existing)).writeBusy) {
       return json(res, 409, { error: "当前翻译或 QA 尚未结束，请保留草稿并在阶段结束后保存" });
@@ -6929,6 +6975,7 @@ async function apiHandler(req, res, url) {
     assertActiveLocale(run.locale);
     // 质量报告（含 AI 终审）没跑完不能导出：它可能还会改译文。
     const exportWorkflow = await loadBatchWorkflow(run);
+    if (exportWorkflow.reviewFinalBusy) return json(res, 409, { error: "人工终稿正在关联，请稍后导出" });
     if (batchQualityReportPending(run, exportWorkflow)) {
       const error = new Error("质量报告还在生成（含 AI 终审），完成后才能导出。进度可在任务中心查看。");
       error.statusCode = 409;
@@ -7308,10 +7355,11 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/batch/export") {
     const body = await readJsonBody(req);
+    if (reviewFinalLocks.has(body.batchId)) return json(res, 409, { error: "人工终稿正在关联，请稍后导出" });
     // 写回原文件时优先用批次存档里的原文件：用户在导入时已经上传过，不该再问一次。
     if (body.mode !== "translation-only" && !body.base64 && body.batchId) {
       const run = await getBatchRun(String(body.batchId)).catch(() => null);
-      const stored = await readBatchOriginal({ dataRoot: DATA_ROOT, relativePath: run?.runnerOptions?.originalFile });
+      const stored = await readBatchOriginal({ dataRoot: runtimeOptions().dataDirectory || DATA_ROOT, relativePath: run?.runnerOptions?.originalFile });
       if (stored) {
         body.base64 = stored.toString("base64");
         body.filename = body.filename || run.filename;
@@ -7655,6 +7703,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
   }
   if (req.method === "POST" && url.pathname === "/api/auto-qa") {
     const body = await readJsonBody(req);
+    if (reviewFinalLocks.has(body.batchId)) return json(res, 409, { error: "人工终稿正在关联，请稍后检查" });
     const locale = assertActiveLocale(body.locale);
     const source = String(body.source || "").trim();
     const translation = String(body.translation || "").trim();
@@ -8323,6 +8372,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
       batchReferences: body.batchReferences || [],
       patternReferences: body.patternReferences || [],
       batchGroupEntries: body.batchGroupEntries || [],
+      documentBrief: body.documentBrief || null,
       factSchema,
       // 当前段落的条目身份（memoQ x-mmq-context / 表格里的条目 ID 列）。
       entryId: body.entryId || "",
@@ -8349,7 +8399,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
       metadata: neighborMetadata,
       manualTier
     });
-    const tierPlanFor = (tier) => planQualityTier({ tier, purpose: classification.contentType, provider, risk });
+    const tierPlanFor = (tier) => planQualityTier({ tier, purpose: classification.contentType, provider, risk, manualRoute: body.route });
     let routing = tierPlanFor(tierDecision.tier);
     let qualityTier = routing.tier;
     let qualityUpgradeFrom = "";
@@ -8395,14 +8445,15 @@ async function evaluateQaBatch(batchId, projectId = "") {
         skill: translationSkill,
         onActivity: (activity) => referenceUsages.push(activity)
       });
-      const executePlan = async (plan) => {
+      const executePlan = async (plan, previousResult = null) => {
         const useModelQa = aiQaEnabled && plan.modelQa;
-        const translationResult = await translateWithRoute(contextPack, { routePlan: plan, reflect: plan.reflect === true, toolRunner: referenceToolRunner });
+        const planContext = { ...contextPack, qualityTier: plan.tier };
+        const translationResult = previousResult || await translateWithRoute(planContext, { routePlan: plan, reflect: plan.reflect === true, toolRunner: referenceToolRunner });
         if (useModelQa) {
           const loop = await runAiQaLoop({
-            contextPack, initialTranslation: translationResult.translation, matches, locale,
+            contextPack: planContext, initialTranslation: translationResult.translation, matches, locale,
             contentType: classification.contentType, domain, batchId: body.batchId || "",
-            providedReferences: translationReferences, passScore: routedPassScore,
+            providedReferences: translationReferences, passScore: Math.max(routedPassScore, plan.tier === "strict" ? 93 : 0),
             maxRevisions: Math.min(maxRevisions, Number.isFinite(plan.maxRevisions) ? plan.maxRevisions : maxRevisions),
             projectSettings, projectId
           });
@@ -8425,10 +8476,13 @@ async function evaluateQaBatch(batchId, projectId = "") {
         qaScore: aiQa.score,
         hardErrorCount: hardErrorCount(aiQa.issues),
         riskTier: risk.tier,
+        passScore: Math.max(routedPassScore, routing.tier === "strict" ? 93 : 0),
         hasQualityUpgrade: Boolean(routing.upgradeTier),
         aiQaUsed: aiQa.used
       });
-      if (!aiQa.used) {
+      if (aiQa.fallbackReason) {
+        qualityRoute = { decision: "human_review", threshold: routedPassScore, reason: `模型质检未完成：${aiQa.fallbackReason}` };
+      } else if (!aiQa.used && (!routing.modelQa || !aiQaEnabled)) {
         // 没跑模型质检时"AIQA 未完成"不构成阻断：确定性检查干净就放行，
         // 出现阻断问题则升档重做，而不是把整批快速档段落都推给人工。
         qualityRoute = hardErrorCount(aiQa.issues)
@@ -8443,7 +8497,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
         const previousResult = result;
         const previousTier = routing.tier;
         const escalationPlan = { ...tierPlanFor(routing.upgradeTier), escalated: true };
-        const rerun = await executePlan(escalationPlan);
+        const rerun = await executePlan(escalationPlan, { ...result, translation: aiQa.translation });
         result = rerun.translation;
         aiQa = rerun.aiQa;
         const combinedCandidates = [...(result.candidates || []), ...(previousResult.candidates || [])]
@@ -8458,10 +8512,12 @@ async function evaluateQaBatch(batchId, projectId = "") {
           qaScore: aiQa.score,
           hardErrorCount: hardErrorCount(aiQa.issues),
           riskTier: risk.tier,
+          passScore: Math.max(routedPassScore, routing.tier === "strict" ? 93 : 0),
           hasQualityUpgrade: false,
           alreadyEscalated: true,
           aiQaUsed: aiQa.used
         });
+        if (aiQa.fallbackReason) qualityRoute = { decision: "human_review", threshold: routedPassScore, reason: `模型质检未完成：${aiQa.fallbackReason}` };
       }
       const suggestionCandidates = buildSuggestionCandidates(aiQa.translation, matches);
       let alignment = { requested: suggestionCandidates.length > 0, used: false, fallbackReason: "" };
@@ -9127,4 +9183,4 @@ if (!runtimeOptions().embedded) server.listen(PORT, HOST, () => {
   }
 });
 
-export { apiHandler, disposeEmbeddedWorkbench, getBatchRun as getBatchRunForWorkspace };
+export { apiHandler, disposeEmbeddedWorkbench, getBatchRun as getBatchRunForWorkspace, importBatchReview };

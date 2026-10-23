@@ -133,8 +133,8 @@ export function qualityThresholdForRisk(riskTier = "medium") {
   return { low: 88, medium: 90, high: 93, critical: 96 }[riskTier] || 90;
 }
 
-export function decideQualityRoute({ qaScore = null, hardErrorCount = 0, riskTier = "medium", hasQualityUpgrade = false, alreadyEscalated = false, aiQaUsed = true } = {}) {
-  const threshold = qualityThresholdForRisk(riskTier);
+export function decideQualityRoute({ qaScore = null, hardErrorCount = 0, riskTier = "medium", hasQualityUpgrade = false, alreadyEscalated = false, aiQaUsed = true, passScore = 0 } = {}) {
+  const threshold = Math.max(qualityThresholdForRisk(riskTier), Number(passScore) || 0);
   if (!aiQaUsed || !Number.isFinite(Number(qaScore))) {
     return { decision: "human_review", threshold, reason: "AIQA 未完成，不能自动放行" };
   }

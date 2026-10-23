@@ -157,9 +157,9 @@ export function matchReviewPairsToSegments(segments = [], pairs = []) {
   const bySource = new Map();
   list.forEach((segment, index) => {
     const entryKey = text(segment?.entryKey || segment?.locator?.entryKey);
-    if (entryKey && !byEntryKey.has(entryKey)) byEntryKey.set(entryKey, index);
+    if (entryKey) byEntryKey.set(entryKey, [...(byEntryKey.get(entryKey) || []), index]);
     const entryId = text(segment?.locator?.unitId || segment?.locator?.entryId || segment?.context?.entryId);
-    if (entryId && !byEntryId.has(entryId)) byEntryId.set(entryId, index);
+    if (entryId) byEntryId.set(entryId, [...(byEntryId.get(entryId) || []), index]);
     const sourceKey = normalizeSource(segment?.source);
     if (sourceKey) bySource.set(sourceKey, [...(bySource.get(sourceKey) || []), index]);
   });
@@ -167,8 +167,7 @@ export function matchReviewPairsToSegments(segments = [], pairs = []) {
   const matches = [];
   const unmatched = [];
   const ambiguous = [];
-  const unchanged = [];
-  const claimedSegments = new Set();
+  const proposed = [];
   (Array.isArray(pairs) ? pairs : []).forEach((pair, pairIndex) => {
     const source = text(pair?.source);
     const target = text(pair?.target);
@@ -177,32 +176,39 @@ export function matchReviewPairsToSegments(segments = [], pairs = []) {
     const entryId = text(pair?.entryId);
     const sourceKey = normalizeSource(source);
 
-    let index = -1;
+    let candidates = [];
     let method = "";
     if (entryKey && byEntryKey.has(entryKey)) {
-      index = byEntryKey.get(entryKey);
+      candidates = byEntryKey.get(entryKey);
       method = "entry_key";
     } else if (entryId && byEntryId.has(entryId)) {
-      index = byEntryId.get(entryId);
+      candidates = byEntryId.get(entryId);
       method = "entry_id";
     } else {
-      const sameSource = (bySource.get(sourceKey) || []).filter((candidate) => !claimedSegments.has(candidate));
-      if (sameSource.length === 1) {
-        [index] = sameSource;
-        method = "unique_source";
-      } else if (sameSource.length > 1) {
-        ambiguous.push({ pairIndex, source, reason: `同一条原文在这个批次里出现 ${sameSource.length} 次，缺少条目 ID 无法唯一定位` });
-        return;
-      } else {
-        unmatched.push({ pairIndex, source, reason: bySource.has(sourceKey) ? "可定位的段落都已被其他条目占用" : "该原文不在这个批次里" });
-        return;
-      }
+      candidates = bySource.get(sourceKey) || [];
+      method = "unique_source";
     }
-    claimedSegments.add(index);
+    const matching = candidates.filter((index) => normalizeSource(list[index]?.source) === sourceKey);
+    if (!matching.length) {
+      unmatched.push({ pairIndex, source, reason: candidates.length ? "条目 ID 命中但原文不同，请检查终稿与原批次" : "该原文不在这个批次里" });
+      return;
+    }
+    if (matching.length > 1) {
+      ambiguous.push({ pairIndex, source, reason: `同一条原文在这个批次里出现 ${matching.length} 次，缺少唯一条目身份` });
+      return;
+    }
+    const [index] = matching;
     const previous = text(list[index]?.translation);
-    if (previous === target) unchanged.push(pairIndex);
-    matches.push({ pairIndex, segmentIndex: index, method, previousTranslation: previous, changed: previous !== target });
+    proposed.push({ pairIndex, segmentIndex: index, method, previousTranslation: previous, changed: previous !== target });
   });
+  const claims = new Map();
+  for (const match of proposed) claims.set(match.segmentIndex, (claims.get(match.segmentIndex) || 0) + 1);
+  for (const match of proposed) {
+    if (claims.get(match.segmentIndex) > 1) {
+      ambiguous.push({ pairIndex: match.pairIndex, source: text(pairs[match.pairIndex]?.source), reason: "终稿中多条记录指向同一译段，请检查重复条目" });
+    } else matches.push(match);
+  }
+  const unchanged = matches.filter((match) => !match.changed).map((match) => match.pairIndex);
   return { matches, unmatched, ambiguous, unchanged };
 }
 

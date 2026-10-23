@@ -57,6 +57,19 @@ test("外部审校终稿以项目内唯一原文接回原轨迹", () => {
   assert.equal(result.links[0].method, "unique_source");
 });
 
+test("终稿 ID 不可绕过原文核验，重复 ID 与重复占用必须报告", () => {
+  const segments = [{ source: "出撃します。", translation: "准备出击。", locator: { unitId: "1" } }];
+  const wrong = matchReviewPairsToSegments(segments, [{ entryId: "1", source: "保存します。", target: "保存设置。" }]);
+  assert.equal(wrong.matches.length, 0);
+  assert.equal(wrong.unmatched.length, 1);
+  const repeated = matchReviewPairsToSegments(segments, [{ entryId: "1", source: "出撃します。", target: "出击。" }, { entryId: "1", source: "出撃します。", target: "开始出击。" }]);
+  assert.equal(repeated.matches.length, 0, "同一终稿两条冲突记录都不能静默覆盖");
+  assert.equal(repeated.ambiguous.length, 2);
+  const duplicateIds = matchReviewPairsToSegments([...segments, ...segments], [{ entryId: "1", source: "出撃します。", target: "出击。" }]);
+  assert.equal(duplicateIds.matches.length, 0);
+  assert.equal(duplicateIds.ambiguous.length, 1);
+});
+
 test("重复原文优先用条目 ID 和工作表行号消歧", () => {
   const candidates = [
     { source: "はい", target: "是。", entryId: "line-20", sheet: "对白", sourceRow: 20 },

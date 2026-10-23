@@ -4,6 +4,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { extractStyleGuideFile } from "../src/style-guide-import.mjs";
 import { extractTermPairs } from "../src/table-term-extractor.mjs";
 import { extractXliffPairs } from "../src/xliff-document.mjs";
+import { readBatchOriginal } from "../src/batch-originals.mjs";
+import { matchReviewPairsToSegments } from "../src/external-review.mjs";
 import { chunkReferencePages, extractReferenceFile, scanReferenceRisk } from "../src/reference-materials.mjs";
 
 const CONFIG = ".kami/project.json";
@@ -107,7 +109,7 @@ async function safeParent(root, path) {
   return destination;
 }
 
-export function createWorkspaceFiles({ dataDirectory, invoke }) {
+export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
   const writes = new Map();
   async function readConfig(root, context) {
     const target = await context.fs.resolve(CONFIG, { cwd: root, signal: context.signal });
@@ -238,6 +240,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     return result;
   }
   async function importFile(args, context) {
+    if (args.purpose === "review-final") return linkReview(args, context);
     const state = await bound(context, args.projectId);
     const purpose = args.purpose || "translation";
     // Older callers may supply an absolute in-workspace translation path.
@@ -275,5 +278,43 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     try { await file.writeFile(Buffer.from(value.base64, "base64")); } finally { await file.close(); }
     return { path: destination, relativePath: path, filename: basename(path), bytes: (await stat(destination)).size };
   }
-  return { workspace, bound, snapshot, importFile, saveExport };
+  async function linkReview(args, context) {
+    if (!context.human) throw new Error("请在工作台关联人工审校完成版，机器草稿不能自行确认为人工终稿");
+    const state = await bound(context, args.projectId);
+    if (!args.batchId) throw new Error("关联人工终稿需要原翻译批次 ID");
+    const response = await invoke({ path: `/api/batch/run/${encodeURIComponent(args.batchId)}?projectId=${encodeURIComponent(state.config.projectId)}` }, context);
+    const run = response.run || response;
+    if (run.runnerOptions?.workspaceSnapshot?.workspace !== state.workspace) throw new Error("原批次属于另一个工作区，不能关联此终稿");
+    if (["running", "queued"].includes(run.runState) || run.workflow?.writeBusy) throw new Error("当前翻译或 QA 尚未结束，请稍后关联人工终稿");
+    if (!/\.(mqxliff|xliff)$/iu.test(args.path || "") || !["mqxliff", "xliff"].includes(run.format)) throw new Error("人工终稿需要与原批次对应的 MQXLIFF / XLIFF 双语文件");
+    const library = fileLibrary(state.libraries, "tm", args.libraryId || state.libraries.find((item) => item.kind === "translation_memory" && item.role === "master")?.id);
+    if (library.enabled === false || library.role === "working") throw new Error("请选择已启用的主 TM 或参考 TM 保存人工终稿");
+    await writeTarget(state.workspace, CONFIG, context);
+    const source = await readSource(state.workspace, args.path, context);
+    const { bytes, ...file } = source;
+    const previous = run.runnerOptions?.reviewFinal;
+    let report;
+    if (previous?.hash === file.hash && previous.path === file.path && previous.libraryId === library.id && previous.complete) {
+      report = { ...previous.report, alreadyLinked: true };
+    } else {
+      const original = await readBatchOriginal({ dataRoot: dataDirectory, relativePath: run.runnerOptions?.originalFile });
+      if (!original) throw new Error("原批次的原文件快照不可用，无法核验人工终稿");
+      const originals = extractXliffPairs(original, run.filename, { includeEmptyTargets: true }).map((pair) => ({ ...pair, locator: { unitId: pair.entryId } }));
+      const pairs = extractXliffPairs(bytes, file.filename);
+      if (!pairs.length) throw new Error("终稿中没有原文与译文均非空的双语条目");
+      const validated = matchReviewPairsToSegments(originals, pairs);
+      const validPairs = validated.matches.map((match) => pairs[match.pairIndex]);
+      const completed = run.segments.filter((segment) => segment.status === "done" && segment.translation?.trim());
+      if (!matchReviewPairsToSegments(completed, validPairs).matches.length) throw new Error("人工终稿未匹配本批已完成译段，请检查原文与原批次");
+      report = await review({ run, pairs: validPairs, memoryPairs: validPairs, projectId: state.config.projectId, filename: file.path, libraryId: library.id,
+        reviewFile: { ...file, libraryId: library.id }, rejected: { unmatched: validated.unmatched, ambiguous: validated.ambiguous } }, { ...context, workspaceSnapshot: run.runnerOptions.workspaceSnapshot });
+    }
+    await update(context, (config) => {
+      if (config.projectId !== state.config.projectId) throw new Error("工作区项目已切换，请重新关联人工终稿");
+      return { ...config, translationMemories: [...new Set([...config.translationMemories, file.path])],
+        libraryFiles: [...config.libraryFiles.filter((item) => item.purpose !== "tm" || item.path !== file.path), { path: file.path, purpose: "tm", libraryId: library.id }] };
+    });
+    return { ...report, file: { ...file, libraryId: library.id } };
+  }
+  return { workspace, bound, snapshot, importFile, saveExport, linkReview };
 }

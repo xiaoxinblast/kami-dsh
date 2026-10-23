@@ -6,13 +6,15 @@ import { createWorkspaceFiles, workspaceRoot } from "./workspace-files.mjs";
 import { configureRuntime, runtimeOptions, withRuntimeCall } from "../src/runtime-context.mjs";
 import { SqliteStore } from "../src/sqlite-store.mjs";
 
-const HUMAN_ACTION = /\/feedback\/accept$|\/term-import\/commit$|\/assets-import\/commit$|\/(?:activate|rollback|approve|accept|apply)$|\/qa\/resolve$/;
+const HUMAN_ACTION = /\/feedback\/accept$|\/import-review$|\/term-import\/commit$|\/assets-import\/commit$|\/(?:activate|rollback|approve|accept|apply)$|\/qa\/resolve$/;
 
-export function assertOperation({ method = "GET", path }, human = false) {
+export function assertOperation({ method = "GET", path, body }, human = false) {
   if (!/^(GET|POST|PATCH|DELETE)$/.test(method)) throw new Error("Unsupported operation method");
   const url = new URL(path, "http://local.invalid");
   if (url.origin !== "http://local.invalid" || !url.pathname.startsWith("/api/") || path.includes("..")) throw new Error("Only workbench operations are allowed");
   if (/^\/api\/(?:provider|logs|workbench-session)/.test(url.pathname) && method !== "GET") throw new Error("Use DSH to configure models and runtime");
+  if (!human && method !== "GET" && /^\/api\/batch\/run(?:\/|$)/u.test(url.pathname)
+    && (Object.hasOwn(body?.runnerOptions || {}, "reviewFinal") || body?.segments?.some((segment) => segment.accepted || segment.result?.humanReview))) throw new Error("This operation requires a human action in the workbench");
   if (!human && method !== "GET" && (HUMAN_ACTION.test(url.pathname) || method === "DELETE")) throw new Error("This operation requires a human action in the workbench");
   if (!human && method !== "GET" && !/^\/api\/(?:projects$|batch\/(?:prepare|run|export)(?:\/|$)|auto-qa$|translate$|classify$|match$|(?:term|tm|assets)-import\/preview$|style-profiles\/distill$|learning\/(?:skills\/generate|skills\/[^/]+\/evaluate|conflict-scan)$)/.test(url.pathname)) throw new Error("This operation requires a human action in the workbench");
   return url;
@@ -25,7 +27,7 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
   try { application = await import("../server.mjs"); }
   catch (error) { store.close(); throw error; }
   let closed = false;
-  const files = createWorkspaceFiles({ dataDirectory, invoke });
+  const files = createWorkspaceFiles({ dataDirectory, invoke, review: (args, context) => withRuntimeCall(context, () => application.importBatchReview(args)) });
   async function invoke(operation, context = {}) {
     if (closed) throw new Error("Workbench is stopped");
     const method = operation.method || "GET";
@@ -97,6 +99,7 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
       if (operation.action === "backup") return this.backup();
       if (operation.action === "workspace") return files.workspace({ ...operation, action: operation.actionType || "status" }, context);
       if (operation.action === "file") return this.importFile(operation, context);
+      if (operation.action === "review-final") return files.linkReview(operation, context);
       if (operation.action === "export") {
         const value = await invoke({ path: "/api/batch/export", method: "POST", body: operation }, context);
         return files.saveExport(value, value.filename, context, operation.outputPath);
