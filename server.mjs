@@ -1,5 +1,6 @@
 import http from "node:http";
-import { runtimeOptions } from "./src/runtime-context.mjs";
+import { runtimeOptions, withRuntimeCall } from "./src/runtime-context.mjs";
+import { mergeWorkspaceMemories, mergeWorkspaceTerms, taskResources } from "./src/workspace-resources.mjs";
 import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -21,9 +22,9 @@ import { buildPatternKey } from "./src/pattern-memory.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetGenerationToken, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, findQaCase, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemories, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleEvidences, loadStyleEvidenceIndex, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, updateQualityRun, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, saveReferenceFolder, getReferenceFolder, listReferenceFolders, deleteReferenceFolder, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetGenerationToken, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, findQaCase, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile as getStoredProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemories, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleEvidences, loadStyleEvidenceIndex, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, updateQualityRun, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, saveReferenceFolder, getReferenceFolder, listReferenceFolders, deleteReferenceFolder, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
 import { MAX_REFERENCE_FILE_BYTES, chunkReferencePages, extractReferenceFile, planReferenceExtraction, scanReferenceRisk } from "./src/reference-materials.mjs";
-import { getMemoryCandidates, sampleStyleEvidence, saveTmImportAudit } from "./src/store.mjs";
+import { getMemoryCandidates as getStoredMemoryCandidates, sampleStyleEvidence, saveTmImportAudit } from "./src/store.mjs";
 import { buildReferenceToolRunner as assembleReferenceToolRunner, createProjectReferenceIndex } from "./src/reference-context.mjs";
 import { canDeleteQaIssues, deleteQaIssue } from "./src/qa-issue-deletion.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
@@ -1397,7 +1398,20 @@ const projectAssetsCache = createTokenCache({ ttlMs: 30_000 });
 
 async function getProjectAssets(locale, projectId = "") {
   const key = `${locale}\u0000${String(projectId || "")}`;
-  return projectAssetsCache.get(key, getAssetGenerationToken(), () => loadProjectAssets(locale, projectId));
+  const value = await projectAssetsCache.get(key, getAssetGenerationToken(), () => loadProjectAssets(locale, projectId));
+  return { ...value, assets: mergeWorkspaceTerms(value.assets, taskResources(projectId)) };
+}
+
+async function getProjectStyleProfile(locale, options = {}) {
+  const stored = await getStoredProjectStyleProfile(locale, options);
+  const guide = taskResources(options.projectId)?.guide;
+  return guide ? { ...stored, ...guide, instruction: [stored?.instruction, guide.instruction].filter(Boolean).join("\n\n") } : stored;
+}
+
+async function getMemoryCandidates(locale, options = {}) {
+  const memories = await getStoredMemoryCandidates(locale, options);
+  if (options.libraryIds?.length) return memories;
+  return mergeWorkspaceMemories(memories, taskResources(options.projectId), options);
 }
 
 /**
@@ -3947,7 +3961,7 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
   const heartbeat = setInterval(() => workbenchSessionMonitor?.touch(sessionId), 5_000);
   heartbeat.unref?.();
   workbenchSessionMonitor?.touch(sessionId);
-  controller.promise = runServerBatch(batchId, {
+  controller.promise = Promise.resolve().then(async () => withRuntimeCall({ workspaceSnapshot: (await getBatchRun(batchId))?.runnerOptions?.workspaceSnapshot || null }, () => runServerBatch(batchId, {
     loadRun: getBatchRun,
     saveRun: async (run) => {
       await saveBatchRun(run);
@@ -4018,7 +4032,7 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
       settleTranslation();
       return controller.followupPromise;
     }
-  }).catch(async (error) => {
+  }))).catch(async (error) => {
     const run = await getBatchRun(batchId).catch(() => null);
     if (run) await saveBatchRun({ ...run, runState: "needs_attention", runnerOptions: { ...run.runnerOptions, translationError: error.message } }).catch(() => {});
     if (backgroundTaskId) await updateBackgroundTaskProgress(backgroundTaskId, { status: "failed", progress: { phase: "failed", message: error.message, percent: 100 } }).catch(() => {});
@@ -6344,8 +6358,16 @@ async function apiHandler(req, res, url) {
     const analyzeSpreadsheet = body.useAiStructure === false ? undefined : (snapshot, ruleAnalysis) => analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysis, locale);
     const project = body.projectId ? await getProject(String(body.projectId)) : null;
     if (body.projectId && !project) return json(res, 404, { error: "项目不存在" });
+    if (runtimeOptions().fileInput) body.buffer = runtimeOptions().fileInput;
     const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet, batch: project?.settings?.batch || {}, columnMapping: body.columnMapping || null });
-    const { batchId } = await saveBatchRun({ ...prepared, projectId: body.projectId || "", locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments, subBatches: prepared.subBatches, runState: "ready" });
+    const workspaceSnapshot = runtimeOptions().workspaceSnapshot;
+    const { batchId } = await saveBatchRun({ ...prepared, projectId: body.projectId || "", locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments, subBatches: prepared.subBatches, runState: "ready", ...(workspaceSnapshot ? { runnerOptions: { workspaceSnapshot, originalFile: runtimeOptions().originalFile, originalBytes: workspaceSnapshot.source.size } } : {}) });
+    if (workspaceSnapshot) {
+      workspaceSnapshot.batchId = batchId;
+      workspaceSnapshot.memories = workspaceSnapshot.memories.map((memory) => ({ ...memory, batchId, resourcePath: memory.sourceFile, sourceFile: prepared.filename }));
+      const run = await getBatchRun(batchId);
+      await saveBatchRun({ ...run, runnerOptions: { ...run.runnerOptions, workspaceSnapshot } });
+    }
     // 原文件按批次存档：以后导出写回不用再让用户重新选一遍（刷新页面也还在）。
     let originalFile = "";
     const originalBuffer = body.base64
@@ -7972,7 +7994,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
       // 统一降级链：同语体同领域 → 同语体通用 → 通用同领域 → 通用×通用。
       getProjectStyleProfile(locale, { projectId }),
       getQaCases(locale, { projectId, contentType: classification.contentType, domain, limit: -1, scopeFallback: true }),
-      getUserProfile(locale, { projectId }),
+      Promise.resolve(taskResources(projectId)?.guide || getUserProfile(locale, { projectId })),
       projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
     ]);
     // 候选先粗筛再精排：整库 8 万条时，这一段的代价是每段十几秒 / 369MB。
@@ -7988,7 +8010,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     const librariesById = new Map(projectLibraries.map((library) => [library.id, library]));
     const scopedMemories = localeMemories.map((memory) => {
       const library = librariesById.get(memory.libraryId);
-      return library ? { ...memory, libraryName: library.name, libraryRole: library.role, libraryPriority: library.priority, libraryEnabled: library.enabled } : null;
+      return library ? { ...memory, libraryName: library.name, libraryRole: library.role, libraryPriority: library.priority, libraryEnabled: library.enabled } : memory.workspaceResource ? memory : null;
     }).filter((memory) => memory?.libraryEnabled === true);
     const narrowedQaCases = narrowByDomain(localeQaCases, domain);
     const narrowedMemories = narrowByDomain(scopedMemories, domain);
@@ -8855,4 +8877,4 @@ if (!runtimeOptions().embedded) server.listen(PORT, HOST, () => {
   }
 });
 
-export { apiHandler, disposeEmbeddedWorkbench };
+export { apiHandler, disposeEmbeddedWorkbench, getBatchRun as getBatchRunForWorkspace };

@@ -16,4 +16,8 @@
             config:
               maxBytes: 65536
           - name: '@deepseek-ai/dsh-time-context'
+          - name: '@deepseek-ai/dsh-tool-fs'
+          - name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
           - name: kami-dsh/agent

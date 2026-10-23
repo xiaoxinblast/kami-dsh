@@ -3,7 +3,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require("react");
     const h = React.createElement;
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
     const words = {
       "Kami 翻译工作台": "Kami Workbench", "日语 → 简体中文 · 本地资产与任务": "Japanese → Simplified Chinese · Local assets and jobs",
       "翻译": "Translate", "资产": "Assets", "审校": "Review", "参考资料": "References", "学习": "Learning", "任务": "Jobs", "设置": "Settings",
@@ -34,11 +34,17 @@ window.__ModuleLoader__.load({
       const t = props.t || ((key) => key);
       const byId = props.useSessions ? props.useSessions((state) => state.byId) : {};
       const sessions = Object.values(byId || {});
-      const active = sessions.find((session) => session.retainedBy?.mainView > 0)?.id || sessions[0]?.id || "";
+      const active = sessions.find((session) => session.retainedBy?.mainView > 0)?.id || "";
       const [session, setSession] = useState("");
-      const [sessionDirectory, setSessionDirectory] = useState("");
+      const [workspace, setWorkspace] = useState(null);
+      const [bindingProject, setBindingProject] = useState("");
+      const [paths, setPaths] = useState({});
+      const [resourcePreview, setResourcePreview] = useState(null);
+      const [outputPath, setOutputPath] = useState("");
+      const scope = useRef({});
       const [agentInstruction, setAgentInstruction] = useState("");
       const sessionId = session || active;
+      if (scope.current.sessionId !== sessionId) scope.current = { sessionId };
       const [project, setProject] = useState("");
       const [projects, setProjects] = useState([]);
       const [projectName, setProjectName] = useState("");
@@ -46,18 +52,12 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState("");
       const [notice, setNotice] = useState("");
-      const [text, setText] = useState("");
       const [files, setFiles] = useState([]);
       const [run, setRun] = useState(null);
       const [kind, setKind] = useState("term");
       const [query, setQuery] = useState("");
       const [offset, setOffset] = useState(0);
       const [data, setData] = useState({});
-      const [preview, setPreview] = useState(null);
-      const [guideUpload, setGuideUpload] = useState(null);
-      const [previewOffset, setPreviewOffset] = useState(0);
-      const [styleEvidence, setStyleEvidence] = useState(false);
-      const [aiCleaning, setAiCleaning] = useState(false);
       const [learningScope, setLearningScope] = useState("general/game");
       const [qaSource, setQaSource] = useState("");
       const [qaTarget, setQaTarget] = useState("");
@@ -65,10 +65,28 @@ window.__ModuleLoader__.load({
       const [settings, setSettings] = useState(null);
       const [segmentPage, setSegmentPage] = useState(0);
       const payload = (extra = {}) => ({ projectId: project, project, locale: "zh-CN", ...extra });
-      const invoke = (path, method = "GET", body) => props.call(sessionId, { path, method, ...(body ? { body } : {}) });
+      const call = async (operation, expectedWorkspace = workspace?.workspace) => {
+        const id = sessionId;
+        const value = await props.call(id, { ...operation, ...(expectedWorkspace ? { expectedWorkspace } : {}) });
+        if (scope.current.sessionId !== id) throw new Error("会话已切换，请在当前工作区重试");
+        if (expectedWorkspace && scope.current.workspace && scope.current.workspace !== expectedWorkspace) throw new Error("工作区已切换，请刷新后重试");
+        return value;
+      };
+      const invoke = (path, method = "GET", body) => call({ path, method, ...(body ? { body } : {}) });
       const action = async (callback) => { setBusy(true); setError(""); setNotice(""); try { return await callback(); } catch (failure) { setError(failure.message); } finally { setBusy(false); } };
-      const button = (label, onClick, primary = false) => h("button", { type: "button", disabled: busy, onClick: () => action(onClick), className: primary ? "primary" : "" }, t(label));
-      const loadProjects = async () => { const value = await invoke("/api/projects"); setProjects(value.projects || []); if (!project && value.projects?.[0]) setProject(value.projects[0].id); };
+      const button = (label, onClick, primary = false, enabled = true) => h("button", { type: "button", disabled: busy || !enabled, onClick: () => action(onClick), className: primary ? "primary" : "" }, t(label));
+      const loadWorkspace = async () => {
+        if (!sessionId) return;
+        const id = sessionId;
+        const [state, value] = await Promise.all([call({ action: "workspace" }, null), call({ path: "/api/projects" }, null)]);
+        if (scope.current.sessionId !== id) return;
+        if (scope.current.workspace !== state.workspace || scope.current.projectId !== state.config?.projectId) {
+          setRun(null); setFiles([]); setData({}); setResourcePreview(null); setPaths({}); setOffset(0); setBindingProject(""); setOutputPath("");
+        }
+        scope.current = { sessionId: id, workspace: state.workspace, projectId: state.config?.projectId };
+        setWorkspace(state); setProject(state.config?.projectId || ""); setProjects(value.projects || []);
+        return state;
+      };
       const scoped = (path, extras = {}) => `${path}?${new URLSearchParams({ projectId: project, project, locale: "zh-CN", ...extras })}`;
       const loadRun = async (id) => { const value = await invoke(scoped(`/api/batch/run/${encodeURIComponent(id)}`)); setRun(value.run || value); };
       const refresh = async () => {
@@ -77,40 +95,38 @@ window.__ModuleLoader__.load({
         else if (tab === "资产") setData(await invoke(scoped("/api/library-entries", { kind, search: query, offset, limit: 50 })));
         else if (tab === "参考资料") setData(await invoke(scoped("/api/references", { search: query, offset, limit: 50 })));
         else if (tab === "风格指南") setData(await invoke(scoped("/api/style-profiles")));
-        else if (tab === "学习") { const [learning, styles] = await Promise.all([invoke(scoped("/api/learning", { contentType: "all", domain: "all" })), invoke(scoped("/api/style-profiles"))]); setData({ ...learning, styleProfiles: styles.styleProfiles || [] }); }
+      else if (tab === "学习") { const [learning, styles] = await Promise.all([invoke(scoped("/api/learning", { contentType: "all", domain: "all" })), invoke(scoped("/api/style-profiles"))]); setData({ ...learning, styleProfiles: styles.styleProfiles || [] }); }
       else if (tab === "任务") setData({ tasks: await invoke(scoped("/api/tasks", { limit: 50 })) });
         else if (tab === "设置") { const value = await invoke("/api/settings"); setSettings(value.settings || value); setData(value); }
       };
-      useEffect(() => { if (sessionId) action(loadProjects); }, [sessionId]);
-      useEffect(() => { setData({}); if (sessionId && project) action(refresh); }, [sessionId, project, tab, kind, offset]);
-      useEffect(() => { setGuideUpload(null); }, [sessionId, project]);
+      useEffect(() => { setSession(""); }, [active]);
+      useEffect(() => {
+        if (!sessionId) { setWorkspace(null); setProject(""); return; }
+        action(loadWorkspace);
+        const timer = setInterval(() => { loadWorkspace().catch((failure) => setError(failure.message)); }, 3000);
+        return () => clearInterval(timer);
+      }, [sessionId]);
+      useEffect(() => { setData({}); if (sessionId && project) action(refresh); }, [sessionId, project, workspace?.workspace, tab, kind, offset]);
       useEffect(() => {
         if (!sessionId || !project || !["running", "queued"].includes(run?.runState)) return;
         const timer = setInterval(() => { loadRun(run.batchId).catch((failure) => setError(failure.message)); }, 5000);
         return () => clearInterval(timer);
       }, [sessionId, project, run?.batchId, run?.runState]);
-      const readUpload = async (event, target) => {
-        const file = event.target.files?.[0];
-        if (!file) return;
-        if (target === "guide") setGuideUpload(null);
-        await action(async () => {
-          if (target === "guide" && !/\.(txt|md|docx)$/i.test(file.name)) throw new Error("风格指南仅支持 .txt、.md、.docx");
-          if (target === "guide" && file.size > 5 * 1024 * 1024) throw new Error("风格指南不能超过 5 MB");
-          if (file.size > 20 * 1024 * 1024) throw new Error("文件超过 20 MB");
-          const base64 = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = reject; reader.readAsDataURL(file); });
-          if (target === "assets") { const value = await invoke("/api/assets-import/preview", "POST", payload({ files: [{ filename: file.name, base64 }], filename: file.name, base64, purpose: kind === "tm" ? "tm" : "term" })); setPreview(value); setPreviewOffset(0); }
-          else if (target === "reference") { await props.call(sessionId, { path: scoped("/api/references/file", { filename: file.name }), method: "POST", base64, headers: { "x-filename": encodeURIComponent(file.name), "x-project-id": project } }); await refresh(); }
-          else if (target === "guide") setGuideUpload({ projectId: project, sessionId, filename: file.name, base64 });
-          else { const value = await invoke("/api/batch/prepare", "POST", payload({ filename: file.name, base64 })); setRun(value); setSegmentPage(0); await refresh(); await loadRun(value.batchId); }
-        });
-        event.target.value = "";
-      };
-      const upload = (label, target, accept) => h("label", { className: "caption" }, t(label), h("input", { type: "file", accept, disabled: busy || !project, onChange: (event) => readUpload(event, target), style: { display: "block", marginTop: 8, maxWidth: "100%" } }));
+      const filePath = (label, purpose, placeholder) => h("section", { className: "card" }, h("h3", null, label),
+        h("p", { className: "caption" }, "指定当前工作区内的相对路径。新建批次读取最新版；运行和续跑使用原快照。"),
+        h("div", { className: "kami-tools" }, h("input", { value: paths[purpose] || "", placeholder, "aria-label": label + "路径", style: { flex: 1, minWidth: 180 }, onChange: (event) => setPaths({ ...paths, [purpose]: event.target.value }) }),
+          button(purpose === "translation" ? "解析并创建批次" : "预览并关联", async () => {
+            const value = await call({ action: "file", path: paths[purpose], purpose, projectId: project });
+            if (purpose === "translation") { setRun(value); setSegmentPage(0); await refresh(); await loadRun(value.batchId); }
+            else { setResourcePreview(value); await loadWorkspace(); setNotice("已关联工作区文件；仅用于任务，不改写正式资产。"); }
+          }, true, Boolean(project && paths[purpose]?.trim()))));
+      const linkedResources = (field, purpose) => h("div", null, ...(workspace?.config?.[field] || []).map((path) => h("section", { className: "card", key: path },
+        h("strong", null, path), h("p", { className: "caption" }, "工作区文件 · 下次创建批次时读取最新内容"), h("div", { className: "kami-tools" },
+          button("查看预览", async () => setResourcePreview(await call({ action: "file", path, purpose, register: false, projectId: project }))),
+          button("解除关联", async () => { await call({ action: "workspace", actionType: "configure", resources: { [field]: workspace.config[field].filter((item) => item !== path) } }); setResourcePreview(null); await loadWorkspace(); })))));
       const download = async () => {
-        const value = await invoke("/api/batch/export", "POST", payload({ ...run, mode: "writeback", locale: "zh-CN" }));
-        const bytes = Uint8Array.from(atob(value.base64), (character) => character.charCodeAt(0));
-        const url = URL.createObjectURL(new Blob([bytes], { type: value.mimeType }));
-        const link = document.createElement("a"); link.href = url; link.download = value.filename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const value = await call({ action: "export", ...payload({ ...run, mode: "writeback", outputPath: outputPath.trim() }) });
+        setNotice(`已导出：${value.path}`);
       };
       const empty = (label = "暂无条目") => h("div", { className: "empty" }, t(label));
       const guides = (data.userProfiles || []).filter((profile) => profile.projectId === project && String(profile.name || "").startsWith("风格指南 · "));
@@ -119,42 +135,27 @@ window.__ModuleLoader__.load({
       if (!sessionId) content = h("section", { className: "card" }, h("h3", null, t("先建立翻译会话")), h("p", null, t("填写工作目录并新建翻译会话，或选择已有会话。")));
       else if (!project) content = empty("请选择项目后继续");
       else if (tab === "翻译") content = h("div", { className: "split" },
-        h("aside", null, h("h3", null, t("文件队列")), ...files.map((file) => h("button", { key: file.batchId || file.id, className: "file", onClick: () => action(() => { setSegmentPage(0); return loadRun(file.batchId || file.id); }) }, file.filename || file.title, h("p", { className: "caption" }, file.runState || file.status))), !files.length && empty("暂无文件"), upload("导入待译文件", "batch", ".txt,.md,.csv,.docx,.xlsx,.xliff,.mqxliff")),
-        h("div", null, !run ? h("section", { className: "card" }, h("h3", null, t("粘贴日语原文")), h("textarea", { value: text, onChange: (event) => setText(event.target.value), "aria-label": t("原文") }), h("div", { className: "kami-tools" }, button("创建批次", async () => { const value = await invoke("/api/batch/prepare", "POST", payload({ text, filename: "翻译.txt" })); setRun(value); await loadRun(value.batchId); }, true))) : h(React.Fragment, null,
+        h("aside", null, h("h3", null, t("文件队列")), ...files.map((file) => h("button", { key: file.batchId || file.id, className: "file", onClick: () => action(() => { setSegmentPage(0); return loadRun(file.batchId || file.id); }) }, file.filename || file.title, h("p", { className: "caption" }, file.runState || file.status))), !files.length && empty("暂无文件"), filePath("待译文件", "translation", "source/dialogue.docx")),
+        h("div", null, !run ? h("section", { className: "card" }, h("h3", null, "从工作区开始"), h("p", null, "在左侧指定待译文件。可以先关联指南、术语、TM 和参考资料，再创建批次冻结本次任务资源。")) : h(React.Fragment, null,
           h("h3", null, run.filename), h("p", null, `${run.segments?.length || 0} ${t("段")} · ${run.runState || "ready"}`),
+          run.runnerOptions?.workspaceSnapshot && h("p", { className: "caption" }, `来源：${run.runnerOptions.workspaceSnapshot.source.path} · 快照 ${run.runnerOptions.workspaceSnapshot.createdAt}`),
+          h("input", { "aria-label": "导出路径", placeholder: `${workspace?.config?.outputDirectory || "outputs"}/（默认生成新文件）`, value: outputPath, onChange: (event) => setOutputPath(event.target.value), style: { width: "100%" } }),
           h("div", { className: "kami-tools" }, button("开始 / 续跑", async () => { await invoke(`/api/batch/run/${run.batchId}/start`, "POST", payload()); await loadRun(run.batchId); }, true), button("暂停", () => invoke(`/api/batch/run/${run.batchId}/pause`, "POST", payload())), button("保存修改", async () => { await invoke("/api/batch/run", "POST", payload(run)); setNotice(t("已保存")); }), button("导出文件", download), button("关闭", async () => setRun(null))),
           ...(run.segments || []).slice(segmentPage, segmentPage + 30).map((segment, index) => h("section", { className: "segment", key: segment.id }, h("div", { className: "pairs" }, h("div", null, h("div", { className: "caption" }, `${segmentPage + index + 1} · ${t("原文")}`), h("p", null, segment.source)), h("div", null, h("div", { className: "caption" }, `${t("译文")} · ${segment.status || "pending"}`), h("textarea", { value: segment.translation || "", "aria-label": `${t("译文")} ${index + 1}`, onChange: (event) => setRun({ ...run, segments: run.segments.map((item) => item.id === segment.id ? { ...item, translation: event.target.value } : item) }) }), h("div", { className: "kami-tools" }, button("采纳为正式译法", async () => { await invoke("/api/feedback/accept", "POST", payload({ source: segment.source, translation: segment.translation, batchId: run.batchId, trajectoryId: segment.result?.trajectoryId, contentType: run.contentType, sourceFile: run.filename, entryId: segment.id })); setNotice(t("已保存")); })), h("p", { className: "caption" }, t("将保存当前译文为人工批准的 TM，并写入学习证据。")), segment.error && h("p", { className: "error" }, segment.error))), ...(segment.result?.qa?.issues || segment.result?.issues || []).map((issue, i) => h("p", { key: i, className: "caption" }, issue.message || issue.description)))),
           h("div", { className: "kami-tools" }, button("上一页", async () => setSegmentPage(Math.max(0, segmentPage - 30))), h("span", { className: "caption" }, `${segmentPage + 1}–${Math.min(segmentPage + 30, run.segments?.length || 0)}`), button("下一页", async () => setSegmentPage(Math.min(Math.max(0, (run.segments?.length || 1) - 1), segmentPage + 30)))))));
       else if (tab === "资产") content = h(React.Fragment, null,
-        h("div", { className: "kami-tools" }, h("select", { value: kind, onChange: (event) => { setKind(event.target.value); setOffset(0); setPreview(null); } }, h("option", { value: "term" }, t("术语")), h("option", { value: "tm" }, t("翻译记忆"))), h("input", { placeholder: t("搜索"), value: query, onChange: (event) => setQuery(event.target.value) }), button("搜索", refresh)),
-        upload("导入双语资产", "assets", ".xlsx,.csv,.mqxliff,.xliff"), preview && h("section", { className: "card" },
-          h("h3", null, `${preview.candidates?.length || 0} ${t("条候选")}`),
-          ...(preview.files || []).flatMap((file) => (file.anomalies || []).map((message, i) => h("p", { key: file.filename + i, className: "error" }, file.filename, "：", message))),
-          h("label", null, h("input", { type: "checkbox", checked: styleEvidence, onChange: (event) => setStyleEvidence(event.target.checked) }), " 同时作为风格学习证据"),
-          kind === "term" && h("label", null, h("input", { type: "checkbox", checked: aiCleaning, onChange: (event) => setAiCleaning(event.target.checked) }), " 使用模型清洗术语候选"),
-          h("table", null, h("thead", null, h("tr", null, h("th", null, "选择 / 原文"), h("th", null, t("译文")), h("th", null, t("状态")))),
-            h("tbody", null, ...(preview.candidates || []).slice(previewOffset, previewOffset + 50).map((item, index) => {
-              const position = previewOffset + index;
-              const edit = (change) => setPreview({ ...preview, candidates: preview.candidates.map((candidate, i) => i === position ? { ...candidate, ...change } : candidate) });
-              return h("tr", { key: position }, h("td", null, h("label", null, h("input", { type: "checkbox", checked: item.selected !== false, onChange: (event) => edit({ selected: event.target.checked }) }), " ", item.source)), h("td", null, h("input", { value: item.target || "", "aria-label": `候选译文 ${position + 1}`, style: { width: "100%" }, onChange: (event) => edit({ target: event.target.value }) })), h("td", null, item.conflict ? "译法冲突" : item.existing ? "已存在" : item.decision));
-            }))),
-          h("div", { className: "kami-tools" }, button("上一页", async () => setPreviewOffset(Math.max(0, previewOffset - 50))), h("span", { className: "caption" }, `${previewOffset + 1}–${Math.min(previewOffset + 50, preview.candidates.length)}`), button("下一页", async () => { if (previewOffset + 50 < preview.candidates.length) setPreviewOffset(previewOffset + 50); }), button("确认入库", async () => { await invoke("/api/assets-import/commit", "POST", payload({ ...preview, styleEvidence, aiCleaning, purpose: kind === "tm" ? "tm" : "term" })); setPreview(null); setNotice(t("已提交")); }, true))),
-        table(data.items || data.entries), h("div", { className: "kami-tools" }, h("span", { className: "caption" }, `${t("已显示")} ${(data.items || data.entries || []).length} / ${t("共")} ${data.total || 0}`), button("上一页", async () => setOffset(Math.max(0, offset - 50))), button("下一页", async () => { if (offset + 50 < data.total) setOffset(offset + 50); })));
+        h("div", { className: "kami-tools" }, h("select", { value: kind, onChange: (event) => { setKind(event.target.value); setOffset(0); } }, h("option", { value: "term" }, t("术语")), h("option", { value: "tm" }, t("翻译记忆"))), h("input", { placeholder: t("搜索"), value: query, onChange: (event) => setQuery(event.target.value) }), button("搜索", refresh)),
+        filePath(kind === "tm" ? "工作区 TM" : "工作区术语", kind === "tm" ? "tm" : "terms", kind === "tm" ? "resources/tm.xlsx" : "glossary.xlsx"), linkedResources(kind === "tm" ? "translationMemories" : "terms", kind === "tm" ? "tm" : "terms"), table(data.items), h("div", { className: "kami-tools" }, h("span", { className: "caption" }, `${t("已显示")} ${data.items?.length || 0} / ${t("共")} ${data.total || 0}`), button("上一页", async () => setOffset(Math.max(0, offset - 50))), button("下一页", async () => { if (offset + 50 < data.total) setOffset(offset + 50); })));
       else if (tab === "审校") content = h(React.Fragment, null, h("div", { className: "pairs" }, h("label", null, t("原文"), h("textarea", { value: qaSource, onChange: (event) => setQaSource(event.target.value) })), h("label", null, t("译文"), h("textarea", { value: qaTarget, onChange: (event) => setQaTarget(event.target.value) }))), h("div", { className: "kami-tools" }, button("运行 QA", async () => setReport(await invoke("/api/auto-qa", "POST", payload({ source: qaSource, translation: qaTarget }))), true)), report && h("section", { className: "card" },
         h("h3", null, t("质量报告")), h("div", { className: "score" }, report.fallbackReason ? "—" : report.scores?.overall ?? "—"),
         report.fallbackReason && h("p", { className: "error" }, report.fallbackReason),
         h("p", null, Object.entries(report.summary || {}).map(([key, value]) => `${({ basic: "基础", fidelity: "忠实度", nuance: "表达" })[key] || key}：${value.total} 项`).join(" · ")),
         ...[...(report.segments || []).flatMap((segment) => segment.issues || []), ...(report.alignmentIssues || [])].map((issue, i) => h("p", { key: i }, `[${issue.severity}] `, issue.message || issue.description))));
-      else if (tab === "参考资料") content = h(React.Fragment, null, upload("上传参考资料", "reference", ".txt,.md,.docx,.pdf,.xlsx,.csv,.png,.jpg,.jpeg,.webp,.gif"), table(data.items), h("div", { className: "kami-tools" }, h("span", { className: "caption" }, `${t("已显示")} ${data.items?.length || 0} / ${t("共")} ${data.total || 0}`), button("上一页", async () => setOffset(Math.max(0, offset - 50))), button("下一页", async () => { if (offset + 50 < data.total) setOffset(offset + 50); })));
-      else if (tab === "风格指南") content = h(React.Fragment, null, h("section", { className: "card" },
-        h("h3", null, t("人工风格指南")), h("p", null, t("支持 .txt、.md、.docx；最大 5 MB，正文最多 50,000 字。")), h("p", null, t("仅用于当前项目；启用新指南后，旧版保留在历史记录中。")),
-        upload("选择风格指南", "guide", ".txt,.md,.docx"), guideUpload && h("p", null, guideUpload.filename),
-        h("button", { type: "button", className: "primary", disabled: busy || !guideUpload, onClick: () => action(async () => {
-          if (!guideUpload || guideUpload.projectId !== project || guideUpload.sessionId !== sessionId) throw new Error("项目或会话已切换，请重新选择风格指南");
-          const value = await invoke("/api/style-guides/import", "POST", payload({ filename: guideUpload.filename, base64: guideUpload.base64 }));
-          setGuideUpload(null); await refresh(); setNotice(`${t("已启用")}：${value.filename} · ${value.characters} 字`);
-        }) }, t("导入并立即启用"))),
-        ...guides.map((profile) => h("section", { className: "card", key: profile.id }, h("h3", null, profile.name), h("p", { className: "caption" }, `v${profile.version || 1} · ${t(profile.status === "active" ? "当前生效" : "历史版本")}`), h("details", null, h("summary", null, t("指南全文")), h("pre", null, String(profile.instruction || ""))))), !guides.length && empty("尚未上传风格指南"));
+      else if (tab === "参考资料") content = h(React.Fragment, null, filePath("工作区参考资料", "reference", "references/story.md"), linkedResources("references", "reference"), table(data.items), h("div", { className: "kami-tools" }, h("span", { className: "caption" }, `${t("已显示")} ${data.items?.length || 0} / ${t("共")} ${data.total || 0}`), button("上一页", async () => setOffset(Math.max(0, offset - 50))), button("下一页", async () => { if (offset + 50 < data.total) setOffset(offset + 50); })));
+      else if (tab === "风格指南") content = h(React.Fragment, null,
+        filePath("工作区风格指南", "style-guide", "rules/style.md"), h("p", null, "支持 .txt、.md、.docx；最大 5 MB，正文最多 50,000 字。工作区指南用于当前任务，项目级旧指南保留兼容读取。"),
+        linkedResources("styleGuides", "style-guide"),
+        ...guides.map((profile) => h("section", { className: "card", key: profile.id }, h("h3", null, profile.name), h("p", { className: "caption" }, `旧版项目指南 · v${profile.version || 1} · ${profile.status}`), h("details", null, h("summary", null, t("指南全文")), h("pre", null, String(profile.instruction || ""))))));
       else if (tab === "学习") content = h(React.Fragment, null, h("div", { className: "kami-tools" },
         h("select", { value: learningScope, "aria-label": "学习范围", onChange: (event) => setLearningScope(event.target.value) }, ...[...new Set(["general/game", ...(data.scopeCounts || []).map((scope) => `${scope.contentType}/${scope.domain}`)])].map((scope) => h("option", { key: scope, value: scope }, scope))),
         button("生成候选策略", async () => { const [contentType, domain] = learningScope.split("/"); await invoke("/api/learning/skills/generate", "POST", payload({ contentType, domain })); await refresh(); }, true)), h("h3", null, t("策略版本")), ...(data.skills || []).map((skill) => h("section", { className: "card", key: skill.id }, h("h3", null, `${skill.name || "v" + skill.version} · ${skill.status}`), h("p", { className: "caption" }, `${skill.contentType} / ${skill.domain}`), h("p", null, skill.description || skill.strategy?.instruction || ""), h("div", { className: "kami-tools" }, button("评测", async () => { await invoke(`/api/learning/skills/${skill.id}/evaluate`, "POST", payload({ contentType: skill.contentType, domain: skill.domain })); setNotice(t("已提交")); }), button("激活", async () => { await invoke(`/api/learning/skills/${skill.id}/activate`, "POST", payload({ contentType: skill.contentType, domain: skill.domain })); await refresh(); })))), !data.skills?.length && empty(),
@@ -177,14 +178,20 @@ window.__ModuleLoader__.load({
           }))),
         button("保存设置", async () => { const result = await invoke("/api/settings", "POST", settings); setSettings(result.settings); setNotice(result.notes?.map((item) => `${item.label}：${item.note}`).join("；") || t("已保存")); })));
       return h("main", { className: "kami" }, h("style", null, css), h("header", null, h("div", { className: "kami-logo", "aria-hidden": true }, "K"), h("div", null, h("h1", null, t("Kami 翻译工作台")), h("p", null, t("日语 → 简体中文 · 本地资产与任务")))),
-        h("div", { className: "kami-tools" }, h("select", { value: project, "aria-label": t("请选择项目"), onChange: (event) => { setProject(event.target.value); setRun(null); setOffset(0); } }, h("option", { value: "" }, t("请选择项目")), ...projects.map((item) => h("option", { key: item.id, value: item.id }, item.name))), h("input", { value: projectName, placeholder: t("新项目名称"), onChange: (event) => setProjectName(event.target.value) }), button("新建项目", async () => { const value = await invoke("/api/projects", "POST", { name: projectName }); await loadProjects(); setProject(value.project.id); setProjectName(""); }), button("刷新", refresh)),
-        sessions.length > 0 && h("label", { className: "caption" }, t("关联会话"), " ", h("select", { value: sessionId, onChange: (event) => setSession(event.target.value) }, ...sessions.map((item) => h("option", { key: item.id, value: item.id }, item.title || item.id.replace(/^session-/, "").slice(0, 8))))),
+        h("section", { className: "card" }, h("h3", null, "当前工作区"), h("p", null, workspace?.workspace || "请先打开一个 DSH 工作区会话"),
+          h("p", null, workspace?.project ? `已绑定：${workspace.project.name}` : "尚未绑定 Kami 项目，请明确选择或新建。"),
+          h("div", { className: "kami-tools" }, h("select", { value: bindingProject || project, "aria-label": "绑定已有项目", onChange: (event) => setBindingProject(event.target.value) }, h("option", { value: "" }, "选择已有项目"), ...projects.map((item) => h("option", { key: item.id, value: item.id }, item.name))),
+            button("绑定项目", async () => { await call({ action: "workspace", actionType: "bind", projectId: bindingProject || project }); await loadWorkspace(); }, false, Boolean(bindingProject || project)),
+            h("input", { value: projectName, placeholder: t("新项目名称"), onChange: (event) => setProjectName(event.target.value) }),
+            button("新建并绑定", async () => { await call({ action: "workspace", actionType: "bind", name: projectName }); setProjectName(""); await loadWorkspace(); }, false, Boolean(projectName.trim())), button("刷新", async () => { await loadWorkspace(); await refresh(); }))),
         h("details", null, h("summary", null, "翻译 agent 会话"),
-          h("div", { className: "kami-tools" }, h("input", { placeholder: "工作目录（绝对路径）", "aria-label": "翻译工作目录", value: sessionDirectory, onChange: (event) => setSessionDirectory(event.target.value), style: { minWidth: 280 } }), button("新建翻译会话", async () => { if (!/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(sessionDirectory.trim())) throw new Error("请输入工作目录的绝对路径"); const value = await props.createSession(sessionDirectory.trim()); setSession(value.sessionId); setNotice("已创建 Kami 翻译预设会话"); })),
-          h("textarea", { "aria-label": "委托翻译 agent 的任务", placeholder: "描述要让 agent 完成的翻译、检索或 QA 任务", value: agentInstruction, onChange: (event) => setAgentInstruction(event.target.value) }),
-          button("发送给翻译 agent", async () => { if (!agentInstruction.trim()) throw new Error("请输入任务内容"); await props.prompt(sessionId, agentInstruction.trim()); setAgentInstruction(""); setNotice("任务已发送，可在关联会话中查看 agent 的工具调用和回复"); })),
+          h("p", { className: "caption" }, workspace?.isKamiSession ? "当前为 Kami 翻译预设会话" : "当前会话未使用 Kami 翻译预设。创建翻译会话后发送任务。"),
+          !workspace?.isKamiSession && button("新建翻译会话", async () => { const value = await props.createSession(workspace.workspace); setSession(value.sessionId); setNotice("已创建当前工作区的 Kami 翻译会话"); }, true, Boolean(workspace?.workspace)),
+          h("textarea", { "aria-label": "委托翻译 agent 的任务", placeholder: "用 rules/style.md 和 glossary.xlsx 翻译 source/dialogue.docx，结果放到 outputs/", value: agentInstruction, onChange: (event) => setAgentInstruction(event.target.value) }),
+          button("发送给翻译 agent", async () => { if (!agentInstruction.trim()) throw new Error("请输入任务内容"); await props.prompt(sessionId, agentInstruction.trim(), workspace.workspace); setAgentInstruction(""); setNotice("任务已发送到当前工作区的 Kami 翻译会话"); }, false, Boolean(workspace?.isKamiSession && project))),
         h("nav", { "aria-label": "Kami" }, ...["翻译", "资产", "审校", "风格指南", "参考资料", "学习", "任务", "设置"].map((label) => h("button", { key: label, "aria-selected": tab === label, onClick: () => { setTab(label); setOffset(0); } }, t(label)))),
-        busy && h("p", { role: "status" }, t("准备中…")), error && h("div", { className: "notice error", role: "alert" }, error), notice && h("div", { className: "notice", role: "status" }, notice), content);
+        busy && h("p", { role: "status" }, t("准备中…")), error && h("div", { className: "notice error", role: "alert" }, error), notice && h("div", { className: "notice", role: "status" }, notice),
+        resourcePreview && h("section", { className: "card" }, h("h3", null, `${resourcePreview.path} · ${resourcePreview.size} bytes`), h("p", { className: "caption" }, `SHA-256 ${resourcePreview.hash}`), h("pre", null, typeof resourcePreview.preview === "string" ? resourcePreview.preview : JSON.stringify(resourcePreview.preview, null, 2)), button("关闭预览", async () => setResourcePreview(null))), content);
     }
     return {
       inject: ["slots", "locale", "remote", "remote.session", "layout"],
@@ -214,7 +221,10 @@ window.__ModuleLoader__.load({
             return result.value;
           };
           const createSession = async (cwd) => { const result = await ctx.remote.session.create({ cwd, agentPreset: "kami-translator" }); if (!result.ok) throw new Error(result.error.message); return result.value; };
-          const prompt = async (sessionId, text) => { const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
+          const prompt = async (sessionId, text, workspace) => {
+            const state = await call(sessionId, { action: "workspace" });
+            if (!state.isKamiSession || state.workspace !== workspace) throw new Error("当前会话与工作区的 Kami 预设不匹配，请新建翻译会话");
+            const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
           ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "kami-workbench", locale: "kami-dsh", inject: () => ({ call, createSession, prompt }) }, Workbench));
           ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({ name: "sidebar.panellist", id: "kami-workbench", label: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), order: 5, locale: "kami-dsh" }, () => h("span", { "aria-hidden": true }, "K")));
         });

@@ -8,6 +8,7 @@ import { buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows, summarizeB
 import { runTaskPool } from "../src/task-pool.mjs";
 import { surveyPairs, normalizeSurveyTerms } from "../src/term-survey.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
+import { withRuntimeCall } from "../src/runtime-context.mjs";
 
 const source = (await readFile(new URL("../server.mjs", import.meta.url), "utf8")).replace(/\r\n/gu, "\n");
 const block = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -108,6 +109,7 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
   const readJsonBody = async (req) => { const chunks = []; for await (const chunk of req) chunks.push(chunk); return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); };
   const json = (res, status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); return true; };
   const context = vm.createContext({
+    withRuntimeCall,
     batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchWorkflowWrites: new Map(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = structuredClone(value); run.runnerOptions.batchSummary = summarizeBatchSegments(run.segments); },
     getBackgroundTask: async (id) => tasks.get(id),

@@ -8,8 +8,9 @@
 
 1. 在 DSH 的“插件”→“添加插件”中填写 `https://github.com/xiaoxinblast/kami-dsh#main`，安装仓库中的当前版本。依赖由插件管理器安装。
 2. 开发时也可在仓库运行 `npm ci`、`npm run dsh:check` 后安装绝对目录；Creator 模式的 `plugin_manager` 使用 `action: install_bundle` 与同一安装地址。
-3. 从侧边栏打开“Kami 翻译工作台”。展开“翻译 agent 会话”，填写工作目录并点“新建翻译会话”，自动使用专用预设；也可手动新建会话并选择“Kami 翻译工作台”预设。
-4. 选择关联会话和翻译项目。在工作台操作文件，或通过“发送给翻译 agent”委托任务，在关联会话查看工具调用与回复。
+3. 打开一个 DSH 工作区会话，再从侧边栏打开“Kami 翻译工作台”。页面显示当前会话工作区；先明确绑定已有 Kami 项目或新建项目。
+4. 在页面填写工作区相对路径，或展开“翻译 agent 会话”，点击“新建翻译会话”，使用 Kami 专用预设。页面仅向当前工作区的 Kami 预设会话发送任务；切换会话或工作目录后重新读取绑定。
+5. 更新预设后新建翻译会话，以使用新版工具组合。
 
 插件只通过 DSH 的管理入口安装，不修改 `app.asar`。更新已加载的 Host 模块后，按插件管理结果处理需要的重启；不要把“依赖已保存”当作已经生效。
 
@@ -27,10 +28,10 @@ dsh plugin --profile desktop add 'github:xiaoxinblast/kami-dsh#main'
 数据位于 `$DSH_HOME/kami-dsh/<profile>/`，默认桌面 profile 为 `desktop`。
 
 - `kami.sqlite`：项目、术语、TM、QA、风格、参考资料和学习记录。
-- `uploads/`：导入原文件与参考资料。
-- `runtime/`：参数设置与日志，不保存模型 API Key。
+- `uploads/`：旧版已导入原文件与参考资料，保留兼容读取；新流程不再复制原件到此目录。
+- `runtime/`：参数设置、日志，以及工作区资源解析缓存和任务原件快照，不保存模型 API Key。
 - `learning/`：配对评测检查点。
-- `exports/`：agent 导出的文件。
+- `exports/`：旧版导出和兼容接口的派生文件；新流程导出到工作区。
 - `backups/`：从工作台创建的数据库备份。
 
 数据库备份使用 SQLite 在线备份接口；迁移和完整人工备份还需保留 `uploads/`、`learning/` 与 `runtime/settings.json`。恢复应在插件停用时进行，使用备份数据库替换 `kami.sqlite`，同时恢复对应文件目录。
@@ -51,19 +52,50 @@ npm run migrate:local -- --source-env '<旧项目>\directus\.env' --source-data 
 
 ## 翻译闭环
 
-先导入或粘贴文件，确认分段后开始翻译。任务保留文件级工作术语、句式一致性、硬 QA、AIQA、修订和批次检查。用户可修改译文并主动采纳为正式译法，写入人工批准 TM 与学习证据；风格和策略仍走既有配对评测及激活门禁。
+工作区文件是来源，SQLite 继续保存术语、TM、学习记录和任务。DSH agent 查找文件、选择资源和推进复核，Kami 执行批量翻译、QA、续跑与原格式导出。用户可修改译文并主动采纳为正式译法；学习版本仍需人工激活。
 
-### 上传风格指南
+### 工作区配置与文件引用
 
-选择项目后打开“风格指南”页，选择 `.txt`、`.md` 或 `.docx` 文件，再点击“导入并立即启用”。文件最大 5 MB，正文最多 50,000 字。选择文件本身不会更改生效指南；切换项目或关联会话后需要重新选择文件。
+首次使用必须明确绑定项目，不按文件夹名称猜测。`.kami/project.json` 示例：
 
-人工指南提取可读取的正文，不经过模型改写；导入后用于当前项目的翻译和 QA。新版启用后，旧版保留为历史记录。页面显示当前状态、版本和可展开的指南全文；自动学习生成的风格规范仍在“学习”页。
+```json
+{
+  "version": 1,
+  "projectId": "已有或明确新建的 Kami 项目 ID",
+  "styleGuides": ["rules/style.md"],
+  "terms": ["glossary.xlsx"],
+  "translationMemories": ["resources/tm.xlsx"],
+  "references": ["references/story.docx"],
+  "outputDirectory": "outputs"
+}
+```
+
+路径均相对当前工作区，不要求移动文件。会话中切换工作目录后，使用 DSH `workingDirectory` 的当前值；目录缺失、越界路径、外部链接均报错，不回退到创建会话时的目录。页面和 agent 共用 Host 文件服务，文件字节不经浏览器或聊天 Base64。
+
+在“风格指南”“资产”“参考资料”页填写路径，点击“预览并关联”。解除关联只修改配置，不删除原件。指南支持 `.txt`、`.md`、`.docx`，最大 5 MB、正文最多 50,000 字；术语/TM 支持 `.xlsx`、`.csv`、`.xliff`、`.mqxliff`，最大 20 MB。待译文件格式与既有批处理一致。
+
+“解析并创建批次”就是任务创建边界：此时读取原文和全部所选资源的最新版，记录相对路径、SHA-256、解析快照，并在本地 `runtime/workspace-snapshots/` 保存用于格式写回的原件快照。后续运行、暂停、续跑、重启后续跑和导出都使用该快照；文件修改后需创建新批次。参考资料解析缓存按工作区、用途、路径和内容哈希区分，修改一个资料不会使其他资料的缓存失效。
+
+工作区指南只用于任务，不启用或改写项目级旧指南。文件术语不覆盖主库已有术语；文件 TM 作为当前任务的未批准参考，不能充当人工批准的 QA 规范。引用文件不会重复写入术语、TM 或参考资料主库。旧项目指南、旧任务和 `uploads/` 继续可读，不自动迁移或清理。
+
+导出默认写入工作区 `outputs/`，可指定工作区内的完整相对文件路径，例如 `outputs/dialogue.zh-CN.docx`。输出采用排他创建；同名文件报错，既有文件和源文件均不覆盖。DSH 文件服务当前只提供文本写入，二进制导出在 Host 校验同一服务解析的目标路径后使用本地排他创建。
+
+### Agent 示例
+
+先明确绑定项目，然后可以直接委托：
+
+> 用 `rules/style.md` 和 `glossary.xlsx` 翻译 `source/dialogue.docx`，结果放到 `outputs/`。
+
+- `kami_workspace`：`status` 查询；`bind` 指定已有 `projectId` 或明确新建的 `name`；`configure` 设置上述资源路径和输出目录。
+- `kami_file_import`：`{path,purpose}`，用途为 `translation`（默认）、`style-guide`、`terms`、`tm`、`reference`。原有 `{path,projectId}` 参数保留，项目必须与工作区绑定一致。`register:false` 只预览；创建待译批次时可用 `resources` 指定本次任务的资源数组覆盖。
+- `kami_workbench`：按批次 ID 启动、暂停、QA、检查进度与导出。`POST /api/batch/export` 可带 `outputPath`，返回工作区文件路径。
+- `kami_help`：操作索引与当前工作区状态。
 
 模型优先使用关联会话待生效的模型选择，其次是最近一次请求的 provider/model，新会话使用 DSH 默认模型。所有调用经过 DSH 模型服务，不另存模型 Key。固定 seed 不可用会明确标记，截断、错误和取消会转为失败，不能算作成功译文。图片识别通过 DSH 附件协议保存和发送图片，需要关联会话所选模型支持图像输入；不支持时任务报告失败。
 
-工具和页面调用相同业务操作。页面通过独立的 DSH Remote 调用，不向关联会话追加命令或 JSON 记录；关联会话仅提供工作目录和模型选择，以及接收明确发送的 agent 任务。agent 使用 `kami_workbench`、`kami_file_import`、`kami_help`。批准、正式采纳、激活和删除保留为用户操作。大结果分页读取；导出文件返回本地路径，不把二进制塞进模型上下文。手动执行 `/kami` 仍保留 DSH 的命令日志。
+工具和页面调用相同业务操作。页面通过独立的 DSH Remote 调用，不向关联会话追加命令或 JSON 记录；当前会话提供工作目录和模型选择，匹配 Kami 预设后接收明确发送的 agent 任务。批准、正式采纳、激活和删除保留为用户操作。大结果分页读取；导出文件返回本地路径，不把二进制塞进模型上下文。手动执行 `/kami` 仍保留 DSH 的命令日志。
 
-专用预设过滤挂载时已有的 Host 通用工具，保留 Kami 工具向会话继承，并使用原生工具调用；该限制只作用于 Kami 预设。DSH 另行注入的会话级工具仍依宿主配置。批次翻译与 QA 的内部调用也在进程内分发，不回调本机 HTTP 端口。
+专用预设包含 `@deepseek-ai/dsh-tool-fs` 与 `@deepseek-ai/dsh-tool-fs-search`，保留 DSH 通用工具，不再统一过滤。翻译业务通过 Kami 工具执行，文件查找、读取和编辑使用原生 DSH 工具。批次翻译与 QA 的内部调用也在进程内分发，不回调本机 HTTP 端口。
 
 ## 验证
 
@@ -73,7 +105,7 @@ npm run dsh:check
 npm pack --dry-run
 ```
 
-`tests/dsh-workbench.test.mjs` 在禁止 HTTP 的条件下用隔离数据库验证项目创建、批次翻译、原格式导出和数据库重开；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。DSH SDK 可用时，`tests/dsh-model-adapter.test.mjs` 验证消息协议，`tests/dsh-agent.test.mjs` 验证预设工具范围。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
+`tests/dsh-workspace.test.mjs` 验证路径与链接隔离、任务快照、新文件版本、重启续跑、参考索引与防覆盖导出；SDK 启用时使用真实 DSH LocalFileSystem。`tests/dsh-ui-bridge.test.mjs` 使用真实 Client/Host SDK 检查严格 Remote 编解码、服务注入和页面不追加聊天 JSON。`tests/dsh-workbench.test.mjs` 在禁止 HTTP 的条件下用隔离数据库验证项目创建、批次翻译、原格式导出和数据库重开；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。DSH SDK 可用时，`tests/dsh-model-adapter.test.mjs` 验证消息协议，`tests/dsh-agent.test.mjs` 验证预设工具范围。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
 
 UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。
 

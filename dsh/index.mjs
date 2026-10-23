@@ -5,7 +5,7 @@ import { createWorkbench } from "./workbench.mjs";
 import { createModelAdapter, sessionModelRoute } from "./model-adapter.mjs";
 import { KamiUiService, TYPERT } from "./ui-bridge.mjs";
 
-export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert"];
+export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert", "workingDirectory", "fs", "agentPresets"];
 
 export async function apply(ctx) {
   const profile = process.env.DSH_PROFILE || "desktop";
@@ -15,7 +15,10 @@ export async function apply(ctx) {
   await ready;
   const contextFor = (agent, signal, human = false) => ({
     human,
-    cwd: agent?.session?.header?.cwd || agent?.session?.cwd || agent?.session?.workingDirectory,
+    cwd: agent?.session ? ctx.workingDirectory.get(agent.session) : undefined,
+    fs: ctx.fs,
+    sessionId: agent?.session?.header?.id,
+    isKamiSession: Boolean(agent?.ctx && ctx.agentPresets.composedPreset(agent.ctx) === "kami-translator"),
     modelRoute: sessionModelRoute(ctx, agent),
     signal: AbortSignal.any([abort.signal, signal || new AbortController().signal])
   });
@@ -30,7 +33,7 @@ export async function apply(ctx) {
       try {
         const operation = JSON.parse(rawInput.trim() || '{"path":"/api/projects"}');
         const workbench = await ready;
-        const value = operation.action === "backup" ? await workbench.backup() : await workbench.invoke(operation, contextFor(agent, signal, true));
+        const value = await workbench.perform(operation, contextFor(agent, signal, true));
         return { kind: "success", text: JSON.stringify(value) };
       } catch (error) { return { kind: "error", text: error.message }; }
     }

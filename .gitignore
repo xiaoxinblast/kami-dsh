@@ -5,6 +5,8 @@ data/
 *.log
 node_modules/
 .cache/
+/.kami/
+/outputs/
 *.tgz
 directus/.env
 tmp/

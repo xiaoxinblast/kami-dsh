@@ -60,16 +60,17 @@ export function cosineSimilarity(left, right) {
  *   { id, documentId, documentName, documentStatus, libraryId, libraryEnabled, ordinal,
  *     heading, page, origin, text, risk, allowed, embedding }
  */
-export function createReferenceIndex({ loader, ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
+export function createReferenceIndex({ loader, ttlMs = DEFAULT_TTL_MS, now = () => Date.now(), cacheKey = (id) => id } = {}) {
   if (typeof loader !== "function") throw new TypeError("reference index 需要 loader");
   const cache = new Map();
   let version = 0;
 
   async function itemsFor(projectId) {
-    const entry = cache.get(projectId);
+    const key = cacheKey(projectId);
+    const entry = cache.get(key);
     if (entry && entry.version === version && now() - entry.at < ttlMs) return entry.items;
     const items = (await loader(projectId)) || [];
-    cache.set(projectId, { at: now(), version, items });
+    cache.set(key, { at: now(), version, items });
     return items;
   }
 

@@ -36,14 +36,14 @@ async function docxText(buffer) {
     .replace(/<[^>]+>/gu, ""));
 }
 
-export async function extractStyleGuideFile({ filename, base64 } = {}) {
+export async function extractStyleGuideFile({ filename, base64, buffer: bytes } = {}) {
   const safeFilename = basename(String(filename || "").trim());
   const extension = extname(safeFilename).toLowerCase();
   if (![".txt", ".md", ".docx"].includes(extension)) {
     throw Object.assign(new Error("风格指南仅支持 .txt、.md、.docx"), { statusCode: 400 });
   }
   const encoded = String(base64 || "").replace(/^data:[^;]+;base64,/u, "");
-  const buffer = Buffer.from(encoded, "base64");
+  const buffer = bytes ? Buffer.from(bytes) : Buffer.from(encoded, "base64");
   if (!buffer.length) throw Object.assign(new Error("风格指南文件为空"), { statusCode: 400 });
   if (buffer.length > MAX_FILE_BYTES) throw Object.assign(new Error("风格指南不能超过 5MB"), { statusCode: 413 });
   const text = normalizeGuideText(extension === ".docx" ? await docxText(buffer) : buffer.toString("utf8"));

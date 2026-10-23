@@ -31,7 +31,6 @@ export class KamiUiService extends TypertRemoteService {
 
   async invoke(agent, operation, signal) {
     const workbench = await this.ctx.kamiWorkbench.ready;
-    if (operation.action === "backup") return workbench.backup();
-    return workbench.invoke(operation, this.ctx.kamiWorkbench.contextFor(agent, signal, true));
+    return workbench.perform(operation, this.ctx.kamiWorkbench.contextFor(agent, signal, true));
   }
 }

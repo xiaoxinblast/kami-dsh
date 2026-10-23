@@ -442,14 +442,14 @@ function buildStructureSnapshot(workbook) {
   };
 }
 
-export async function extractTermPairs({ filename, base64, locale = "auto" }, { analyzeStructure } = {}) {
+export async function extractTermPairs({ filename, base64, buffer: bytes, locale = "auto" }, { analyzeStructure } = {}) {
   const extension = extname(String(filename || "")).toLowerCase();
   if (![".xlsx", ".csv"].includes(extension)) {
     const error = new Error("仅支持 .xlsx 和 .csv 表格；旧版 .xls 请先另存为 .xlsx");
     error.statusCode = 400;
     throw error;
   }
-  const buffer = Buffer.from(String(base64 || ""), "base64");
+  const buffer = bytes ? Buffer.from(bytes) : Buffer.from(String(base64 || ""), "base64");
   if (!buffer.length) {
     const error = new Error("上传的表格为空");
     error.statusCode = 400;

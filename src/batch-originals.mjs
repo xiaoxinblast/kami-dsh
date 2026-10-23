@@ -11,6 +11,7 @@ import { extname, join } from "node:path";
 export const ORIGINAL_UPLOAD_DIRECTORY = "uploads";
 const ALLOWED_EXTENSIONS = new Set([".docx", ".xlsx", ".csv", ".xliff", ".mqxliff", ".txt", ".md"]);
 const MAX_BYTES = 20 * 1024 * 1024;
+const isArchivedPath = (path) => /^(?:uploads\/|runtime\/workspace-snapshots\/)/u.test(path) && !path.includes("..") && !path.includes("\\");
 
 function safeExtension(filename) {
   const extension = extname(String(filename || "")).toLowerCase();
@@ -40,7 +41,7 @@ export async function readBatchOriginal({ dataRoot, relativePath }) {
   const relative = String(relativePath || "").trim();
   if (!dataRoot || !relative) return null;
   // 只允许读 uploads/ 下的存档，避免被路径穿越读到别的文件。
-  if (!relative.startsWith(`${ORIGINAL_UPLOAD_DIRECTORY}/`) || relative.includes("..")) return null;
+  if (!isArchivedPath(relative)) return null;
   try {
     const absolute = join(dataRoot, relative);
     const info = await stat(absolute);
@@ -53,7 +54,7 @@ export async function readBatchOriginal({ dataRoot, relativePath }) {
 
 export async function deleteBatchOriginal({ dataRoot, relativePath }) {
   const relative = String(relativePath || "").trim();
-  if (!dataRoot || !relative.startsWith(`${ORIGINAL_UPLOAD_DIRECTORY}/`) || relative.includes("..")) return false;
+  if (!dataRoot || !isArchivedPath(relative)) return false;
   try {
     await unlink(join(dataRoot, relative));
     return true;

@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 
 import { createReferenceIndex } from "./reference-index.mjs";
 import { createReferenceToolRunner } from "./reference-tools.mjs";
+import { taskResources } from "./workspace-resources.mjs";
 import { DATA_ROOT, getResourceLibraries, listReferenceChunks, listReferenceChunksForProject, listReferenceDocuments } from "./store.mjs";
 
 /** 与技能策略模板保持一致的出厂值。 */
@@ -27,13 +28,14 @@ export const REFERENCE_FACTORY_DEFAULTS = Object.freeze({
 /** 组装检索索引：只加载启用资料库里的可用资料。 */
 export function createProjectReferenceIndex() {
   return createReferenceIndex({
+    cacheKey: (projectId) => `${projectId}\0${taskResources(projectId)?.workspace || ""}\0${(taskResources(projectId)?.resources || []).filter((item) => item.purpose === "reference").map((item) => `${item.path}:${item.hash}`).join("\0")}`,
     loader: async (projectId) => {
       const { items: documents } = await listReferenceDocuments({ projectId, limit: 200 });
       const libraries = await getResourceLibraries(projectId).catch(() => []);
       const fingerprint = referenceDocumentsFingerprint(documents, libraries);
       const snapshotPath = referenceSnapshotPath(projectId);
       const cached = await readReferenceSnapshot(snapshotPath, fingerprint).catch(() => null);
-      if (cached) return cached;
+      if (cached) return [...cached, ...(taskResources(projectId)?.referenceChunks || [])];
       const documentById = new Map(documents.map((document) => [document.id, document]));
       const libraryEnabled = new Map(libraries.map((library) => [library.id, library.enabled !== false]));
       const chunks = await listReferenceChunksForProject(projectId, { limit: 5_000 });
@@ -60,7 +62,7 @@ export function createProjectReferenceIndex() {
       });
       // 失败不影响本次检索：下次重启最多再走一遍 Directus。
       await writeReferenceSnapshot(snapshotPath, fingerprint, items).catch(() => {});
-      return items;
+      return [...items, ...(taskResources(projectId)?.referenceChunks || [])];
     }
   });
 }
@@ -132,7 +134,9 @@ export function buildReferenceToolRunner({ index, projectId = "", settings = {},
   if (!projectId || !budget.enabled) return null;
   const runner = createReferenceToolRunner({
     index,
-    listChunks: async (documentId) => (await listReferenceChunks({ documentId, limit: 200 })).items,
+    listChunks: async (documentId) => documentId.startsWith("workspace:")
+      ? (taskResources(projectId)?.referenceChunks || []).filter((chunk) => chunk.documentId === documentId)
+      : (await listReferenceChunks({ documentId, limit: 200 })).items,
     budget,
     onActivity
   });

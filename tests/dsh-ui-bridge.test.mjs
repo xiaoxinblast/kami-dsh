@@ -1,21 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
 import { createWorkbench } from "../dsh/workbench.mjs";
+import { workspaceFs } from "./helpers/workspace-fs.mjs";
 
 test("DSH page requests use a direct Remote instead of recording slash commands", async () => {
   let plugin, props, descriptor;
-  const calls = [];
+  const calls = [], prompts = [];
   const remote = {
+    session: { async prompt(args) { prompts.push(args); return { ok: true, value: {} }; } },
     async $mount(contribution) { descriptor = contribution.descriptors[0]; return () => {}; },
     kamiUi: { async invoke(...args) { calls.push(args); return { ok: true, value: { projects: [] } }; } },
     commands: { execute() { assert.fail("Page reads must not append command events"); } }
   };
   vm.runInNewContext(await readFile(new URL("../dsh/client.js", import.meta.url), "utf8"), {
-    window: { __ModuleLoader__: { load: (module) => { plugin = module.factory(() => ({})); } } }
+    window: { __ModuleLoader__: { load: (module) => { plugin = module.factory(() => ({})); } } }, crypto: { randomUUID: () => "request-id" }
   });
   await plugin.apply({
     inject(_keys, callback) { return callback(this); },
@@ -30,6 +32,14 @@ test("DSH page requests use a direct Remote instead of recording slash commands"
   assert.equal(descriptor.parameters[0].wire, "agentId");
   remote.kamiUi.invoke = async () => ({ ok: false, error: { message: "Request failed" } });
   await assert.rejects(props.call("working-session", { path: "/api/projects" }), /Request failed/);
+  remote.kamiUi.invoke = async () => ({ ok: true, value: { isKamiSession: false, workspace: "project" } });
+  await assert.rejects(props.prompt("working-session", "翻译任务", "project"), /不匹配/);
+  remote.kamiUi.invoke = async () => ({ ok: true, value: { isKamiSession: true, workspace: "other" } });
+  await assert.rejects(props.prompt("working-session", "翻译任务", "project"), /不匹配/);
+  assert.equal(prompts.length, 0, "must not send to unrelated working sessions");
+  remote.kamiUi.invoke = async () => ({ ok: true, value: { isKamiSession: true, workspace: "project" } });
+  await props.prompt("kami-session", "翻译任务", "project");
+  assert.equal(prompts[0].sessionId, "kami-session");
 });
 
 test("installed DSH Client and Host keep workbench reads and human imports out of the associated session log", { skip: !process.env.DSH_TEST_LLM_MODULE, timeout: 10000 }, async () => {
@@ -42,7 +52,8 @@ test("installed DSH Client and Host keep workbench reads and human imports out o
     readFile(new URL("../dsh/ui-bridge.mjs", import.meta.url), "utf8").then((source) => import(`data:text/javascript,${encodeURIComponent(source.replace('"@deepseek-ai/dsh-typert-protocol"', JSON.stringify(new URL("../../dsh-typert-protocol/lib/index.js", sdk).href)))}`))
   ]);
   const directory = await mkdtemp(join(tmpdir(), "kami-dsh-ui-"));
-  const workbench = await createWorkbench({ dataDirectory: directory });
+  const workbench = await createWorkbench({ dataDirectory: join(directory, "data") });
+  const { fs, close } = await workspaceFs();
   const root = new Context();
   const events = [], contexts = [];
   const agent = { status: "running", session: { header: { cwd: directory }, append: (...args) => events.push(args) } };
@@ -61,7 +72,7 @@ test("installed DSH Client and Host keep workbench reads and human imports out o
     try {
       ctx.reflect.provide("kamiWorkbench", { ready: Promise.resolve(workbench), contextFor: (receiver, signal, human) => {
         assert.equal(receiver, agent);
-        const context = { human, signal, cwd: receiver.session.header.cwd, modelRoute: { model: "associated-model" } };
+        const context = { human, signal, cwd: receiver.session.header.cwd, fs, modelRoute: { model: "associated-model" } };
         contexts.push(context);
         return context;
       } });
@@ -89,6 +100,21 @@ test("installed DSH Client and Host keep workbench reads and human imports out o
       assert.equal(imported.profile.projectId, project.id);
       const profiles = await invoke({ path: `/api/style-profiles?projectId=${project.id}&locale=zh-CN` });
       assert.equal(profiles.userProfiles.find((profile) => profile.id === imported.profile.id).status, "active");
+      const state = await invoke({ action: "workspace", actionType: "bind", projectId: project.id });
+      assert.equal(state.project.id, project.id);
+      await mkdir(join(directory, "rules"));
+      await writeFile(join(directory, "rules/style.md"), "工作区指南保持完整，不启用项目旧指南版本。");
+      const resource = await invoke({ action: "file", path: "rules/style.md", purpose: "style-guide", expectedWorkspace: state.workspace });
+      assert.equal(resource.taskScoped, true);
+      assert.match(resource.preview, /工作区指南保持完整/);
+      assert.equal(resource.base64, undefined);
+      const after = await invoke({ path: `/api/style-profiles?projectId=${project.id}&locale=zh-CN` });
+      assert.equal(after.userProfiles.length, 1, "file reference must not create a project profile");
+      const other = join(directory, "other");
+      await mkdir(other);
+      agent.session.header.cwd = other;
+      assert.equal((await invoke({ action: "workspace" })).bound, false);
+      await assert.rejects(invoke({ action: "file", path: "rules/style.md", purpose: "style-guide", expectedWorkspace: state.workspace }), /已切换/);
       assert.ok(contexts.every((context) => context.human && context.modelRoute.model === "associated-model"));
       assert.equal(events.length, 0, "UI reads and uploads must not write command/run or command/done");
       assert.equal(agent.status, "running");
@@ -97,5 +123,5 @@ test("installed DSH Client and Host keep workbench reads and human imports out o
       resolveReady();
     } catch (error) { rejectReady(error); }
   } });
-  try { await ready; } finally { await root.fiber.dispose(); await workbench.close(); await rm(directory, { recursive: true, force: true }); }
+  try { await ready; } finally { await root.fiber.dispose(); await workbench.close(); await close(); await rm(directory, { recursive: true, force: true }); }
 });

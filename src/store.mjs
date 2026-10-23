@@ -2482,7 +2482,9 @@ export async function deleteBatchRun(batchId) {
 }
 
 export async function listBatchRuns(options) {
-  return usesDirectus() ? listDirectusBatchRuns(options) : listJsonBatchRuns(options);
+  const runs = await (usesDirectus() ? listDirectusBatchRuns(options) : listJsonBatchRuns(options));
+  const workspace = runtimeOptions().workspaceRoot;
+  return workspace ? runs.filter((run) => !run.runnerOptions?.workspaceSnapshot || run.runnerOptions.workspaceSnapshot.workspace === workspace) : runs;
 }
 
 export async function saveQaTask(input) {

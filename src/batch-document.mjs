@@ -331,16 +331,23 @@ export async function prepareBatchDocument(input = {}, options = {}) {
   let segmentationMode = ["paragraph", "unit", "group"].includes(input.segmentationMode) ? input.segmentationMode : "sentence";
   if (structured && !["unit", "group"].includes(segmentationMode)) segmentationMode = "unit";
   const collectorMode = structured ? "unit" : segmentationMode;
+  const bytes = () => {
+    if (!input.buffer) return decodeBase64(input.base64);
+    const buffer = Buffer.from(input.buffer);
+    if (!buffer.length) fail("文件内容为空");
+    if (buffer.length > MAX_FILE_BYTES) fail("文件超过 20MB 限制", 413);
+    return buffer;
+  };
   let prepared;
   if (extension === ".txt" || extension === ".md") {
-    const text = input.text !== undefined ? String(input.text) : decodeBase64(input.base64).toString("utf8");
+    const text = input.text !== undefined ? String(input.text) : bytes().toString("utf8");
     prepared = preparePlainText(text, filename, collectorMode);
-  } else if (extension === ".docx") prepared = await prepareDocx(decodeBase64(input.base64), collectorMode);
+  } else if (extension === ".docx") prepared = await prepareDocx(bytes(), collectorMode);
   else if (extension === ".csv") {
-    const buffer = input.text !== undefined ? Buffer.from(String(input.text), "utf8") : decodeBase64(input.base64);
+    const buffer = input.text !== undefined ? Buffer.from(String(input.text), "utf8") : bytes();
     prepared = await prepareCsv(buffer, collectorMode, options.analyzeSpreadsheet, options.columnMapping || null);
-  } else if (extension === ".xliff" || extension === ".mqxliff") prepared = prepareXliffDocument(decodeBase64(input.base64), filename);
-  else prepared = await prepareXlsx(decodeBase64(input.base64), collectorMode, options.analyzeSpreadsheet, options.columnMapping || null);
+  } else if (extension === ".xliff" || extension === ".mqxliff") prepared = prepareXliffDocument(bytes(), filename);
+  else prepared = await prepareXlsx(bytes(), collectorMode, options.analyzeSpreadsheet, options.columnMapping || null);
   if (!prepared.segments.length) fail("没有找到可翻译的日语内容");
   return {
     filename,

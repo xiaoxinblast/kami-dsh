@@ -19,10 +19,11 @@ test("server.mjs 引用的 store 导出都必须在 import 里", async () => {
   for (const match of serverSource.matchAll(/import\s*\{([^}]+)\}\s*from\s*"\.\/src\/store\.mjs"/gu)) {
     for (const name of match[1].split(",")) {
       const trimmed = name.trim();
-      if (trimmed) imported.add(trimmed);
+      if (trimmed) imported.add(trimmed.split(/\s+as\s+/u).at(-1));
     }
   }
 
-  const missing = exported.filter((name) => new RegExp(`\\b${name}\\s*\\(`, "u").test(serverSource) && !imported.has(name));
+  const local = new Set([...serverSource.matchAll(/(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/gu)].map((match) => match[1]));
+  const missing = exported.filter((name) => new RegExp(`\\b${name}\\s*\\(`, "u").test(serverSource) && !imported.has(name) && !local.has(name));
   assert.deepEqual(missing, [], `server.mjs 调用了未导入的 store 导出：${missing.join(", ")}`);
 });
