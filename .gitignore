@@ -11,6 +11,10 @@ node_modules/
 directus/.env
 tmp/
 
+# 本地旧版服务工作台启动入口
+/启动Kami工作台.cmd
+/重启Kami工作台.cmd
+
 # 本地测试/调试临时产物
 /*.exe
 /*.bin
