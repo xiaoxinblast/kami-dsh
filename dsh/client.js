@@ -190,23 +190,34 @@ window.__ModuleLoader__.load({
       inject: ["slots", "locale", "remote", "remote.session", "layout"],
       async apply(ctx) {
         ctx.effect(() => ctx.locale.register("kami-dsh", { zh, en: words }));
-        const json = { mode: "src-json" };
+        const json = { mode: "strict", typeSymbol: "kami-dsh#Json", jsonSchema: {}, create: () => ({ parse(value) {
+          return JSON.parse(JSON.stringify(value, (_key, item) => {
+            if (["undefined", "function", "symbol"].includes(typeof item) || typeof item === "number" && !Number.isFinite(item)) throw new TypeError("Kami operation must contain JSON values");
+            return item;
+          }));
+        } }) };
+        const sessionId = { mode: "strict", typeSymbol: "@deepseek-ai/dsh-session/types#SessionId", jsonSchema: { type: "string" }, create: () => ({ parse(value) {
+          if (typeof value !== "string" || !value) throw new TypeError("Kami session id must be a nonempty string");
+          return value;
+        } }) };
         const unmountRemote = await ctx.remote.$mount({ package: "kami-dsh", descriptors: [{
           id: "kami-dsh#kamiUi/invoke", service: "kamiUi", namespace: "kamiUi", method: "invoke", invocation: { kind: "direct" },
-          parameters: [{ name: "agent", wire: "agentId", source: "lookup", lookup: "agent", codec: json }, { name: "operation", wire: "operation", source: "json", codec: json }],
+          parameters: [{ name: "agent", wire: "agentId", source: "lookup", lookup: "agent", codec: sessionId }, { name: "operation", wire: "operation", source: "json", codec: json }],
           cancellation: { parameter: "signal" }, result: json
         }] });
         ctx.effect(() => unmountRemote);
-        const call = async (session, operation) => {
-          if (!session) throw new Error("请先打开一个 DSH 翻译会话");
-          const result = await ctx.remote.kamiUi.invoke(session, operation);
-          if (!result.ok) throw new Error(result.error.message);
-          return result.value;
-        };
-        const createSession = async (cwd) => { const result = await ctx.remote.session.create({ cwd, agentPreset: "kami-translator" }); if (!result.ok) throw new Error(result.error.message); return result.value; };
-        const prompt = async (sessionId, text) => { const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
-        ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "kami-workbench", locale: "kami-dsh", inject: () => ({ call, createSession, prompt }) }, Workbench));
-        ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({ name: "sidebar.panellist", id: "kami-workbench", label: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), order: 5, locale: "kami-dsh" }, () => h("span", { "aria-hidden": true }, "K")));
+        await ctx.inject(["remote.kamiUi"], (ctx) => {
+          const call = async (session, operation) => {
+            if (!session) throw new Error("请先打开一个 DSH 翻译会话");
+            const result = await ctx.remote.kamiUi.invoke(session, operation);
+            if (!result.ok) throw new Error(result.error.message);
+            return result.value;
+          };
+          const createSession = async (cwd) => { const result = await ctx.remote.session.create({ cwd, agentPreset: "kami-translator" }); if (!result.ok) throw new Error(result.error.message); return result.value; };
+          const prompt = async (sessionId, text) => { const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
+          ctx.slots.inject("main", () => ctx.slots.register({ name: "main", key: "kami-workbench", locale: "kami-dsh", inject: () => ({ call, createSession, prompt }) }, Workbench));
+          ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({ name: "sidebar.panellist", id: "kami-workbench", label: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), order: 5, locale: "kami-dsh" }, () => h("span", { "aria-hidden": true }, "K")));
+        });
       }
     };
   }

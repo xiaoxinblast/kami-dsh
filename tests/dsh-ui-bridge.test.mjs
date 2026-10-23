@@ -18,6 +18,7 @@ test("DSH page requests use a direct Remote instead of recording slash commands"
     window: { __ModuleLoader__: { load: (module) => { plugin = module.factory(() => ({})); } } }
   });
   await plugin.apply({
+    inject(_keys, callback) { return callback(this); },
     remote, effect: (callback) => callback(), locale: { register() {} },
     slots: { inject: (_name, callback) => callback(), register: (options) => { if (options.name === "main") props = options.inject(); } }
   });
@@ -31,12 +32,13 @@ test("DSH page requests use a direct Remote instead of recording slash commands"
   await assert.rejects(props.call("working-session", { path: "/api/projects" }), /Request failed/);
 });
 
-test("installed DSH Gateway keeps workbench reads and human imports out of the associated session log", { skip: !process.env.DSH_TEST_LLM_MODULE, timeout: 10000 }, async () => {
+test("installed DSH Client and Host keep workbench reads and human imports out of the associated session log", { skip: !process.env.DSH_TEST_LLM_MODULE, timeout: 10000 }, async () => {
   const sdk = process.env.DSH_TEST_LLM_MODULE;
-  const [{ Context }, { default: Registry }, { default: Gateway }, bridge] = await Promise.all([
+  const [{ Context }, { default: Registry }, { default: Gateway }, clientGateway, bridge] = await Promise.all([
     import(new URL("../../cordis/lib/index.js", sdk)),
     import(new URL("../../dsh-typert-registry/lib/index.js", sdk)),
     import(new URL("../../dsh-api-gateway/lib/index.js", sdk)),
+    import(new URL("../../dsh-api-gateway/lib/client.node.js", sdk)),
     readFile(new URL("../dsh/ui-bridge.mjs", import.meta.url), "utf8").then((source) => import(`data:text/javascript,${encodeURIComponent(source.replace('"@deepseek-ai/dsh-typert-protocol"', JSON.stringify(new URL("../../dsh-typert-protocol/lib/index.js", sdk).href)))}`))
   ]);
   const directory = await mkdtemp(join(tmpdir(), "kami-dsh-ui-"));
@@ -46,8 +48,13 @@ test("installed DSH Gateway keeps workbench reads and human imports out of the a
   const agent = { status: "running", session: { header: { cwd: directory }, append: (...args) => events.push(args) } };
   const peer = { principal: { kind: "owner" }, signal: new AbortController().signal };
   root.reflect.provide("remoteAccess", { decide: () => ({ kind: "deny", reason: "test" }) });
+  root.reflect.provide("connection", { interactions: "none", rpc: {
+    open() { assert.fail("Unary calls do not need a stream"); },
+    call: (_prefix, endpoint, payload, signal) => root.get("typertGateway").dispatchRpc(endpoint, payload, signal, peer)
+  } });
   root.plugin(Registry, {});
   root.plugin(Gateway, {});
+  root.plugin(clientGateway, {});
   let resolveReady, rejectReady;
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   root.plugin({ inject: ["typert"], apply(ctx) {
@@ -63,10 +70,19 @@ test("installed DSH Gateway keeps workbench reads and human imports out of the a
       ctx.typert.register(bridge.TYPERT);
     } catch (error) { rejectReady(error); }
   } });
-  root.plugin({ inject: ["typertGateway", "kamiUi"], async apply(ctx) {
+  root.plugin({ inject: ["typertGateway", "kamiUi", "remote"], async apply(ctx) {
     try {
       assert.ok(ctx.get("kamiUi"), "Kami UI Service must be available before Gateway invocation");
-      const invoke = (operation, agentId = "working-session") => ctx.typertGateway.invoke({ namespace: "kamiUi", method: "invoke", args: { agentId, operation }, peer });
+      let plugin, props;
+      vm.runInNewContext(await readFile(new URL("../dsh/client.js", import.meta.url), "utf8"), {
+        window: { __ModuleLoader__: { load: (module) => { plugin = module.factory(() => ({})); } } }
+      });
+      await plugin.apply({
+        inject(keys, callback) { return ctx.inject(keys, (child) => callback({ ...this, remote: child.remote })); },
+        remote: ctx.remote, effect: (callback) => ctx.effect(callback), locale: { register() {} },
+        slots: { inject: (_name, callback) => callback(), register: (options) => { if (options.name === "main") props = options.inject(); } }
+      });
+      const invoke = (operation, agentId = "working-session") => props.call(agentId, operation);
       const project = (await invoke({ method: "POST", path: "/api/projects", body: { name: "隔离验收项目" } })).project;
       for (let i = 0; i < 12; i++) assert.equal((await invoke({ path: "/api/projects" })).projects[0].id, project.id);
       const imported = await invoke({ method: "POST", path: "/api/style-guides/import", body: { projectId: project.id, filename: "界面验收.md", base64: Buffer.from("译文保持简洁。").toString("base64") } });

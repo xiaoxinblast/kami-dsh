@@ -32,6 +32,7 @@ async function mountClient(call) {
     FileReader, URLSearchParams
   });
   await plugin.apply({
+    inject(_keys, callback) { return callback(this); },
     effect: (callback) => callback(), locale: { register() {} }, remote: { async $mount() { return () => {}; } },
     slots: { inject: (_name, callback) => callback(), register: (options, value) => { if (options.name === "main") component = value; } }
   });

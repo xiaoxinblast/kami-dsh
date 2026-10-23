@@ -1,11 +1,18 @@
-import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { TypertRemoteService, isRemoteJsonValue } from "@deepseek-ai/dsh-typert-protocol";
 
-const json = { mode: "src-json" };
+const json = { mode: "strict", typeSymbol: "kami-dsh#Json", jsonSchema: {}, create: () => ({ parse(value) {
+  if (!isRemoteJsonValue(value)) throw new TypeError("Kami operation must contain JSON values");
+  return value;
+} }) };
+const sessionId = { mode: "strict", typeSymbol: "@deepseek-ai/dsh-session/types#SessionId", jsonSchema: { type: "string" }, create: () => ({ parse(value) {
+  if (typeof value !== "string" || !value) throw new TypeError("Kami session id must be a nonempty string");
+  return value;
+} }) };
 export const descriptor = {
   id: "kami-dsh#kamiUi/invoke", service: "kamiUi", namespace: "kamiUi", method: "invoke",
   invocation: { kind: "direct" },
   parameters: [
-    { name: "agent", wire: "agentId", source: "lookup", lookup: "agent", codec: json },
+    { name: "agent", wire: "agentId", source: "lookup", lookup: "agent", codec: sessionId },
     { name: "operation", wire: "operation", source: "json", codec: json }
   ],
   cancellation: { parameter: "signal" }, result: json
