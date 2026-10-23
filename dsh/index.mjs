@@ -3,8 +3,9 @@ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import * as llm from "@deepseek-ai/dsh-llm";
 import { createWorkbench } from "./workbench.mjs";
 import { createModelAdapter, sessionModelRoute } from "./model-adapter.mjs";
+import { KamiUiService, TYPERT } from "./ui-bridge.mjs";
 
-export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel"];
+export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert"];
 
 export async function apply(ctx) {
   const profile = process.env.DSH_PROFILE || "desktop";
@@ -19,6 +20,8 @@ export async function apply(ctx) {
     signal: AbortSignal.any([abort.signal, signal || new AbortController().signal])
   });
   ctx.effect(() => ctx.reflect.provide("kamiWorkbench", { ready, contextFor }));
+  ctx.plugin(KamiUiService);
+  ctx.typert.register(TYPERT);
   ctx.effect(() => ctx.commands.register({
     name: "kami",
     description: "操作本地 Kami 翻译工作台",

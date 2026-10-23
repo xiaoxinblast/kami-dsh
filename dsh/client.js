@@ -14,7 +14,9 @@ window.__ModuleLoader__.load({
       "段": "segments", "术语": "Terms", "翻译记忆": "Translation memory", "搜索": "Search", "上一页": "Previous", "下一页": "Next", "已显示": "Showing", "共": "of",
       "导入双语资产": "Import bilingual assets", "确认入库": "Approve import", "条候选": "candidates", "暂无条目": "No entries", "状态": "Status",
       "运行 QA": "Run QA", "质量报告": "Quality report", "尚未运行": "Not run yet", "上传参考资料": "Upload reference", "生成候选策略": "Propose strategy",
-      "风格规范": "Style profiles", "策略版本": "Strategies", "评测": "Evaluate", "激活": "Activate", "备份本地数据库": "Back up database", "保存设置": "Save settings",
+      "风格规范": "Style profiles", "风格指南": "Style guides", "人工风格指南": "Human style guides", "选择风格指南": "Select a style guide", "导入并立即启用": "Import and enable", "已启用": "Enabled", "当前生效": "Active", "历史版本": "Previous version", "指南全文": "Full guide", "尚未上传风格指南": "No style guides uploaded yet",
+      "支持 .txt、.md、.docx；最大 5 MB，正文最多 50,000 字。": "Supports .txt, .md and .docx; up to 5 MB and 50,000 characters.", "仅用于当前项目；启用新指南后，旧版保留在历史记录中。": "Applies to this project only. Enabling a new guide keeps the previous version in history.",
+      "策略版本": "Strategies", "评测": "Evaluate", "激活": "Activate", "备份本地数据库": "Back up database", "保存设置": "Save settings",
       "准备中…": "Working…", "已完成": "Done", "已保存": "Saved", "已提交": "Submitted", "请选择项目后继续": "Select a project to continue", "本地存储": "Local storage",
       "文件": "File", "关闭": "Close", "将保存当前译文为人工批准的 TM，并写入学习证据。": "Save this translation as human-approved TM and learning evidence.", "处理": "Process", "总分": "Score"
     };
@@ -52,6 +54,7 @@ window.__ModuleLoader__.load({
       const [offset, setOffset] = useState(0);
       const [data, setData] = useState({});
       const [preview, setPreview] = useState(null);
+      const [guideUpload, setGuideUpload] = useState(null);
       const [previewOffset, setPreviewOffset] = useState(0);
       const [styleEvidence, setStyleEvidence] = useState(false);
       const [aiCleaning, setAiCleaning] = useState(false);
@@ -73,12 +76,14 @@ window.__ModuleLoader__.load({
         if (tab === "翻译") { const value = await invoke(scoped("/api/batch/files")); setFiles(value.files || value.items || []); if (run?.batchId) await loadRun(run.batchId); }
         else if (tab === "资产") setData(await invoke(scoped("/api/library-entries", { kind, search: query, offset, limit: 50 })));
         else if (tab === "参考资料") setData(await invoke(scoped("/api/references", { search: query, offset, limit: 50 })));
+        else if (tab === "风格指南") setData(await invoke(scoped("/api/style-profiles")));
         else if (tab === "学习") { const [learning, styles] = await Promise.all([invoke(scoped("/api/learning", { contentType: "all", domain: "all" })), invoke(scoped("/api/style-profiles"))]); setData({ ...learning, styleProfiles: styles.styleProfiles || [] }); }
       else if (tab === "任务") setData({ tasks: await invoke(scoped("/api/tasks", { limit: 50 })) });
         else if (tab === "设置") { const value = await invoke("/api/settings"); setSettings(value.settings || value); setData(value); }
       };
       useEffect(() => { if (sessionId) action(loadProjects); }, [sessionId]);
       useEffect(() => { setData({}); if (sessionId && project) action(refresh); }, [sessionId, project, tab, kind, offset]);
+      useEffect(() => { setGuideUpload(null); }, [sessionId, project]);
       useEffect(() => {
         if (!sessionId || !project || !["running", "queued"].includes(run?.runState)) return;
         const timer = setInterval(() => { loadRun(run.batchId).catch((failure) => setError(failure.message)); }, 5000);
@@ -87,11 +92,15 @@ window.__ModuleLoader__.load({
       const readUpload = async (event, target) => {
         const file = event.target.files?.[0];
         if (!file) return;
+        if (target === "guide") setGuideUpload(null);
         await action(async () => {
+          if (target === "guide" && !/\.(txt|md|docx)$/i.test(file.name)) throw new Error("风格指南仅支持 .txt、.md、.docx");
+          if (target === "guide" && file.size > 5 * 1024 * 1024) throw new Error("风格指南不能超过 5 MB");
           if (file.size > 20 * 1024 * 1024) throw new Error("文件超过 20 MB");
           const base64 = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = reject; reader.readAsDataURL(file); });
           if (target === "assets") { const value = await invoke("/api/assets-import/preview", "POST", payload({ files: [{ filename: file.name, base64 }], filename: file.name, base64, purpose: kind === "tm" ? "tm" : "term" })); setPreview(value); setPreviewOffset(0); }
           else if (target === "reference") { await props.call(sessionId, { path: scoped("/api/references/file", { filename: file.name }), method: "POST", base64, headers: { "x-filename": encodeURIComponent(file.name), "x-project-id": project } }); await refresh(); }
+          else if (target === "guide") setGuideUpload({ projectId: project, sessionId, filename: file.name, base64 });
           else { const value = await invoke("/api/batch/prepare", "POST", payload({ filename: file.name, base64 })); setRun(value); setSegmentPage(0); await refresh(); await loadRun(value.batchId); }
         });
         event.target.value = "";
@@ -104,6 +113,7 @@ window.__ModuleLoader__.load({
         const link = document.createElement("a"); link.href = url; link.download = value.filename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       };
       const empty = (label = "暂无条目") => h("div", { className: "empty" }, t(label));
+      const guides = (data.userProfiles || []).filter((profile) => profile.projectId === project && String(profile.name || "").startsWith("风格指南 · "));
       const table = (items) => items?.length ? h("table", null, h("thead", null, h("tr", null, ...["原文", "译文", "状态"].map((label) => h("th", { key: label }, t(label))))), h("tbody", null, ...items.map((item, index) => h("tr", { key: item.id || index }, h("td", null, item.source || item.name || item.filename || item.title), h("td", null, item.target || item.translation || item.description || item.instruction || ""), h("td", null, item.status || item.qualityStatus || item.runState || ""))))) : empty();
       let content;
       if (!sessionId) content = h("section", { className: "card" }, h("h3", null, t("先建立翻译会话")), h("p", null, t("填写工作目录并新建翻译会话，或选择已有会话。")));
@@ -136,6 +146,15 @@ window.__ModuleLoader__.load({
         h("p", null, Object.entries(report.summary || {}).map(([key, value]) => `${({ basic: "基础", fidelity: "忠实度", nuance: "表达" })[key] || key}：${value.total} 项`).join(" · ")),
         ...[...(report.segments || []).flatMap((segment) => segment.issues || []), ...(report.alignmentIssues || [])].map((issue, i) => h("p", { key: i }, `[${issue.severity}] `, issue.message || issue.description))));
       else if (tab === "参考资料") content = h(React.Fragment, null, upload("上传参考资料", "reference", ".txt,.md,.docx,.pdf,.xlsx,.csv,.png,.jpg,.jpeg,.webp,.gif"), table(data.items), h("div", { className: "kami-tools" }, h("span", { className: "caption" }, `${t("已显示")} ${data.items?.length || 0} / ${t("共")} ${data.total || 0}`), button("上一页", async () => setOffset(Math.max(0, offset - 50))), button("下一页", async () => { if (offset + 50 < data.total) setOffset(offset + 50); })));
+      else if (tab === "风格指南") content = h(React.Fragment, null, h("section", { className: "card" },
+        h("h3", null, t("人工风格指南")), h("p", null, t("支持 .txt、.md、.docx；最大 5 MB，正文最多 50,000 字。")), h("p", null, t("仅用于当前项目；启用新指南后，旧版保留在历史记录中。")),
+        upload("选择风格指南", "guide", ".txt,.md,.docx"), guideUpload && h("p", null, guideUpload.filename),
+        h("button", { type: "button", className: "primary", disabled: busy || !guideUpload, onClick: () => action(async () => {
+          if (!guideUpload || guideUpload.projectId !== project || guideUpload.sessionId !== sessionId) throw new Error("项目或会话已切换，请重新选择风格指南");
+          const value = await invoke("/api/style-guides/import", "POST", payload({ filename: guideUpload.filename, base64: guideUpload.base64 }));
+          setGuideUpload(null); await refresh(); setNotice(`${t("已启用")}：${value.filename} · ${value.characters} 字`);
+        }) }, t("导入并立即启用"))),
+        ...guides.map((profile) => h("section", { className: "card", key: profile.id }, h("h3", null, profile.name), h("p", { className: "caption" }, `v${profile.version || 1} · ${t(profile.status === "active" ? "当前生效" : "历史版本")}`), h("details", null, h("summary", null, t("指南全文")), h("pre", null, String(profile.instruction || ""))))), !guides.length && empty("尚未上传风格指南"));
       else if (tab === "学习") content = h(React.Fragment, null, h("div", { className: "kami-tools" },
         h("select", { value: learningScope, "aria-label": "学习范围", onChange: (event) => setLearningScope(event.target.value) }, ...[...new Set(["general/game", ...(data.scopeCounts || []).map((scope) => `${scope.contentType}/${scope.domain}`)])].map((scope) => h("option", { key: scope, value: scope }, scope))),
         button("生成候选策略", async () => { const [contentType, domain] = learningScope.split("/"); await invoke("/api/learning/skills/generate", "POST", payload({ contentType, domain })); await refresh(); }, true)), h("h3", null, t("策略版本")), ...(data.skills || []).map((skill) => h("section", { className: "card", key: skill.id }, h("h3", null, `${skill.name || "v" + skill.version} · ${skill.status}`), h("p", { className: "caption" }, `${skill.contentType} / ${skill.domain}`), h("p", null, skill.description || skill.strategy?.instruction || ""), h("div", { className: "kami-tools" }, button("评测", async () => { await invoke(`/api/learning/skills/${skill.id}/evaluate`, "POST", payload({ contentType: skill.contentType, domain: skill.domain })); setNotice(t("已提交")); }), button("激活", async () => { await invoke(`/api/learning/skills/${skill.id}/activate`, "POST", payload({ contentType: skill.contentType, domain: skill.domain })); await refresh(); })))), !data.skills?.length && empty(),
@@ -164,20 +183,25 @@ window.__ModuleLoader__.load({
           h("div", { className: "kami-tools" }, h("input", { placeholder: "工作目录（绝对路径）", "aria-label": "翻译工作目录", value: sessionDirectory, onChange: (event) => setSessionDirectory(event.target.value), style: { minWidth: 280 } }), button("新建翻译会话", async () => { if (!/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(sessionDirectory.trim())) throw new Error("请输入工作目录的绝对路径"); const value = await props.createSession(sessionDirectory.trim()); setSession(value.sessionId); setNotice("已创建 Kami 翻译预设会话"); })),
           h("textarea", { "aria-label": "委托翻译 agent 的任务", placeholder: "描述要让 agent 完成的翻译、检索或 QA 任务", value: agentInstruction, onChange: (event) => setAgentInstruction(event.target.value) }),
           button("发送给翻译 agent", async () => { if (!agentInstruction.trim()) throw new Error("请输入任务内容"); await props.prompt(sessionId, agentInstruction.trim()); setAgentInstruction(""); setNotice("任务已发送，可在关联会话中查看 agent 的工具调用和回复"); })),
-        h("nav", { "aria-label": "Kami" }, ...["翻译", "资产", "审校", "参考资料", "学习", "任务", "设置"].map((label) => h("button", { key: label, "aria-selected": tab === label, onClick: () => { setTab(label); setOffset(0); } }, t(label)))),
+        h("nav", { "aria-label": "Kami" }, ...["翻译", "资产", "审校", "风格指南", "参考资料", "学习", "任务", "设置"].map((label) => h("button", { key: label, "aria-selected": tab === label, onClick: () => { setTab(label); setOffset(0); } }, t(label)))),
         busy && h("p", { role: "status" }, t("准备中…")), error && h("div", { className: "notice error", role: "alert" }, error), notice && h("div", { className: "notice", role: "status" }, notice), content);
     }
     return {
-      inject: ["slots", "locale", "remote", "remote.commands", "remote.session", "layout"],
-      apply(ctx) {
+      inject: ["slots", "locale", "remote", "remote.session", "layout"],
+      async apply(ctx) {
         ctx.effect(() => ctx.locale.register("kami-dsh", { zh, en: words }));
+        const json = { mode: "src-json" };
+        const unmountRemote = await ctx.remote.$mount({ package: "kami-dsh", descriptors: [{
+          id: "kami-dsh#kamiUi/invoke", service: "kamiUi", namespace: "kamiUi", method: "invoke", invocation: { kind: "direct" },
+          parameters: [{ name: "agent", wire: "agentId", source: "lookup", lookup: "agent", codec: json }, { name: "operation", wire: "operation", source: "json", codec: json }],
+          cancellation: { parameter: "signal" }, result: json
+        }] });
+        ctx.effect(() => unmountRemote);
         const call = async (session, operation) => {
           if (!session) throw new Error("请先打开一个 DSH 翻译会话");
-          const result = await ctx.remote.commands.execute(session, `/kami ${JSON.stringify(operation)}`, []);
+          const result = await ctx.remote.kamiUi.invoke(session, operation);
           if (!result.ok) throw new Error(result.error.message);
-          const outcome = result.value?.result;
-          if (outcome?.kind !== "success") throw new Error(outcome?.text || "Kami command unavailable");
-          return JSON.parse(outcome.text || "null");
+          return result.value;
         };
         const createSession = async (cwd) => { const result = await ctx.remote.session.create({ cwd, agentPreset: "kami-translator" }); if (!result.ok) throw new Error(result.error.message); return result.value; };
         const prompt = async (sessionId, text) => { const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
