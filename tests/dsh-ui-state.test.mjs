@@ -72,6 +72,24 @@ test("QA labels never turn null scores or deterministic checks into model QA suc
   assert.equal(reportScore({ scores: { overall: 100 }, segments: [{ fallbackReason: "timeout" }] }), null);
 });
 
+test("QA stage follows current segment results and a manual check stays visibly active", async () => {
+  const { qaSummary } = await modelModule();
+  const segment = (aiQa) => ({ status: "done", translation: "译文", result: { aiQa } });
+  const run = { segments: [segment({ used: true, score: 99 }), segment({ used: true, score: 100 })], workflow: { aiQa: { status: "completed", message: "0 段 AIQA 已检查" } } };
+  assert.deepEqual(JSON.parse(JSON.stringify(qaSummary(run))), { model: 2, rules: 0, incomplete: 0, busy: false, label: "已完成" });
+  assert.equal(qaSummary(run, true).label, "正在处理");
+  assert.equal(qaSummary(run, true).busy, true);
+  run.segments[0].result.aiQa = { status: "not_run", used: false, score: null };
+  assert.equal(qaSummary(run).label, "QA 未完成");
+  assert.equal(qaSummary(run).incomplete, 1);
+  run.segments[1].result.aiQa = { used: true, score: 100, fallbackReason: "timeout" };
+  assert.equal(qaSummary(run).label, "QA 未完成");
+  run.segments = [segment({ status: "deterministic_only", used: false, score: null })];
+  assert.equal(qaSummary(run).label, "规则检查");
+  run.segments = [segment({ status: "not_run", used: false, score: null })];
+  assert.equal(qaSummary(run).label, "尚未执行 QA");
+});
+
 test("polling discovers agent-created batches without switching a manually reviewed task", async () => {
   const { WorkbenchModel } = await modelModule();
   const f = fixture(WorkbenchModel);

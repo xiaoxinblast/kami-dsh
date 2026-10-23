@@ -28,6 +28,15 @@ window.__ModuleLoader__.load({
       const score = qa.score ?? segment.result?.qaScore;
       return qa.used && Number.isFinite(score) ? `模型 QA · ${score}` : "尚未执行 QA";
     }
+    function qaSummary(run, pending = false) {
+      const translated = (run.segments || []).filter((segment) => segment.selected !== false && segment.status === "done" && segment.translation?.trim());
+      const labels = translated.map(qaLabel), model = labels.filter((label) => label.startsWith("模型 QA · ")).length, rules = labels.filter((label) => label === "规则检查").length;
+      const incomplete = translated.length - model - rules, busy = pending || ["in_progress", "waiting"].includes(run.workflow?.aiQa?.status);
+      const label = busy ? pending || run.workflow.aiQa.status === "in_progress" ? "正在处理" : "等待中"
+        : labels.includes("QA 未完成") || (incomplete > 0 && model + rules > 0) ? "QA 未完成"
+        : rules > 0 && rules === translated.length ? "规则检查" : translated.length && !incomplete ? "已完成" : "尚未执行 QA";
+      return { model, rules, incomplete, busy, label };
+    }
     function issuesOf(segment) {
       const issues = segment.result?.qa?.issues || segment.result?.issues || segment.result?.aiQa?.issues || [];
       return [...issues, ...(segment.error ? [{ severity: "error", message: segment.error }] : []),
@@ -196,7 +205,7 @@ window.__ModuleLoader__.load({
         }, true);
       }
     }
-    return { WorkbenchModel, resourceFields, chooseBatch, batchLabel, editingLocked, qaLabel, issuesOf, reportScore };
+    return { WorkbenchModel, resourceFields, chooseBatch, batchLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore };
   }
 });
 
@@ -225,7 +234,7 @@ window.__ModuleLoader__.load({
       "文件": "File", "关闭": "Close", "将保存当前译文为人工批准的 TM，并写入学习证据。": "Save this translation as human-approved TM and learning evidence.", "处理": "Process", "总分": "Score"
     };
     const zh = Object.fromEntries(Object.keys(words).map((key) => [key, key]));
-    const { WorkbenchModel, resourceFields, batchLabel, editingLocked, qaLabel, issuesOf, reportScore } = require("kami-dsh/client.workbench-state.js");
+    const { WorkbenchModel, resourceFields, batchLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore } = require("kami-dsh/client.workbench-state.js");
     Object.assign(words, {
       "任务": "Tasks", "资源": "Resources", "更多": "More", "当前工作区": "Workspace", "更换项目": "Change project", "已连接": "Connected", "连接中": "Connecting", "连接失败": "Connection failed",
       "尚未绑定项目": "No project bound", "选择已有项目": "Select an existing project", "绑定项目": "Bind project", "新建并绑定": "Create and bind", "项目绑定": "Project binding",
@@ -370,9 +379,8 @@ window.__ModuleLoader__.load({
       const locked = editingLocked(run), pending = model.dirty(), id = run.batchId;
       const translated = selected.filter((segment) => segment.status === "done" && segment.translation?.trim());
       const qaFailed = translated.some((segment) => segment.result?.aiQa?.fallbackReason);
-      const qaState = ["in_progress", "waiting"].includes(run.workflow?.aiQa?.status) ? stateText(run.workflow.aiQa.status, t) : qaFailed ? t("QA 未完成")
-        : translated.length && translated.every((segment) => qaLabel(segment) === "规则检查") ? t("规则检查")
-        : translated.length && translated.every((segment) => qaLabel(segment) === "规则检查" || qaLabel(segment).startsWith("模型 QA · ")) ? t("已完成") : t("尚未执行 QA");
+      const qa = qaSummary(run, model.view.operations[`qa:${id}`]?.pending);
+      const qaDescription = `${qa.model} ${t("段")} ${t("模型 QA")} · ${qa.rules} ${t("段")} ${t("规则检查")} · ${qa.incomplete} ${t("段")} ${t("QA 未完成")}`;
       const command = (verb) => model.perform(`${verb}:${id}`, async (token) => {
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", scopeArgs(model, token), token);
         await model.loadRun(token, id);
@@ -380,7 +388,7 @@ window.__ModuleLoader__.load({
       return h("section", { className: "card" }, h("div", { className: "task-status" }, h("span", { className: "muted" }, t("当前任务")), h("span", { className: "badge" }, stateText(run.runState || "ready", t))),
         h("h2", { className: "task-title" }, run.filename || id), h("progress", { max: Math.max(1, selected.length), value: done, "aria-label": t("翻译进度") }),
         h("div", { className: "metrics" }, h("span", null, h("strong", null, `${done}/${selected.length}`), t("段")), h("span", null, h("strong", null, problems), t("问题")), failed > 0 && h("span", { className: "error" }, h("strong", null, failed), t("失败"))),
-        h("div", { className: "stages" }, ...[["translation", "翻译"], ["aiQa", "质量检查"], ["qualityReport", "一致性"], ["termSurvey", "术语普查"]].map(([key, label]) => h("div", { className: "stage", key, "data-active": ["in_progress", "waiting"].includes(run.workflow?.[key]?.status), title: run.workflow?.[key]?.message || "" }, h("strong", null, t(label)), h("span", null, key === "aiQa" ? qaState : stateText(run.workflow?.[key]?.status, t))))),
+        h("div", { className: "stages" }, ...[["translation", "翻译"], ["aiQa", "质量检查"], ["qualityReport", "一致性"], ["termSurvey", "术语普查"]].map(([key, label]) => h("div", { className: "stage", key, "data-active": key === "aiQa" ? qa.busy : ["in_progress", "waiting"].includes(run.workflow?.[key]?.status), title: key === "aiQa" ? qaDescription : run.workflow?.[key]?.message || "" }, h("strong", null, t(label)), h("span", null, key === "aiQa" ? t(qa.label) : stateText(run.workflow?.[key]?.status, t))))),
         h("div", { className: "button-row" }, ["running", "queued"].includes(run.runState)
           ? h(Button, { onClick: () => command("pause"), busy: model.view.operations[`pause:${id}`]?.pending }, t("暂停"))
           : done === selected.length && selected.length && !locked ? h(Button, { primary: true, disabled: pending || model.view.operations[`qa:${id}`]?.pending, busy: model.view.operations[`retry-qa:${id}`]?.pending, onClick: qaFailed ? () => command("retry-qa") : review }, t(qaFailed ? "重试未完成 QA" : "复核译文"))
