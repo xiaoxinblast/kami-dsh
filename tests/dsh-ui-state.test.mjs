@@ -45,6 +45,20 @@ test("task selection prefers active batches and preserves a manual selection", a
   assert.equal(chooseBatch(files.slice(0, 1)), "new");
 });
 
+test("same-name batches have distinct visible labels and a switch shows one draft notice", async () => {
+  const { WorkbenchModel, batchLabel } = await modelModule();
+  assert.notEqual(batchLabel({ filename: "dialogue.docx", batchId: "batch-01" }, "已完成"), batchLabel({ filename: "dialogue.docx", batchId: "batch-02" }, "已完成"));
+  const f = fixture(WorkbenchModel);
+  await f.model.refresh(); await f.model.select("old");
+  assert.equal(f.model.draftNotice(), "");
+  f.model.edit("s", "验收草稿");
+  assert.equal(f.model.draftNotice(), "draft");
+  await f.model.select("next");
+  assert.equal(f.model.draftNotice(), "switch");
+  f.model.cancelSelection();
+  assert.equal(f.model.draftNotice(), "draft");
+});
+
 test("QA labels never turn null scores or deterministic checks into model QA success", async () => {
   const { qaLabel, editingLocked, reportScore } = await modelModule();
   assert.equal(qaLabel({ result: { qaScore: null } }), "尚未执行 QA");

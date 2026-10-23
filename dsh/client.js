@@ -13,6 +13,10 @@ window.__ModuleLoader__.load({
       const sorted = [...files].sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
       return (sorted.find((file) => ["running", "queued"].includes(file.runState)) || sorted[0])?.batchId || "";
     }
+    function batchLabel(file, status) {
+      const id = String(file.batchId || file.id || "");
+      return [file.filename || file.title || id, status, id && `#${id.slice(0, 8)}`].filter(Boolean).join(" · ");
+    }
     function editingLocked(run) {
       return !run || ["running", "queued"].includes(run.runState) || run.workflow?.writeBusy === true || run.workflow?.qaRetryBusy === true
         || ["aiQa", "qualityReport", "termSurvey"].some((stage) => ["in_progress", "waiting"].includes(run.workflow?.[stage]?.status));
@@ -144,6 +148,7 @@ window.__ModuleLoader__.load({
         if (this.valid(token)) return this.activate(next);
       }
       dirty(id = this.view.selectedId) { return Object.keys(this.view.drafts[id] || {}).length > 0; }
+      draftNotice() { return this.dirty() ? this.view.pendingSelection === null ? "draft" : "switch" : ""; }
       displayRun() {
         const run = this.view.run;
         if (!run) return null;
@@ -191,7 +196,7 @@ window.__ModuleLoader__.load({
         }, true);
       }
     }
-    return { WorkbenchModel, resourceFields, chooseBatch, editingLocked, qaLabel, issuesOf, reportScore };
+    return { WorkbenchModel, resourceFields, chooseBatch, batchLabel, editingLocked, qaLabel, issuesOf, reportScore };
   }
 });
 
@@ -220,7 +225,7 @@ window.__ModuleLoader__.load({
       "文件": "File", "关闭": "Close", "将保存当前译文为人工批准的 TM，并写入学习证据。": "Save this translation as human-approved TM and learning evidence.", "处理": "Process", "总分": "Score"
     };
     const zh = Object.fromEntries(Object.keys(words).map((key) => [key, key]));
-    const { WorkbenchModel, resourceFields, editingLocked, qaLabel, issuesOf, reportScore } = require("kami-dsh/client.workbench-state.js");
+    const { WorkbenchModel, resourceFields, batchLabel, editingLocked, qaLabel, issuesOf, reportScore } = require("kami-dsh/client.workbench-state.js");
     Object.assign(words, {
       "任务": "Tasks", "资源": "Resources", "更多": "More", "当前工作区": "Workspace", "更换项目": "Change project", "已连接": "Connected", "连接中": "Connecting", "连接失败": "Connection failed",
       "尚未绑定项目": "No project bound", "选择已有项目": "Select an existing project", "绑定项目": "Bind project", "新建并绑定": "Create and bind", "项目绑定": "Project binding",
@@ -453,11 +458,12 @@ window.__ModuleLoader__.load({
     function TaskView({ model, t }) {
       const run = model.displayRun(), view = model.view;
       const reviewRef = useRef(null), exportRef = useRef(null);
-      return h("div", { className: "stack" }, h("label", null, t("选择翻译批次"), h("select", { className: "task-selector", value: view.selectedId, onChange: (event) => model.select(event.target.value) }, h("option", { value: "" }, t("暂无翻译批次")), ...view.files.map((file) => h("option", { key: file.batchId, value: file.batchId }, `${file.filename || file.batchId} · ${stateText(file.runState || file.status, t)}`)))),
+      const notice = model.draftNotice();
+      return h("div", { className: "stack" }, h("label", null, t("选择翻译批次"), h("select", { className: "task-selector", value: view.selectedId, onChange: (event) => model.select(event.target.value) }, h("option", { value: "", disabled: view.files.length > 0 }, t(view.files.length ? "选择翻译批次" : "暂无翻译批次")), ...view.files.map((file) => h("option", { key: file.batchId, value: file.batchId }, batchLabel(file, stateText(file.runState || file.status, t)))))),
         h(Feedback, { model, name: "task-list", retry: () => model.refresh(), t }), h(Feedback, { model, name: "task-load", retry: () => model.activate(view.selectedId), t }),
         view.newBatches.length > 0 && h("div", { className: "notice", role: "status" }, t("发现新批次"), ` · ${view.newBatches.length} `, h(Button, { small: true, quiet: true, onClick: () => model.select(view.newBatches[0]) }, t("查看新批次"))),
-        view.pendingSelection !== null && h("section", { className: "notice", role: "alert" }, h("strong", null, t("有未保存的译文草稿")), h("p", null, t("切换批次前，保存或放弃当前草稿。")), h("div", { className: "button-row" }, h(Button, { primary: true, busy: view.operations.save?.pending, disabled: editingLocked(run), onClick: () => model.confirmSelection(true) }, t("保存并切换")), h(Button, { onClick: () => model.confirmSelection(false) }, t("放弃并切换")), h(Button, { quiet: true, onClick: () => model.cancelSelection() }, t("取消切换")))),
-        model.dirty() && h("div", { className: "notice", role: "status" }, t("有未保存的译文草稿"), h("p", { className: "muted" }, t("草稿保存在当前会话中，退出应用前请保存。"))),
+        notice === "switch" && h("section", { className: "notice", role: "alert" }, h("strong", null, t("有未保存的译文草稿")), h("p", null, t("切换批次前，保存或放弃当前草稿。")), h("div", { className: "button-row" }, h(Button, { primary: true, busy: view.operations.save?.pending, disabled: editingLocked(run), onClick: () => model.confirmSelection(true) }, t("保存并切换")), h(Button, { onClick: () => model.confirmSelection(false) }, t("放弃并切换")), h(Button, { quiet: true, onClick: () => model.cancelSelection() }, t("取消切换")))),
+        notice === "draft" && h("div", { className: "notice", role: "status" }, t("有未保存的译文草稿"), h("p", { className: "muted" }, t("草稿保存在当前会话中，退出应用前请保存。"))),
         !run && !view.operations["task-load"]?.pending && h(Empty, { title: "从工作区开始", description: "指定原文、关联资源，然后开始第一批翻译。", artwork: true, t }),
         h(QuickBatch, { model, t }),
         run && h("div", { className: "task-grid", key: run.batchId }, h("div", { className: "task-main stack" }, h(TaskSummary, { model, run, t,
@@ -548,8 +554,9 @@ window.__ModuleLoader__.load({
             return h("label", { key: field.path }, field.label, h("input", { type: typeof value === "boolean" ? "checkbox" : typeof value === "number" ? "number" : "text", min: field.min, max: field.max, step: field.step, value: typeof value === "boolean" ? undefined : value ?? "", checked: typeof value === "boolean" ? value : undefined, onChange: (event) => change(typeof value === "boolean" ? event.target.checked : typeof value === "number" ? Number(event.target.value) : event.target.value) }), h("p", { className: "muted" }, field.hint));
           })))), h(Button, { onClick: save, busy: model.view.operations["settings-save"]?.pending }, t("保存设置")), h(Feedback, { model, name: "settings-save", retry: save, t })));
     }
-    function WorkspaceBody({ model, t }) {
+    function WorkspaceBody({ model, t, scrollRef }) {
       const [tab, setTab] = useState("任务"), [binding, setBinding] = useState(false);
+      useEffect(() => { scrollRef.current?.scrollTo({ top: 0 }); }, [tab, scrollRef]);
       const bound = Boolean(model.view.projectId), showBinding = !bound || binding;
       const content = tab === "任务" ? h(TaskView, { model, t }) : tab === "资源" ? h(ResourcesView, { model, t }) : tab === "资产" ? h(AssetsView, { model, t }) : tab === "学习" ? h(LearningView, { model, t }) : tab === "审校" ? h(StandaloneQa, { model, t }) : h(SettingsView, { model, t });
       return h(React.Fragment, null, h("div", { className: "masthead" }, h("header", { className: "brand-row" }, h(BrandMark, { size: 36 }), h("div", { className: "brand-name" }, h("h1", null, t("Kami 翻译工作台")), h("div", { className: "eyebrow" }, "KAMI · JA / ZH-CN")), h("div", { className: `connection ${model.connected ? "" : "error"}`, role: "status" }, h("span", { className: "connection-dot", "aria-hidden": true }), h("span", { className: "connection-label" }, t(model.connected ? "已连接" : model.connection.pending ? "连接中" : "连接失败")))),
@@ -560,7 +567,7 @@ window.__ModuleLoader__.load({
           showBinding && model.workspace && h(BindingForm, { model, t, close: () => setBinding(false) }), bound && content));
     }
     function Workbench(props) {
-      const [, render] = useState(0), modelRef = useRef(null);
+      const [, render] = useState(0), modelRef = useRef(null), scrollRef = useRef(null);
       if (!modelRef.current) modelRef.current = new WorkbenchModel({ sessionId: props.sessionId, call: props.call, visible: props.visible !== false });
       const model = modelRef.current, t = props.t || ((key) => key);
       useEffect(() => model.subscribe(() => render((value) => value + 1)), [model]);
@@ -572,7 +579,7 @@ window.__ModuleLoader__.load({
         refresh(); const timer = setInterval(refresh, 5000);
         return () => { clearInterval(timer); model.setVisible(false); };
       }, [model, props.visible]);
-      return h("main", { className: "kami", "aria-label": t("Kami 翻译工作台") }, h("style", null, css), h(WorkspaceBody, { model, t, key: model.scopeKey || "loading" }));
+      return h("main", { className: "kami", ref: scrollRef, "aria-label": t("Kami 翻译工作台") }, h("style", null, css), h(WorkspaceBody, { model, t, scrollRef, key: model.scopeKey || "loading" }));
     }
     return {
       inject: ["slots", "locale", "remote", "remote.session", "sessions", "sidebarRight", "sidebarRightTabs"],
