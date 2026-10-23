@@ -1,5 +1,6 @@
 import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { runtimeOptions } from "./runtime-context.mjs";
 
 /**
  * 批次的原文件存档。
@@ -29,7 +30,7 @@ export async function saveBatchOriginal({ dataRoot, batchId, filename, buffer })
   if (!dataRoot) throw new Error("缺少数据目录，无法保存原文件");
   const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || "");
   if (!bytes.length) throw new Error("原文件内容为空");
-  if (bytes.length > MAX_BYTES) throw new Error(`原文件超过 ${Math.round(MAX_BYTES / (1024 * 1024))}MB`);
+  if (!runtimeOptions().embedded && bytes.length > MAX_BYTES) throw new Error(`原文件超过 ${Math.round(MAX_BYTES / (1024 * 1024))}MB`);
   const relative = originalRelativePath(batchId, filename);
   const absolute = join(dataRoot, relative);
   await mkdir(join(dataRoot, ORIGINAL_UPLOAD_DIRECTORY), { recursive: true });

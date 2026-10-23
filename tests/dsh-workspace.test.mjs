@@ -47,14 +47,14 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       assert.deepEqual(config.terms, ["glossary.csv"]);
       assert.equal((await workbench.invoke({ path: `/api/style-profiles?projectId=${projectId}&locale=zh-CN` }, context)).userProfiles.length, 0);
     });
-    await t.test("rejects traversal, missing files, directories, invalid formats, size and links outside workspace", async () => {
+    await t.test("rejects traversal and external links while resource association accepts original files", async () => {
       for (const path of ["../outside.txt", "rules/../../outside.txt", join(directory, "outside.txt")]) await assert.rejects(workbench.importFile({ path }, context), /路径|ENOENT/);
       await assert.rejects(workbench.importFile({ path: "missing.txt" }, context), /ENOENT|FS_NOT_FOUND/);
       await assert.rejects(workbench.importFile({ path: "rules" }, context), /普通文件/);
       await writeFile(join(first, "invalid.exe"), "no");
-      await assert.rejects(workbench.importFile({ path: "invalid.exe", purpose: "style-guide" }, context), /仅支持/);
+      assert.equal((await workbench.importFile({ path: "invalid.exe", purpose: "style-guide", register: false }, context)).readMode, "agent");
       await writeFile(join(first, "large.md"), Buffer.alloc(5 * 1024 * 1024 + 1));
-      await assert.rejects(workbench.importFile({ path: "large.md", purpose: "style-guide" }, context), /5 MB/);
+      assert.equal((await workbench.importFile({ path: "large.md", purpose: "style-guide", register: false }, context)).size, 5 * 1024 * 1024 + 1);
       await writeFile(join(second, "outside.md"), "外部文件");
       await symlink(second, join(first, "external"), process.platform === "win32" ? "junction" : "dir");
       await assert.rejects(workbench.importFile({ path: "external/outside.md", purpose: "style-guide" }, context), /工作区外/);

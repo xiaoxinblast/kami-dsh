@@ -52,9 +52,11 @@ export function createMatcherPool({ workerUrl = new URL("./matcher-worker.mjs", 
   const ensureWorker = () => {
     if (worker) return worker;
     worker = new Worker(workerUrl);
+    const current = worker;
     // 不阻止进程退出；需要时 close() 会 terminate。
     worker.unref?.();
     worker.on("message", (message) => {
+      if (worker !== current) return;
       const entry = pending.get(message?.id);
       if (!entry) return;
       pending.delete(message.id);
@@ -64,8 +66,8 @@ export function createMatcherPool({ workerUrl = new URL("./matcher-worker.mjs", 
       else entry.resolve(message.matches);
       dispatchNext();
     });
-    worker.on("error", (error) => failAll(error instanceof Error ? error : new Error(String(error))));
-    worker.on("exit", (code) => failAll(new Error(`matcher worker exited (${code})`)));
+    worker.on("error", (error) => { if (worker === current) failAll(error instanceof Error ? error : new Error(String(error))); });
+    worker.on("exit", (code) => { if (worker === current) failAll(new Error(`matcher worker exited (${code})`)); });
     return worker;
   };
 

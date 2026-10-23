@@ -31,7 +31,8 @@ test("workspace guide controller previews and links paths without changing legac
     assert.equal(model.workspace.project.name, "界面验收");
     assert.doesNotMatch(source, /FileReader|type:\s*["']file["']|agentInstruction/);
     await model.loadSection("preview", (token) => model.request({ action: "file", path: "rules/style.md", purpose: "style-guide", register: false }, token));
-    assert.match(model.view.sections.preview.preview, /工作区指南：译文保持简洁。末尾校验/);
+    assert.equal(model.view.sections.preview.path, "rules/style.md");
+    assert.equal(model.view.sections.preview.readMode, "agent");
     assert.equal((await workbench.workspace({}, context)).config.styleGuides.length, 0, "preview must not link the file");
     await model.perform("link", async (token) => {
       await model.request({ action: "file", path: "rules/style.md", purpose: "style-guide" }, token);

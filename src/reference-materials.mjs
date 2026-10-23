@@ -12,6 +12,7 @@ import JSZip from "jszip";
 import ExcelJS from "exceljs";
 import { csvValues, parseCsvDocument } from "./csv-document.mjs";
 import { hasInjectionSignature } from "./style-rules.mjs";
+import { runtimeOptions } from "./runtime-context.mjs";
 
 export const REFERENCE_KINDS = Object.freeze({
   character: "角色设定",
@@ -182,7 +183,7 @@ export async function planReferenceExtraction({ filename, base64 = "", buffer: r
   const safeName = basename(String(filename || "").trim());
   const format = referenceFormatOf(safeName);
   const buffer = await readReferenceBytes({ base64, buffer: rawBuffer, path });
-  if (buffer.length > MAX_REFERENCE_FILE_BYTES) {
+  if (!runtimeOptions().embedded && buffer.length > MAX_REFERENCE_FILE_BYTES) {
     throw Object.assign(new Error(`单个参考资料不能超过 ${Math.round(MAX_REFERENCE_FILE_BYTES / 1024 / 1024)}MB`), { statusCode: 400 });
   }
   const plan = { bytes: buffer.length, pages: 1, images: 0, textPages: 1, scannedPages: 0 };
@@ -581,7 +582,7 @@ export async function extractReferenceFile({ filename, base64 = "", buffer: rawB
   // 原始字节 / 磁盘路径入口（浏览器直传的大文件）不用再过一遍 base64。
   const buffer = await readReferenceBytes({ base64, buffer: rawBuffer, path });
   if (!buffer.length) throw Object.assign(new Error("文件内容为空"), { statusCode: 400 });
-  if (buffer.length > MAX_REFERENCE_FILE_BYTES) {
+  if (!runtimeOptions().embedded && buffer.length > MAX_REFERENCE_FILE_BYTES) {
     throw Object.assign(new Error(`单个参考资料不能超过 ${Math.round(MAX_REFERENCE_FILE_BYTES / 1024 / 1024)}MB`), { statusCode: 400 });
   }
   const budget = visionBudget();

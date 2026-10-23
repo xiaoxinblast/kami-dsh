@@ -32,3 +32,29 @@ test("migration is repeatable and preserves identifiers and original payloads", 
     assert.equal(store.request("/items/style_evidence?aggregate[count]=*")[0].count, "1");
   } finally { store.close(); }
 });
+
+test("library aggregates keep counts and latest-entry timestamps in the same response", () => {
+  const store = new SqliteStore(":memory:");
+  try {
+    store.request("/items/translation_memories_zh_cn", { method: "POST", body: [
+      { id: "a", library_id: "master", source_file: "first.docx", date_created: "2026-10-01T00:00:00Z" },
+      { id: "b", library_id: "master", source_file: "second.docx", date_created: "2026-10-23T00:00:00Z" }
+    ] });
+    const [row] = store.request("/items/translation_memories_zh_cn?groupBy[]=library_id&aggregate[count]=*&aggregate[max]=date_created&aggregate[countDistinct]=source_file");
+    assert.equal(row.count, "2");
+    assert.equal(row.max.date_created, "2026-10-23T00:00:00Z");
+    assert.equal(row.countDistinct.source_file, "2");
+  } finally { store.close(); }
+});
+
+test("bulk updates switch learning versions atomically and roll back on a missing record", () => {
+  const store = new SqliteStore(":memory:");
+  try {
+    store.request("/items/translation_skills", { method: "POST", body: [{ id: "one", status: "champion" }, { id: "two", status: "draft" }] });
+    store.request("/items/translation_skills", { method: "PATCH", body: [{ id: "one", status: "inactive" }, { id: "two", status: "champion" }] });
+    assert.equal(store.request("/items/translation_skills/two").status, "champion");
+    assert.throws(() => store.request("/items/translation_skills", { method: "PATCH", body: [{ id: "two", status: "inactive" }, { id: "missing", status: "champion" }] }), /not found/);
+    assert.equal(store.request("/items/translation_skills/two").status, "champion");
+    assert.throws(() => store.request("/items/translation_skills", { method: "PATCH", body: [{ status: "champion" }] }), /ID/);
+  } finally { store.close(); }
+});

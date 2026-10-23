@@ -1,5 +1,6 @@
 import { extname, basename } from "node:path";
 import JSZip from "jszip";
+import { runtimeOptions } from "./runtime-context.mjs";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_GUIDE_CHARACTERS = 50_000;
@@ -45,10 +46,10 @@ export async function extractStyleGuideFile({ filename, base64, buffer: bytes } 
   const encoded = String(base64 || "").replace(/^data:[^;]+;base64,/u, "");
   const buffer = bytes ? Buffer.from(bytes) : Buffer.from(encoded, "base64");
   if (!buffer.length) throw Object.assign(new Error("风格指南文件为空"), { statusCode: 400 });
-  if (buffer.length > MAX_FILE_BYTES) throw Object.assign(new Error("风格指南不能超过 5MB"), { statusCode: 413 });
+  if (!runtimeOptions().embedded && buffer.length > MAX_FILE_BYTES) throw Object.assign(new Error("风格指南不能超过 5MB"), { statusCode: 413 });
   const text = normalizeGuideText(extension === ".docx" ? await docxText(buffer) : buffer.toString("utf8"));
   if (!text) throw Object.assign(new Error("风格指南没有可读取的正文"), { statusCode: 422 });
-  if ([...text].length > MAX_GUIDE_CHARACTERS) throw Object.assign(new Error(`风格指南正文不能超过 ${MAX_GUIDE_CHARACTERS} 字`), { statusCode: 413 });
+  if (!runtimeOptions().embedded && [...text].length > MAX_GUIDE_CHARACTERS) throw Object.assign(new Error(`风格指南正文不能超过 ${MAX_GUIDE_CHARACTERS} 字`), { statusCode: 413 });
   return {
     filename: safeFilename,
     name: safeFilename.slice(0, -extension.length) || "导入风格指南",

@@ -4,6 +4,7 @@ import JSZip from "jszip";
 import { csvValues, parseCsvDocument, replaceCsvCells } from "./csv-document.mjs";
 import { applyColumnMapping, buildSpreadsheetSnapshot, describeSpreadsheetAnalysis, inferSpreadsheetStructure, mergeSpreadsheetAnalysis } from "./spreadsheet-structure.mjs";
 import { exportXliffDocument, prepareXliffDocument } from "./xliff-document.mjs";
+import { runtimeOptions } from "./runtime-context.mjs";
 
 const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".docx", ".xlsx", ".csv", ".xliff", ".mqxliff"]);
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
@@ -20,7 +21,7 @@ function decodeBase64(value) {
   if (!compact) fail("文件内容为空");
   const buffer = Buffer.from(compact, "base64");
   if (!buffer.length) fail("文件内容无法读取");
-  if (buffer.length > MAX_FILE_BYTES) fail(`文件超过 ${Math.round(MAX_FILE_BYTES / (1024 * 1024))}MB 限制`, 413);
+  if (!runtimeOptions().embedded && buffer.length > MAX_FILE_BYTES) fail(`文件超过 ${Math.round(MAX_FILE_BYTES / (1024 * 1024))}MB 限制`, 413);
   return buffer;
 }
 
@@ -85,7 +86,7 @@ function createCollector(segmentationMode) {
   const add = (source, locator, context = {}) => {
     const split = segmentLongText(source, segmentationMode);
     const ids = split.map((text) => {
-      if (segments.length >= MAX_SEGMENTS) fail(`分段超过 ${MAX_SEGMENTS} 段，请拆分文件后重试`, 413);
+      if (!runtimeOptions().embedded && segments.length >= MAX_SEGMENTS) fail(`分段超过 ${MAX_SEGMENTS} 段，请拆分文件后重试`, 413);
       const id = `seg-${segments.length + 1}`;
       segments.push({ id, index: segments.length + 1, source: text, locator, context, selected: true });
       return id;
@@ -335,7 +336,7 @@ export async function prepareBatchDocument(input = {}, options = {}) {
     if (!input.buffer) return decodeBase64(input.base64);
     const buffer = Buffer.from(input.buffer);
     if (!buffer.length) fail("文件内容为空");
-    if (buffer.length > MAX_FILE_BYTES) fail("文件超过 20MB 限制", 413);
+    if (!runtimeOptions().embedded && buffer.length > MAX_FILE_BYTES) fail(`文件超过 ${Math.round(MAX_FILE_BYTES / (1024 * 1024))}MB 限制`, 413);
     return buffer;
   };
   let prepared;

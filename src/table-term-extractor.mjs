@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs";
 import { Readable } from "node:stream";
 import { extname } from "node:path";
+import { runtimeOptions } from "./runtime-context.mjs";
 import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES, assertLocale } from "./config.mjs";
 import { classifyContent, inferContentTags, inferDomainFromText } from "./classifier.mjs";
 
@@ -455,7 +456,7 @@ export async function extractTermPairs({ filename, base64, buffer: bytes, locale
     error.statusCode = 400;
     throw error;
   }
-  if (buffer.length > MAX_FILE_BYTES) {
+  if (!runtimeOptions().embedded && buffer.length > MAX_FILE_BYTES) {
     const error = new Error(`表格不能超过 ${Math.round(MAX_FILE_BYTES / (1024 * 1024))}MB`);
     error.statusCode = 413;
     throw error;

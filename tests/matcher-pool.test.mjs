@@ -74,3 +74,20 @@ test("术语匹配 worker 超时后只回退精确匹配，不再同步跑模糊
   assert.ok(server.includes("exactOnly: true"));
   assert.equal(server.includes("回退同步"), false, "不能再回退到阻塞主线程的全量匹配");
 });
+
+test("a timed-out worker cannot cancel jobs already dispatched to its replacement", async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const directory = await mkdtemp(join(tmpdir(), "kami-matcher-restart-"));
+  const path = join(directory, "worker.mjs");
+  await writeFile(path, 'import { parentPort } from "node:worker_threads"; parentPort.on("message", (message) => { if (message.text !== "hang") parentPort.postMessage({ id: message.id, matches: [] }); });');
+  const pool = createMatcherPool({ workerUrl: pathToFileURL(path), timeoutMs: 1000 });
+  try {
+    const [first, second] = await Promise.allSettled([pool.match("hang", assets), pool.match("next", assets)]);
+    assert.equal(first.status, "rejected"); assert.match(first.reason.message, /timeout/);
+    assert.equal(second.status, "fulfilled", second.reason?.message);
+    assert.deepEqual(second.value, []);
+  } finally { await pool.close(); await rm(directory, { recursive: true, force: true }); }
+});

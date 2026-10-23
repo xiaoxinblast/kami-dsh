@@ -7,7 +7,7 @@ export function apply(ctx) {
   ctx.systemPrompt.section({
     name: "kami-translator",
     order: 50,
-    text: "你是日语→简体中文本地化 agent。先用 kami_workspace 查询当前工作区绑定；未绑定时请用户明确选择已有项目或命名新项目，不按目录名猜测。使用 DSH 原生文件读取、编辑、搜索工具查找和检查工作区文件。用户指定的风格指南、术语、TM、参考资料用 kami_file_import 按用途关联，然后用同一工具解析待译文件，查看批次分段后启动批处理。新建批次时读取最新版文件并冻结快照；续跑、QA、导出沿用原快照。新文件内容需创建新批次。任务资源不自动写入正式资产库，工作区 TM 只作为未批准参考。长任务返回 ID 后查询进度；导出写到工作区 outputs/，可指定工作区内 outputPath，同名文件报错。人工批准、正式采纳和学习版本激活由用户在工作台完成。不要把机器草稿当作人工规范。翻译业务通过 Kami 工具执行；失败时如实报告，不探测端口或通过浏览器、shell 绕过。除非用户要求，不委派其他 agent。"
+    text: "你是日语→简体中文本地化 agent。先用 kami_workspace 查询当前工作区绑定；未绑定时请用户明确选择已有项目或命名新项目，不按目录名猜测。使用 DSH 原生文件、搜索和已配置的文档工具查找并查阅工作区原文件；不上传文件，不要求转为纯文本，也不创建转换副本。风格指南、术语、TM、参考资料用 kami_file_import 按用途关联，关联只记录原文件路径与版本，不触发格式转换。用工具实际查阅后，将本任务需要的内容随待译文件提交 resourceContext：[{path,hash,text}]，术语/TM 使用 pairs:[{source,target}]，hash 取自当前资源文件信息；不得编造查阅结果，文件变化后重新读取。缺少查阅结果时，Kami 可直接解析已支持的结构化格式；工具无法读取的文件须明确报告具体问题，不能假装已查看。待译文件由 Kami 建批、分段与原格式导出；先预览原文，再启动批处理。新批次冻结原文、资源版本与本次查阅结果；续跑、QA、导出沿用同一快照。任务资源不自动写入正式资产库，工作区 TM 只作为未批准参考。长任务返回 ID 后查询进度；导出写到工作区 outputs/，可指定工作区内 outputPath，同名文件报错。人工批准、正式采纳和学习版本激活由用户在工作台完成。不要把机器草稿当作人工规范。翻译业务通过 Kami 工具执行；失败时如实报告，不探测端口或通过浏览器、shell 绕过业务入口。除非用户要求，不委派其他 agent。"
   });
   ctx.tools.register(defineTool({
     name: "kami_workspace",
@@ -55,18 +55,19 @@ export function apply(ctx) {
   }));
   ctx.tools.register(defineTool({
     name: "kami_file_import",
-    description: "引用当前工作区文件；待译文件创建带资源快照的翻译批次，其余用途预览并关联到工作区。不上传或移动原件，不自动写入正式术语/TM。",
+    description: "引用当前工作区文件；待译文件创建带资源快照的翻译批次，其余用途核查并关联原文件到工作区。不上传或移动原件，不自动写入正式术语/TM。",
     parameters: {
       path: { type: "string", required: true, description: "当前工作区内的相对文件路径" }, projectId: { type: "string", description: "兼容参数，必须与工作区绑定一致；可省略" },
       purpose: { type: "string", description: "translation（默认）、style-guide、terms、tm、reference" },
-      register: { type: "boolean", description: "非待译文件是否关联，默认 true；false 仅预览" },
+      register: { type: "boolean", description: "非待译文件是否关联，默认 true；false 仅核查原文件信息" },
+      resourceContext: { type: "json", description: "用 DSH 原生工具查阅原文件后提供本任务需要的内容：[{path,hash,text}]；术语/TM 使用 pairs:[{source,target}]。hash 来自该资源的文件信息。无需转换原文件或创建纯文本副本，版本变化会拒绝旧查阅结果。" },
       resources: { type: "json", description: "可选，仅用于本批次的 styleGuides/terms/translationMemories/references 路径数组，覆盖工作区对应配置" }
     },
     output: { schema: { type: "json" }, render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }] },
     async execute(args, exec) {
       const workbench = await ctx.kamiWorkbench.ready;
       const result = await workbench.importFile(args, ctx.kamiWorkbench.contextFor(exec.agent, exec.signal));
-      if (!result.batchId) return { ...result, preview: typeof result.preview === "string" ? result.preview.slice(0, 8000) : result.preview };
+      if (!result.batchId) return result;
       return { batchId: result.batchId, filename: result.filename, format: result.format, segmentCount: result.segments?.length, preview: result.segments?.slice(0, 5), requiresBrief: result.requiresBrief, snapshot: "已冻结原文和任务资源；续跑不重新读取工作区文件" };
     }
   }));
@@ -87,7 +88,7 @@ export function apply(ctx) {
         start: "POST /api/batch/run/<batchId>/start {projectId}",
         pause: "POST /api/batch/run/<batchId>/pause {projectId}",
         assets: "GET /api/library-entries?projectId=…&locale=zh-CN&kind=term&limit=50&offset=0; kind=tm for translation memory",
-        qa: "GET /api/qa/batch/<batchId>?projectId=… 回放批次检查；POST /api/auto-qa {batchId,projectId,locale:'zh-CN',source,translation} 使用批次快照。独立审校省略 batchId，读取当前工作区资源。",
+        qa: "GET /api/qa/batch/<batchId>?projectId=… 回放批次检查；POST /api/auto-qa {batchId,projectId,locale:'zh-CN',source,translation} 使用批次快照。独立审校省略 batchId，读取当前工作区资源；原生工具查阅的资源通过 body.resourceContext 提供。",
         tasks: "GET /api/tasks?projectId=…",
         learning: "GET /api/learning/overview?projectId=…&locale=zh-CN",
         export: "POST /api/batch/export {batchId,projectId,mode:'writeback',outputPath:'outputs/result.docx'}；使用已保存的分段与原件快照"

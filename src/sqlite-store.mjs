@@ -92,13 +92,23 @@ export class SqliteStore {
       if (id) filter.id = { _eq: id };
       const predicate = `collection = ? AND (${where(filter, args)})`;
       const groups = [...params.getAll("groupBy[]"), ...(params.get("groupBy") || "").split(",").filter(Boolean)];
-      const count = [...params.keys()].find((key) => key === "aggregate[count]" || key === "aggregate[countDistinct]");
-      if (count) {
-        const target = params.get(count);
+      const aggregates = [...params].map(([key, target]) => ({ kind: /^aggregate\[(count|countDistinct|max)\]$/.exec(key)?.[1], target })).filter((item) => item.kind);
+      if (aggregates.length) {
         const columns = groups.map((name) => `${field(name)} AS "${name}"`);
-        const aggregate = count.includes("countDistinct") ? `COUNT(DISTINCT ${field(target)})` : `COUNT(${target === "*" ? "*" : field(target)})`;
-        const rows = this.db.prepare(`SELECT ${[...columns, `${aggregate} AS total`].join(",")} FROM records WHERE ${predicate}${groups.length ? ` GROUP BY ${groups.map(field).join(",")}` : ""}`).all(...args);
-        return rows.map(({ total, ...group }) => ({ ...group, [count.includes("countDistinct") ? "countDistinct" : "count"]: target === "*" ? String(total) : { [target]: String(total) } }));
+        aggregates.forEach(({ kind, target }, index) => {
+          const expression = kind === "max" ? `MAX(${field(target)})` : kind === "countDistinct" ? `COUNT(DISTINCT ${field(target)})` : `COUNT(${target === "*" ? "*" : field(target)})`;
+          columns.push(`${expression} AS __aggregate_${index}`);
+        });
+        const rows = this.db.prepare(`SELECT ${columns.join(",")} FROM records WHERE ${predicate}${groups.length ? ` GROUP BY ${groups.map(field).join(",")}` : ""}`).all(...args);
+        return rows.map((row) => {
+          const result = Object.fromEntries(groups.map((name) => [name, row[name]]));
+          aggregates.forEach(({ kind, target }, index) => {
+            const value = kind === "max" ? row[`__aggregate_${index}`] : String(row[`__aggregate_${index}`]);
+            if (target === "*") result[kind] = value;
+            else (result[kind] ??= {})[target] = value;
+          });
+          return result;
+        });
       }
       const orders = (params.get("sort") || "id").split(",").map((name) => `${field(name.replace(/^-/, ""))} ${name.startsWith("-") ? "DESC" : "ASC"}`);
       const limit = id ? 1 : Number(params.get("limit") ?? 100);
@@ -123,11 +133,16 @@ export class SqliteStore {
           return record;
         });
         if (!Array.isArray(body)) result = result[0];
-      } else if (method === "PATCH" && id) {
-        const row = this.db.prepare("SELECT body FROM records WHERE collection=? AND id=?").get(collection, id);
-        if (!row) throw Object.assign(new Error("Record not found"), { statusCode: 404 });
-        result = { ...JSON.parse(row.body), ...body, id, date_updated: new Date().toISOString() };
-        this.db.prepare("UPDATE records SET body=? WHERE collection=? AND id=?").run(JSON.stringify(result), collection, id);
+      } else if (method === "PATCH" && (id || Array.isArray(body))) {
+        result = (id ? [{ ...body, id }] : body).map((patch) => {
+          if (typeof patch?.id !== "string" || !patch.id) throw new Error("Explicit record ID required for update");
+          const row = this.db.prepare("SELECT body FROM records WHERE collection=? AND id=?").get(collection, patch.id);
+          if (!row) throw Object.assign(new Error("Record not found"), { statusCode: 404 });
+          const updated = { ...JSON.parse(row.body), ...patch, date_updated: new Date().toISOString() };
+          this.db.prepare("UPDATE records SET body=? WHERE collection=? AND id=?").run(JSON.stringify(updated), collection, patch.id);
+          return updated;
+        });
+        if (id) result = result[0];
       } else if (method === "DELETE") {
         const ids = id ? [id] : Array.isArray(body) ? body : body?.keys;
         if (!Array.isArray(ids)) throw new Error("Explicit record IDs required for deletion");

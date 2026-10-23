@@ -108,7 +108,7 @@ test("installed DSH Client and Host keep workbench reads and human imports out o
       await writeFile(join(directory, "rules/style.md"), "工作区指南保持完整，不启用项目旧指南版本。");
       const resource = await invoke({ action: "file", path: "rules/style.md", purpose: "style-guide", expectedWorkspace: state.workspace });
       assert.equal(resource.taskScoped, true);
-      assert.match(resource.preview, /工作区指南保持完整/);
+      assert.equal(resource.readMode, "agent");
       assert.equal(resource.base64, undefined);
       const after = await invoke({ path: `/api/style-profiles?projectId=${project.id}&locale=zh-CN` });
       assert.equal(after.userProfiles.length, 1, "file reference must not create a project profile");

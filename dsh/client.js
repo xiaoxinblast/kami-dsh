@@ -17,6 +17,10 @@ window.__ModuleLoader__.load({
       const id = String(file.batchId || file.id || "");
       return [file.filename || file.title || id, status, id && `#${id.slice(0, 8)}`].filter(Boolean).join(" · ");
     }
+    function skillLabel(skill, projectName, projectId) {
+      return skill.name?.startsWith(`${skill.locale} · `) && skill.name.endsWith(projectId)
+        ? `${projectName} · v${skill.version || 1}` : skill.name || `v${skill.version || 1}`;
+    }
     function editingLocked(run) {
       return !run || ["running", "queued"].includes(run.runState) || run.workflow?.writeBusy === true || run.workflow?.qaRetryBusy === true
         || ["aiQa", "qualityReport", "termSurvey"].some((stage) => ["in_progress", "waiting"].includes(run.workflow?.[stage]?.status));
@@ -48,13 +52,39 @@ window.__ModuleLoader__.load({
         !Number.isFinite(segment.qaScore) || ["", "not_run", "deterministic_only"].includes(segment.aiQaStatus || "")))) return null;
       return Number.isFinite(report.scores?.overall) ? report.scores.overall : null;
     }
+    function reviewPage(segments, { filter = "all", query = "", offset = 0, selectedId = "" } = {}) {
+      const search = query.trim().toLocaleLowerCase();
+      const rows = segments.map((segment, index) => ({ segment, number: index + 1 })).filter(({ segment, number }) => segment.draft && segment.id === selectedId ||
+        (filter === "all" || (filter === "issues" ? issuesOf(segment).length : !segment.translation?.trim()))
+        && (!search || `${number}\n${segment.id}\n${segment.source}\n${segment.translation || ""}`.toLocaleLowerCase().includes(search)));
+      const start = Math.max(0, Math.min(Math.floor(offset / 20) * 20, Math.max(0, Math.floor((rows.length - 1) / 20) * 20)));
+      const items = rows.slice(start, start + 20);
+      return { items, total: rows.length, offset: start, selected: items.find(({ segment }) => segment.id === selectedId) || items[0] };
+    }
+    function resourcePage(paths, { folder = "", query = "", offset = 0 } = {}) {
+      const search = query.trim().toLocaleLowerCase(), entries = new Map();
+      for (const path of paths) {
+        if (!path.startsWith(folder) || (search && !path.toLocaleLowerCase().includes(search))) continue;
+        const rest = path.slice(folder.length), slash = rest.indexOf("/");
+        const directory = !search && slash >= 0, key = directory ? folder + rest.slice(0, slash + 1) : path;
+        if (directory && entries.has(key)) entries.get(key).count++;
+        else entries.set(key, { path: key, name: directory ? rest.slice(0, slash) : search ? path : rest, folder: directory, count: 1 });
+      }
+      const rows = [...entries.values()].sort((a, b) => Number(b.folder) - Number(a.folder) || a.name.localeCompare(b.name));
+      const start = Math.max(0, Math.min(offset, Math.max(0, Math.floor((rows.length - 1) / 20) * 20)));
+      return { items: rows.slice(start, start + 20), total: rows.length, offset: start };
+    }
+    function promotionReady(evaluation, gate, candidateId) {
+      return Boolean(candidateId && evaluation?.challengerSkillId === candidateId && evaluation.decision === "promote" && evaluation.report?.promotable === true
+        && gate?.latestRun?.skillId === candidateId && gate.latestRun.decision === "pass" && gate.assets?.coverage?.valid === true);
+    }
     function newView(workspace = "", projectId = "") {
       return { workspace, projectId, files: [], tasks: [], knownFiles: false, newBatches: [], selectedId: "", manual: false, run: null, drafts: {}, exports: {}, approvals: {},
         pendingSelection: null, operations: {}, sections: {}, loadSerial: 0 };
     }
     class WorkbenchModel {
-      constructor({ sessionId, call, visible = true }) {
-        this.sessionId = sessionId; this.call = call; this.visible = visible; this.connected = false;
+      constructor({ sessionId, call, prompt, visible = true }) {
+        this.sessionId = sessionId; this.call = call; this.prompt = prompt; this.visible = visible; this.connected = false;
         this.workspace = null; this.projects = []; this.scopes = new Map(); this.view = newView();
         this.epoch = 0; this.refreshSerial = 0; this.listeners = new Set(); this.connection = { pending: false, error: "" };
       }
@@ -208,6 +238,13 @@ window.__ModuleLoader__.load({
         await this.loadRun(token, id);
       }
       save() { return this.perform("save", async (token) => { await this.saveDrafts(token); return "译文已保存；人工采纳与导出需分别执行。"; }); }
+      ask(text, key = "agent-read") {
+        return this.perform(key, async (token) => {
+          if (!this.prompt) throw new Error("当前会话的 Agent 入口不可用");
+          await this.prompt(this.sessionId, text, token.view.workspace);
+          return "已交给当前会话的 Agent";
+        });
+      }
       loadSection(name, operation) {
         return this.perform(`section:${name}`, async (token) => {
           const current = token.view.operations[`section:${name}`];
@@ -216,7 +253,7 @@ window.__ModuleLoader__.load({
         }, true);
       }
     }
-    return { WorkbenchModel, resourceFields, chooseBatch, batchLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore };
+    return { WorkbenchModel, resourceFields, chooseBatch, batchLabel, skillLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore, reviewPage, resourcePage, promotionReady };
   }
 });
 
@@ -245,7 +282,7 @@ window.__ModuleLoader__.load({
       "文件": "File", "关闭": "Close", "将保存当前译文为人工批准的 TM，并写入学习证据。": "Save this translation as human-approved TM and learning evidence.", "处理": "Process", "总分": "Score"
     };
     const zh = Object.fromEntries(Object.keys(words).map((key) => [key, key]));
-    const { WorkbenchModel, resourceFields, batchLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore } = require("kami-dsh/client.workbench-state.js");
+    const { WorkbenchModel, resourceFields, batchLabel, skillLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore, reviewPage, resourcePage, promotionReady } = require("kami-dsh/client.workbench-state.js");
     Object.assign(words, {
       "任务": "Tasks", "资源": "Resources", "当前工作区": "Workspace", "更换项目": "Change project", "已连接": "Connected", "连接中": "Connecting", "连接失败": "Connection failed",
       "尚未绑定项目": "No project bound", "选择已有项目": "Select an existing project", "绑定项目": "Bind project", "新建并绑定": "Create and bind", "项目绑定": "Project binding",
@@ -269,6 +306,7 @@ window.__ModuleLoader__.load({
       "请明确选择已有 Kami 项目，或创建一个新项目。": "Select an existing Kami project or create a new one.", "未保存译文不会用于检查或导出。": "Save your drafts before QA or export.", "暂无待处理问题": "No pending issues", "资源已冻结": "Resources frozen", "返回任务": "Back to task",
       "发现新批次": "New batches found", "查看新批次": "View new batch", "复核译文": "Review translations", "重试未完成 QA": "Retry incomplete QA", "暂无已记录问题": "No recorded issues", "检查未完成，不表示通过": "Checks are incomplete. This is not a pass."
     });
+    Object.assign(words, {"当前项目": "Current project", "选择候选": "Select candidate", "评测结果已保存": "Evaluation result saved", "交给 Agent 审校": "Ask agent to review", "返回译段列表": "Back to segments", "页": "Page", "跳转页码": "Go to page", "搜索原文、译文或段号": "Search source, translation or number", "搜索译段": "Search segments", "译段筛选": "Segment filter", "上个问题": "Previous issue", "下个问题": "Next issue", "译段列表": "Segments", "未保存": "Unsaved", "当前任务分区": "Task sections", "任务概览": "Overview", "工作区资源": "Workspace resources", "关联原文件，Agent 按任务需要查阅；新批次使用最新版本。": "Link original files. The agent reads them as needed; new batches use their latest versions.", "关联工作区文件": "Link a workspace file", "关联文件": "Link file", "个文件": "files", "搜索文件名或路径": "Search file names or paths", "搜索资源文件": "Search resource files", "全部文件": "All files", "上一级": "Parent folder", "让 Agent 查看原文件": "Ask agent to read original", "文件版本": "File version", "项目资产库": "Project libraries", "术语按库管理；TM 按库、来源文件和条目逐层浏览。": "Browse terms by library and TM by library, source file and entry.", "术语库": "Term bases", "记忆库 TM": "Translation memory", "个库": "libraries", "条": "entries", "全部库（合并视图）": "All libraries (merged)", "打开": "Open", "启用": "Enable", "主 TM": "Master TM", "工作 TM": "Working TM", "参考 TM": "Reference TM", "优先级": "Priority", "新增库": "New library", "库名称": "Library name", "库用途": "Library role", "创建库": "Create library", "全部库": "All libraries", "未标注来源": "Unspecified source", "搜索来源文件": "Search source files", "查看条目": "View entries", "条人工终稿": "human final translations", "人工确认": "Human approved", "机器译文": "Machine translation", "已批准": "Approved", "草稿": "Draft", "此库暂无来源文件": "No source files in this library", "翻译进度": "Translation progress", "启用的术语库参与翻译检索。": "Enabled term bases participate in translation retrieval.", "主 TM 保存人工确认译文，工作 TM 保存机器译文，参考 TM 提供检索参考。": "Master TM stores human-approved translations, working TM stores machine translations, and reference TM supports retrieval.", "学习中心": "Learning center", "按当前项目积累人工终稿；候选通过评测和门禁后，由你启用。": "Learn from human final translations in this project. Activate a candidate after evaluation and gate checks.", "学习流程": "Learning workflow", "生效版本": "Active version", "候选": "Candidate", "门禁": "Gate", "暂无记录": "No record", "尚未评测": "Not evaluated", "可以启用": "Ready to activate", "等待检查": "Waiting for checks", "当前生效版本": "Active version", "策略内容": "Strategy", "使用当前版本的默认策略": "Uses the version's default strategy", "查看候选": "View candidates", "候选版本": "Candidate versions", "选择并评测": "Select for evaluation", "变更内容": "Changes", "暂无候选": "No candidates", "从人工确认的终稿生成候选，不会自动替换生效版本。": "Generate a candidate from human-approved final translations. It does not replace the active version automatically.", "受测候选": "Candidate under test", "先生成候选": "Generate a candidate first", "生效版本与候选评测": "Compare active version and candidate", "使用未参与候选学习的人工终稿做配对评测。": "Evaluate paired outputs on human final translations excluded from candidate training.", "开始评测": "Start evaluation", "个配对样本": "paired samples", "指标": "Metric", "QA 分数": "QA score", "硬错误": "Hard errors", "术语准确率": "Term accuracy", "查看门禁": "View gate", "固定 Gold Set 与失败回归": "Fixed Gold Set and regression cases", "启用 Gold 样本": "Active Gold samples", "启用回归案例": "Active regression cases", "运行门禁": "Run gate", "管理固定质量资产": "Manage fixed quality assets", "从人工终稿预览 Gold Set": "Preview Gold Set from human finals", "个样本": "samples", "确认建立并启用": "Create and enable", "按最新证据重建回归集": "Rebuild regression suite", "启用候选": "Activate candidate", "当前候选评测和门禁已通过，可由你确认启用。": "This candidate has passed evaluation and current gate checks. You can activate it.", "需要当前候选的配对评测通过，且门禁结论覆盖最新质量资产。": "The candidate must pass paired evaluation and gate checks covering the current quality assets.", "确认启用候选": "Confirm activation", "确认启用": "Confirm activation", "规范内容": "Style instructions", "来源证据与变更原因": "Evidence and reasons for changes", "搜索原文、译文或来源": "Search source, translation or origin", "搜索学习证据": "Search learning evidence", "评测通过": "Evaluation passed", "需要复核": "Needs review", "未通过": "Failed", "已通过": "Passed", "已阻断": "Blocked", "证据不足": "Insufficient evidence", "交给 Agent 建批": "Ask agent to prepare batch", "直接解析建批": "Parse batch directly", "已交给当前会话的 Agent": "Sent to this session's agent", "已创建资源库": "Library created", "后台任务已提交，可在任务记录中查看进度。": "Background task submitted. Check task history for progress."});
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
       .kami{height:100%;min-width:0;overflow:auto;container-type:inline-size;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;box-sizing:border-box;scrollbar-gutter:stable}
@@ -278,6 +316,11 @@ window.__ModuleLoader__.load({
       .kami option{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2)}
       .kami .review-anchor,.kami .task-side{scroll-margin-top:160px}
       .kami .review-toolbar{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.kami .review-toolbar select{flex:1}.kami .issue-strip{display:flex;gap:6px;overflow:auto;padding:8px 0 4px;max-height:108px;flex-wrap:wrap}.kami .issue-strip button{font-size:11px;justify-content:flex-start;max-width:100%;text-align:left}.kami .segment{padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2);scroll-margin-top:145px;outline-offset:3px}.kami .segment-heading{display:flex;gap:8px;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:11px;color:var(--dsw-alias-label-tertiary)}.kami .pairs{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}.kami .pairs>*{min-width:0}.kami .source-text{white-space:pre-wrap;line-height:1.75;font-size:14px;color:var(--dsw-alias-label-primary);padding:2px 0;margin:0}.kami .segment .source-label{display:block;font-size:11px;color:var(--dsw-alias-label-tertiary);margin-bottom:6px}.kami .issues{margin:10px 0;padding:0;list-style:none;display:grid;gap:5px}.kami .issues li{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);border-left:2px solid var(--dsw-alias-border-l2);padding-left:9px}.kami .segment-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:9px;flex-wrap:wrap}.kami .segment-footer details{flex:1}.kami .segment-footer summary{font-size:11px}.kami .pagination{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:14px}.kami .qa-report .score{font-size:24px;font-weight:600;line-height:1.3;color:var(--dsw-alias-label-primary)}.kami .task-record{padding:11px 0;border-top:1px solid var(--dsw-alias-border-l2);min-width:0}.kami .task-record strong{display:block;font-size:12px;font-weight:500;overflow-wrap:anywhere;margin:5px 0}.kami .task-record p{font-size:12px}.kami .type-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}.kami .type-tabs button{font-size:12px}.kami .type-tabs button[aria-pressed=true]{background:var(--dsw-alias-bg-layer-3);font-weight:600}.kami .resource-row{padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .resource-row strong{font-size:12px;overflow-wrap:anywhere;font-weight:500}.kami .resource-row .button-row{margin-top:7px}.kami .preview{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:14px;background:var(--dsw-alias-bg-layer-2)}.kami .preview-text{white-space:pre-wrap;font-size:13px;line-height:1.75;color:var(--dsw-alias-label-primary);max-height:420px;overflow:auto;padding:8px 0}.kami .asset-row{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;padding:13px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .asset-row p{white-space:pre-wrap;color:var(--dsw-alias-label-primary);margin:0;font-size:13px}.kami .asset-row .badge{justify-self:start}.kami .settings-fields{display:grid;gap:14px;padding:12px 0}.kami .settings-fields label:has(input[type=checkbox]){display:flex;flex-wrap:wrap;align-items:center;gap:8px}.kami .settings-fields label:has(input[type=checkbox]) p{flex-basis:100%}.kami .binding{display:grid;gap:12px;margin-bottom:18px}
+      .kami .pagination{flex-wrap:wrap;font-size:11px}.kami .page-jump{display:flex;align-items:center;gap:5px;font-size:11px}.kami .page-jump input{width:50px;min-height:28px;padding:4px}.kami .review-toolbar input{flex:1;min-width:120px}.kami .review-layout{display:grid;gap:16px;align-items:start;min-width:0}.kami .review-list{max-height:360px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:9px}.kami .segment-row{display:grid;grid-template-columns:32px minmax(0,1fr) auto;gap:9px;width:100%;border:0;border-bottom:1px solid var(--dsw-alias-border-l2);border-radius:0;text-align:left;padding:9px 10px;background:transparent;min-height:62px}.kami .segment-row:last-child{border-bottom:0}.kami .segment-row[aria-pressed=true]{background:var(--dsw-alias-bg-layer-3);box-shadow:inset 3px 0 var(--dsw-alias-brand-primary)}.kami .segment-number{font-size:10px;color:var(--dsw-alias-label-tertiary);align-self:start;padding-top:3px}.kami .segment-excerpts{min-width:0;display:grid;gap:4px;font-size:12px;line-height:1.5}.kami .segment-excerpts>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}.kami .segment-row .badge{font-size:10px;align-self:start}.kami .segment-editor{display:none;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:14px;background:var(--dsw-alias-bg-layer-2);min-width:0}.kami .segment-editor .pairs{grid-template-columns:minmax(0,1fr)}.kami .segment-editor .source-text{max-height:180px;overflow:auto}.kami .segment-editor textarea{min-height:130px}.kami .type-tabs{padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-2);margin:4px 0}.kami .type-tabs button{background:transparent;border:0}.kami .breadcrumbs{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;overflow-wrap:anywhere}.kami .file-list,.kami .library-list{min-width:0}.kami .file-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;border-bottom:1px solid var(--dsw-alias-border-l2);padding:7px 0}.kami .file-row>.feedback{grid-column:1/-1}.kami .file-title{display:flex;gap:8px;justify-content:flex-start;text-align:left;min-width:0;font-size:12px;border:0}.kami .file-title>span:not(.badge){overflow-wrap:anywhere;flex:1}.kami .library-row{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:13px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .library-row>div:not(.feedback){flex:1;min-width:0}.kami .library-row strong{font-size:12px;overflow-wrap:anywhere}.kami .library-row p{font-size:11px;margin:5px 0}.kami .library-toggle{display:flex;align-items:center;gap:7px}.kami .library-row>.feedback{flex-basis:100%}.kami .learning-steps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}.kami .learning-steps>button{display:grid;gap:6px;align-content:start;min-width:0;padding:10px 5px;text-align:left;font-size:11px;background:var(--dsw-alias-bg-layer-2)}.kami .learning-steps>button[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-3)}.kami .learning-steps strong{font-size:11px;font-weight:600;overflow-wrap:anywhere}.kami .step-hint{font-size:10px;color:var(--dsw-alias-label-tertiary);line-height:1.45}.kami .candidate-picker select{width:100%}.kami .candidate-row{padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}.kami .candidate-row[data-selected=true]{border-color:var(--dsw-alias-brand-primary)}.kami .candidate-row strong{font-size:12px}.kami .gate-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.kami .gate-metrics>div{display:grid;gap:7px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}.kami .gate-metrics strong{font-size:23px;font-weight:600}.kami .gate-metrics span{font-size:11px;color:var(--dsw-alias-label-secondary)}.kami .metric-table{width:100%;border-collapse:collapse;font-size:12px}.kami .metric-table th,.kami .metric-table td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .metric-table th{font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:500}
+      .kami .review-layout[data-editing=true] .segment-editor{display:block}.kami .review-layout[data-editing=true] .review-index{display:none}.kami .review-back{margin-bottom:12px}
+      .kami .primary{background:#174d40;border-color:#174d40;color:#f5efdf}.kami .primary:not(:disabled):hover{background:#23654f}.kami .type-tabs button[aria-pressed=true]{box-shadow:inset 0 -2px #82ad98}.kami .learning-steps>button[aria-pressed=true]{border-color:#82ad98;box-shadow:inset 0 2px #82ad98}.kami .segment-row[aria-pressed=true]{box-shadow:inset 3px 0 #82ad98}
+      .kami .learning-view .stack>button,.kami .preview>button{justify-self:start}
+      @container(min-width:860px){.kami .segment-editor{display:block}.kami .review-layout[data-editing=true] .review-index{display:block}.kami .review-back{display:none}.kami .review-layout{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}.kami .review-list{max-height:520px}.kami .segment-editor{position:sticky;top:160px}}
       @container(min-width:620px){.kami .pairs{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px}.kami .asset-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:18px}.kami .task-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:22px;align-items:start}.kami .task-grid>.task-main{min-width:0}.kami .task-grid>.task-side{min-width:0}.kami .workspace-bar{padding-top:12px}.kami .body{padding:22px 24px 32px}.kami .masthead{padding-left:24px;padding-right:24px}.kami .quick-submit{justify-content:flex-start}.kami .review-toolbar select{flex:none;min-width:140px}}
       @container(min-width:900px){.kami .task-grid{grid-template-columns:minmax(0,1fr) 260px}}
       @container(max-width:360px){.kami .body{padding:14px 12px 22px}.kami .masthead{padding:14px 12px 0}.kami .connection-label{display:none}.kami h1{font-size:15px}.kami .project-chip{max-width:35%}.kami .card{padding:12px}.kami .stages{gap:4px}.kami .quick-submit{align-items:stretch;flex-direction:column}}
@@ -322,6 +365,13 @@ window.__ModuleLoader__.load({
       useEffect(() => { model.loadSection(name, load); }, [model, model.scopeKey, model.visible, ...dependencies]);
       return model.view.sections[name];
     }
+    function Pager({ offset, total, size = 20, onChange, t }) {
+      if (!total) return null;
+      return h("div", { className: "pagination" }, h(Button, { small: true, disabled: offset === 0, onClick: () => onChange(Math.max(0, offset - size)) }, t("上一页")),
+        h("span", { className: "muted" }, `${offset + 1}–${Math.min(offset + size, total)} / ${total}`),
+        h("label", { className: "page-jump" }, t("页"), h("input", { type: "number", min: 1, max: Math.ceil(total / size), value: Math.floor(offset / size) + 1, "aria-label": t("跳转页码"), onChange: (event) => onChange((Math.max(1, Math.min(Math.ceil(total / size), Number(event.target.value) || 1)) - 1) * size) })),
+        h(Button, { small: true, disabled: offset + size >= total, onClick: () => onChange(offset + size) }, t("下一页")));
+    }
     function KamiPanelPresence({ useKamiMounted, useSessions, openWorkbench, closeWorkbench }) {
       const sessionId = useKamiMounted((value) => value);
       const preset = useSessions((state) => state.byId[sessionId]?.projectionValues?.agentPreset);
@@ -361,19 +411,22 @@ window.__ModuleLoader__.load({
     function QuickBatch({ model, t }) {
       const [path, setPath] = useState(""), [excluded, setExcluded] = useState([]), [previewId, setPreviewId] = useState("");
       const config = model.workspace?.config || {};
+      const selectedResources = () => Object.fromEntries(resourceFields.map(({ field }) => [field, (config[field] || []).filter((item) => !excluded.includes(`${field}:${item}`))]));
+      const withResources = Object.values(selectedResources()).some((items) => items.length);
+      const agentCreate = () => model.ask(`请为工作区原文件 ${JSON.stringify(path.trim())} 创建 Kami 翻译批次，供我预览，先不要启动翻译。本批次资源为 ${JSON.stringify(selectedResources())}。请先用 DSH 工具直接查阅原格式资源，以当前哈希和实际查阅结果提供 resourceContext；不创建纯文本转换副本，不正式入库。`, "agent-create");
       const create = () => model.perform("create", async (token) => {
-        const resources = Object.fromEntries(resourceFields.map(({ field }) => [field, (config[field] || []).filter((item) => !excluded.includes(`${field}:${item}`))]));
+        const resources = selectedResources();
         const value = await model.request({ action: "file", purpose: "translation", path: path.trim(), resources, projectId: token.view.projectId }, token);
         setPreviewId(value.batchId); await model.select(value.batchId); await model.refresh();
       });
       return h("details", { className: "card", open: !model.view.run || undefined }, h("summary", null, t("快捷建批")),
-        h("form", { className: "quick-form", onSubmit: (event) => { event.preventDefault(); create(); } },
+        h("form", { className: "quick-form", onSubmit: (event) => { event.preventDefault(); withResources ? agentCreate() : create(); } },
           h("p", { className: "muted" }, t("在主会话中描述任务，也可以在此指定工作区文件。")),
           h("label", null, t("待译文件路径"), h("input", { value: path, placeholder: "source/dialogue.docx", onChange: (event) => { setPath(event.target.value); setPreviewId(""); } })),
           h("details", null, h("summary", null, t("本批次资源")), h("p", { className: "muted" }, t("仅覆盖本批次选择，不修改工作区默认资源。")), h("div", { className: "resource-checks" }, ...resourceFields.map(({ field, label }) => h("fieldset", { key: field }, h("legend", null, t(label)),
             ...(config[field] || []).map((item) => { const key = `${field}:${item}`; return h("label", { key }, h("input", { type: "checkbox", checked: !excluded.includes(key), onChange: (event) => setExcluded(event.target.checked ? excluded.filter((value) => value !== key) : [...excluded, key]) }), item); }), !(config[field] || []).length && h("span", { className: "muted" }, t("尚未关联文件")))))),
-          h("div", { className: "quick-submit" }, h(Button, { primary: true, disabled: !path.trim(), busy: model.view.operations.create?.pending, onClick: create }, h(Glyph, { name: "plus" }), t("解析并创建批次")), h("p", { className: "muted" }, t("创建后先预览原文，再开始翻译。"))),
-          h(Feedback, { model, name: "create", retry: create, t }), previewId && h("p", { className: "muted", role: "status" }, t("资源已冻结"), " · ", previewId)));
+          h("div", { className: "quick-submit" }, h(Button, { primary: true, disabled: !path.trim(), busy: model.view.operations[withResources ? "agent-create" : "create"]?.pending, onClick: withResources ? agentCreate : create }, h(Glyph, { name: "plus" }), t(withResources ? "交给 Agent 建批" : "解析并创建批次")), withResources && h(Button, { small: true, quiet: true, disabled: !path.trim(), busy: model.view.operations.create?.pending, onClick: create }, t("直接解析建批")), h("p", { className: "muted" }, t("创建后先预览原文，再开始翻译。"))),
+          h(Feedback, { model, name: "create", retry: create, t }), h(Feedback, { model, name: "agent-create", t }), previewId && h("p", { className: "muted", role: "status" }, t("资源已冻结"), " · ", previewId)));
     }
     function Snapshot({ run, t }) {
       const snapshot = run.runnerOptions?.workspaceSnapshot;
@@ -396,7 +449,7 @@ window.__ModuleLoader__.load({
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", scopeArgs(model, token), token);
         await model.loadRun(token, id);
       });
-      return h("section", { className: "card" }, h("div", { className: "task-status" }, h("span", { className: "muted" }, t("当前任务")), h("span", { className: "badge" }, stateText(run.runState || "ready", t))),
+      return h("section", { className: "card" }, h("div", { className: "task-status" }, h("span", { className: "muted" }, t("当前任务")), h("span", { className: "badge" }, stateText(run.workflow?.overall?.status || run.runState || "ready", t))),
         h("h2", { className: "task-title" }, run.filename || id), h("progress", { max: Math.max(1, selected.length), value: done, "aria-label": t("翻译进度") }),
         h("div", { className: "metrics" }, h("span", null, h("strong", null, `${done}/${selected.length}`), t("段")), h("span", null, h("strong", null, problems), t("问题")), failed > 0 && h("span", { className: "error" }, h("strong", null, failed), t("失败"))),
         h("div", { className: "stages" }, ...[["translation", "翻译"], ["aiQa", "质量检查"], ["qualityReport", "一致性"], ["termSurvey", "术语普查"]].map(([key, label]) => h("div", { className: "stage", key, "data-active": key === "aiQa" ? qa.busy : ["in_progress", "waiting"].includes(run.workflow?.[key]?.status), title: key === "aiQa" ? qaDescription : run.workflow?.[key]?.message || "" }, h("strong", null, t(label)), h("span", null, key === "aiQa" ? t(qa.label) : stateText(run.workflow?.[key]?.status, t))))),
@@ -406,6 +459,7 @@ window.__ModuleLoader__.load({
           : h(Button, { primary: true, onClick: () => command("start"), busy: model.view.operations[`start:${id}`]?.pending, disabled: locked || pending || model.view.operations[`qa:${id}`]?.pending || run.contextBriefPending || (run.requiresBrief && run.contextBrief?.status !== "ready") }, h(Glyph, { name: "arrow" }), t(locked ? "等待当前阶段结束" : done ? "继续翻译" : "开始翻译")),
           h(Button, { onClick: () => model.save(), disabled: !pending || locked, busy: model.view.operations.save?.pending }, t("保存修改")),
           done > 0 && h(Button, { onClick: exportFile, disabled: locked || pending, quiet: true }, t("工作区导出"))),
+        run.workflow?.overall?.status === "in_progress" && h("p", { className: "muted" }, run.workflow.overall.message),
         run.contextBriefPending && h("p", { className: "muted" }, t("批次需要先完成语境分析，请在主会话中推进。")),
         h(Feedback, { model, name: `start:${id}`, retry: () => command("start"), t }), h(Feedback, { model, name: `pause:${id}`, retry: () => command("pause"), t }), h(Feedback, { model, name: `retry-qa:${id}`, retry: () => command("retry-qa"), t }), h(Feedback, { model, name: "save", retry: () => model.save(), t }), h(Snapshot, { run, t }));
     }
@@ -419,38 +473,45 @@ window.__ModuleLoader__.load({
         h("ul", { className: "issues" }, ...issues.map((issue, index) => h("li", { key: index }, issue.message || issue.description || ""))), !issues.length && h("p", { className: "muted" }, t("暂无已记录问题")));
     }
     function ReviewPanel({ model, run, t }) {
-      const [filter, setFilter] = useState("all"), [page, setPage] = useState(0), [focus, setFocus] = useState("");
-      const nodes = useRef(new Map()), id = run.batchId, qaKey = `qa:${id}`;
+      const [filter, setFilter] = useState("all"), [offset, setOffset] = useState(0), [selected, setSelected] = useState(""), [query, setQuery] = useState(""), [editing, setEditing] = useState(false);
+      const id = run.batchId, qaKey = `qa:${id}`;
       const locked = editingLocked(run) || model.view.operations[qaKey]?.pending || model.view.operations.save?.pending;
-      const list = run.segments.filter((segment) => filter === "all" || (filter === "issues" ? issuesOf(segment).length : !segment.translation?.trim()));
-      const pageStart = Math.min(page, Math.max(0, Math.floor((list.length - 1) / 20) * 20));
-      const issueSegments = run.segments.filter((segment) => issuesOf(segment).length);
-      useEffect(() => { const node = nodes.current.get(focus); if (node) { node.scrollIntoView({ block: "nearest" }); node.focus({ preventScroll: true }); } }, [focus, pageStart]);
+      const page = reviewPage(run.segments, { filter, query, offset, selectedId: selected }), current = page.selected, segment = current?.segment;
+      const issueSegments = run.segments.filter((item) => issuesOf(item).length);
+      const locate = (direction) => {
+        const index = issueSegments.findIndex((item) => item.id === segment?.id);
+        const origin = index < 0 ? direction > 0 ? -1 : 0 : index;
+        const next = issueSegments[(origin + direction + issueSegments.length) % issueSegments.length];
+        if (!next) return;
+        setFilter("all"); setQuery(""); setOffset(Math.floor(run.segments.indexOf(next) / 20) * 20); setSelected(next.id); setEditing(true);
+      };
       const inspect = () => model.perform(qaKey, async (token) => {
-        const value = await model.invoke("/api/auto-qa", "POST", scopeArgs(model, token, { batchId: id, source: run.segments.map((segment) => segment.source).join("\n"), translation: run.segments.map((segment) => segment.translation || "").join("\n") }), token);
+        const value = await model.invoke("/api/auto-qa", "POST", scopeArgs(model, token, { batchId: id, source: run.segments.map((item) => item.source).join("\n"), translation: run.segments.map((item) => item.translation || "").join("\n") }), token);
         token.view.sections[qaKey] = value; await model.saveQaResults(value, token, id);
       });
       const savedReport = () => model.loadSection(qaKey, (token) => model.invoke(model.path(`/api/qa/batch/${encodeURIComponent(id)}`, {}, token), "GET", undefined, token));
-      const approve = (segment) => model.perform(`approve:${id}:${segment.id}`, async (token) => {
-        await model.invoke("/api/feedback/accept", "POST", scopeArgs(model, token, { source: segment.source, translation: segment.translation, batchId: id, trajectoryId: segment.result?.trajectoryId, contentType: run.contentType, sourceFile: run.filename, entryId: segment.id }), token);
-        token.view.approvals[`${id}:${segment.id}`] = segment.translation;
+      const approve = (item) => model.perform(`approve:${id}:${item.id}`, async (token) => {
+        await model.invoke("/api/feedback/accept", "POST", scopeArgs(model, token, { source: item.source, translation: item.translation, batchId: id, trajectoryId: item.result?.trajectoryId, contentType: run.contentType, sourceFile: run.filename, entryId: item.id }), token);
+        token.view.approvals[`${id}:${item.id}`] = item.translation;
         await model.loadRun(token, id); return "已人工采纳";
       });
-      return h("section", null, h("div", { className: "section-heading" }, h("h3", null, t("译文复核")), h("span", { className: "muted" }, `${run.segments.length} ${t("段")}`)),
-        locked && h("p", { className: "muted" }, t("执行中只读；阶段结束后可编辑译文。")),
-        h("div", { className: "review-toolbar" }, h("select", { value: filter, "aria-label": t("译文复核"), onChange: (event) => { setFilter(event.target.value); setPage(0); } }, ...[["all", "全部译段"], ["issues", "仅看问题"], ["pending", "尚未翻译"]].map(([value, label]) => h("option", { key: value, value }, t(label)))),
-          h(Button, { small: true, onClick: inspect, disabled: locked || model.dirty() || !run.segments.some((segment) => segment.translation?.trim()) }, t("检查本批次")), h(Button, { small: true, quiet: true, onClick: savedReport }, t("查看上次报告"))),
-        issueSegments.length > 0 && h("div", { className: "issue-strip", "aria-label": t("定位问题译段") }, ...issueSegments.slice(0, 50).map((segment) => h(Button, { key: segment.id, small: true, onClick: () => { setFilter("all"); setPage(Math.floor(run.segments.indexOf(segment) / 20) * 20); setFocus(segment.id); } }, `#${run.segments.indexOf(segment) + 1} · ${issuesOf(segment).length} ${t("问题")}`))),
+      return h("section", { className: "stack" }, h("div", { className: "section-heading" }, h("h3", null, t("译文复核")), h("span", { className: "muted" }, `${page.total} / ${run.segments.length} ${t("段")}`)),
+        h("div", { className: "review-toolbar" }, h("input", { type: "search", value: query, placeholder: t("搜索原文、译文或段号"), "aria-label": t("搜索译段"), onChange: (event) => { setQuery(event.target.value); setOffset(0); setEditing(false); } }),
+          h("select", { value: filter, "aria-label": t("译段筛选"), onChange: (event) => { setFilter(event.target.value); setOffset(0); setEditing(false); } }, ...[["all", "全部译段"], ["issues", "仅看问题"], ["pending", "尚未翻译"]].map(([value, label]) => h("option", { key: value, value }, t(label))))),
+        h("div", { className: "button-row" }, h(Button, { small: true, onClick: inspect, disabled: locked || model.dirty() || !run.segments.some((item) => item.translation?.trim()) }, t("检查本批次")), h(Button, { small: true, quiet: true, onClick: savedReport }, t("查看上次报告")),
+          issueSegments.length > 0 && h(React.Fragment, null, h(Button, { small: true, quiet: true, onClick: () => locate(-1) }, t("上个问题")), h(Button, { small: true, quiet: true, onClick: () => locate(1) }, t("下个问题")))),
         h(Feedback, { model, name: qaKey, retry: inspect, t }), h(Feedback, { model, name: `section:${qaKey}`, retry: savedReport, t }),
-        model.view.sections[qaKey] && h(QaReport, { report: model.view.sections[qaKey], t, label: "上次保存的质量报告" }),
-        ...list.slice(pageStart, pageStart + 20).map((segment) => h("article", { className: "segment", key: segment.id, tabIndex: -1, ref: (node) => node ? nodes.current.set(segment.id, node) : nodes.current.delete(segment.id) },
-          h("div", { className: "segment-heading" }, h("span", null, `#${run.segments.indexOf(segment) + 1}`, " · ", stateText(segment.status, t)), h("span", null, segment.draft ? t("待重新检查") : qaLabel(segment).startsWith("模型 QA · ") ? `${t("模型 QA")} · ${qaLabel(segment).split(" · ")[1]}` : t(qaLabel(segment)))),
-          h("div", { className: "pairs" }, h("div", null, h("span", { className: "source-label" }, t("原文")), h("p", { className: "source-text" }, segment.source)), h("label", null, h("span", { className: "source-label" }, t("译文")), h("textarea", { value: segment.translation || "", readOnly: locked, "aria-label": `${t("译文")} ${run.segments.indexOf(segment) + 1}`, onChange: (event) => model.edit(segment.id, event.target.value) }))),
-          h("ul", { className: "issues" }, ...issuesOf(segment).map((issue, index) => h("li", { key: index }, issue.message || issue.description || ""))),
-          h("div", { className: "segment-footer" }, segment.accepted && !segment.draft ? h("span", { className: "badge" }, t("已人工采纳")) : h("details", null, h("summary", null, t("采纳为正式译法")), h("p", { className: "muted" }, t("将保存当前译文为人工批准的 TM，并写入学习证据。")), segment.draft && h("p", { className: "muted" }, t("保存译文后才能正式采纳。")), h(Button, { small: true, disabled: locked || segment.draft || !segment.translation?.trim(), busy: model.view.operations[`approve:${id}:${segment.id}`]?.pending, onClick: () => approve(segment) }, t("确认采纳")))),
-          h(Feedback, { model, name: `approve:${id}:${segment.id}`, retry: () => approve(segment), t }))),
-        !list.length && h(Empty, { title: "此筛选下没有译段", t }),
-        list.length > 20 && h("div", { className: "pagination" }, h(Button, { small: true, disabled: pageStart === 0, onClick: () => setPage(Math.max(0, pageStart - 20)) }, t("上一页")), h("span", { className: "muted" }, `${pageStart + 1}–${Math.min(pageStart + 20, list.length)} / ${list.length}`), h(Button, { small: true, disabled: pageStart + 20 >= list.length, onClick: () => setPage(pageStart + 20) }, t("下一页"))));
+        model.view.sections[qaKey] && h("details", { className: "rule" }, h("summary", null, t("上次保存的质量报告")), h(QaReport, { report: model.view.sections[qaKey], t })),
+        h("div", { className: "review-layout", "data-editing": editing }, h("div", { className: "review-index" }, h("div", { className: "review-list", "aria-label": t("译段列表") }, ...page.items.map(({ segment: item, number }) => h("button", { type: "button", className: "segment-row", key: item.id, "aria-pressed": segment?.id === item.id, onClick: () => { setSelected(item.id); setEditing(true); } },
+          h("span", { className: "segment-number" }, `#${number}`), h("span", { className: "segment-excerpts" }, h("span", null, item.source), h("span", { className: "muted" }, item.translation || t("尚未翻译"))), h("span", { className: "badge" }, item.draft ? t("未保存") : issuesOf(item).length ? `${issuesOf(item).length} ${t("问题")}` : stateText(item.status, t))))),
+          h(Pager, { offset: page.offset, total: page.total, onChange: setOffset, t })),
+          segment && h("article", { className: "segment segment-editor", key: segment.id }, h(Button, { small: true, quiet: true, className: "review-back", onClick: () => setEditing(false) }, t("返回译段列表")), h("div", { className: "segment-heading" }, h("strong", null, `#${current.number}`), h("span", null, segment.draft ? t("待重新检查") : qaLabel(segment).startsWith("模型 QA · ") ? `${t("模型 QA")} · ${qaLabel(segment).split(" · ")[1]}` : t(qaLabel(segment)))),
+            locked && h("p", { className: "muted" }, t("执行中只读；阶段结束后可编辑译文。")),
+            h("div", { className: "pairs" }, h("div", null, h("span", { className: "source-label" }, t("原文")), h("p", { className: "source-text" }, segment.source)), h("label", null, h("span", { className: "source-label" }, t("译文")), h("textarea", { value: segment.translation || "", readOnly: locked, "aria-label": `${t("译文")} ${current.number}`, onChange: (event) => model.edit(segment.id, event.target.value) }))),
+            h("ul", { className: "issues" }, ...issuesOf(segment).map((issue, index) => h("li", { key: index }, issue.message || issue.description || ""))),
+            h("div", { className: "segment-footer" }, segment.accepted && !segment.draft ? h("span", { className: "badge" }, t("已人工采纳")) : h("details", null, h("summary", null, t("采纳为正式译法")), h("p", { className: "muted" }, t("将保存当前译文为人工批准的 TM，并写入学习证据。")), segment.draft && h("p", { className: "muted" }, t("保存译文后才能正式采纳。")), h(Button, { small: true, disabled: locked || segment.draft || !segment.translation?.trim(), busy: model.view.operations[`approve:${id}:${segment.id}`]?.pending, onClick: () => approve(segment) }, t("确认采纳")))),
+            h("div", { className: "button-row" }, h(Button, { primary: true, small: true, onClick: () => model.save(), disabled: !model.dirty() || locked, busy: model.view.operations.save?.pending }, t("保存修改"))), h(Feedback, { model, name: "save", t }), h(Feedback, { model, name: `approve:${id}:${segment.id}`, retry: () => approve(segment), t }))),
+        !page.total && h(Empty, { title: "此筛选下没有译段", t }));
     }
     function ExportPanel({ model, run, t }) {
       const [path, setPath] = useState(""), id = run.batchId, key = `export:${id}`, receipt = model.view.exports[id];
@@ -478,7 +539,7 @@ window.__ModuleLoader__.load({
     }
     function TaskView({ model, t }) {
       const run = model.displayRun(), view = model.view;
-      const reviewRef = useRef(null), exportRef = useRef(null);
+      const [panel, setPanel] = useState("overview");
       const notice = model.draftNotice();
       return h("div", { className: "stack" }, h("label", null, t("选择翻译批次"), h("select", { className: "task-selector", value: view.selectedId, onChange: (event) => model.select(event.target.value) }, h("option", { value: "", disabled: view.files.length > 0 }, t(view.files.length ? "选择翻译批次" : "暂无翻译批次")), ...view.files.map((file) => h("option", { key: file.batchId, value: file.batchId }, batchLabel(file, stateText(file.runState || file.status, t)))))),
         h(Feedback, { model, name: "task-list", retry: () => model.refresh(), t }), h(Feedback, { model, name: "task-load", retry: () => model.activate(view.selectedId), t }),
@@ -486,18 +547,17 @@ window.__ModuleLoader__.load({
         notice === "switch" && h("section", { className: "notice", role: "alert" }, h("strong", null, t("有未保存的译文草稿")), h("p", null, t("切换批次前，保存或放弃当前草稿。")), h("div", { className: "button-row" }, h(Button, { primary: true, busy: view.operations.save?.pending, disabled: editingLocked(run), onClick: () => model.confirmSelection(true) }, t("保存并切换")), h(Button, { onClick: () => model.confirmSelection(false) }, t("放弃并切换")), h(Button, { quiet: true, onClick: () => model.cancelSelection() }, t("取消切换")))),
         notice === "draft" && h("div", { className: "notice", role: "status" }, t("有未保存的译文草稿"), h("p", { className: "muted" }, t("草稿保存在当前会话中，退出应用前请保存。"))),
         !run && !view.operations["task-load"]?.pending && h(Empty, { title: "从工作区开始", description: "指定原文、关联资源，然后开始第一批翻译。", artwork: true, t }),
-        h(QuickBatch, { model, t }),
-        run && h("div", { className: "task-grid", key: run.batchId }, h("div", { className: "task-main stack" }, h(TaskSummary, { model, run, t,
-          review: () => { reviewRef.current?.scrollIntoView({ block: "start" }); reviewRef.current?.focus({ preventScroll: true }); },
-          exportFile: () => { exportRef.current?.scrollIntoView({ block: "start" }); exportRef.current?.focus({ preventScroll: true }); } }), h("div", { className: "review-anchor", ref: reviewRef, tabIndex: -1 }, h(ReviewPanel, { model, run, t, key: run.batchId }))),
-          h("aside", { className: "task-side stack", ref: exportRef, tabIndex: -1 }, h(ExportPanel, { model, run, t, key: run.batchId }))), h(TaskHistory, { model, t }));
+        (!run || panel === "overview") && h(QuickBatch, { model, t }),
+        run && h("section", { className: "stack", key: run.batchId }, h("div", { className: "type-tabs", "aria-label": t("当前任务分区") }, ...[["overview", "任务概览"], ["review", "译文复核"], ["export", "工作区导出"]].map(([value, label]) => h("button", { type: "button", key: value, "aria-pressed": panel === value, onClick: () => setPanel(value) }, t(label)))),
+          panel === "overview" ? h(TaskSummary, { model, run, t, review: () => setPanel("review"), exportFile: () => setPanel("export") }) : panel === "review" ? h(ReviewPanel, { model, run, t, key: run.batchId }) : h(ExportPanel, { model, run, t, key: run.batchId })), h(TaskHistory, { model, t }));
     }
-    function ResourcePreview({ preview, t, close }) {
-      const pairs = ["terms", "tm"].includes(preview.purpose), rows = Array.isArray(preview.preview) ? preview.preview : [];
-      return h("section", { className: "preview" }, h("div", { className: "section-heading" }, h("h3", null, t("工作区最新版预览")), h(Button, { quiet: true, small: true, onClick: close }, t("关闭预览"))),
-        h("code", null, preview.path), h("p", { className: "muted" }, t(resourceFields.find((item) => item.purpose === preview.purpose)?.label || "资源"), " · ", sizeText(preview.size), preview.characters ? ` · ${preview.characters} ${t("字符")}` : ` · ${t("预览条数")} ${rows.length} / ${t("总条数")} ${preview.count || 0}`),
-        typeof preview.preview === "string" ? h("div", { className: "preview-text" }, preview.preview) : rows.map((item, index) => pairs ? h("div", { className: "asset-row", key: index }, h("div", null, h("span", { className: "muted" }, t("原文")), h("p", null, item.source || "")), h("div", null, h("span", { className: "muted" }, t("译文")), h("p", null, item.target || item.translation || ""))) : h("div", { className: "preview-text", key: index }, item.text || item.content || item.title || "")),
-        h("details", null, h("summary", null, "SHA-256"), h("code", null, preview.hash)));
+    function ResourcePreview({ model, preview, t, close }) {
+      const key = `agent-read:${preview.purpose}:${preview.path}`;
+      const inspect = () => model.ask(`请使用 DSH 文件工具查阅工作区原文件 ${JSON.stringify(preview.path)}，用途为${resourceFields.find((item) => item.purpose === preview.purpose)?.label || preview.purpose}。直接查看原格式，不创建纯文本副本，不改动原件。请说明其中与翻译有关的内容；后续创建批次时以此文件的当前哈希 ${preview.hash} 提供 resourceContext。`, key);
+      return h("section", { className: "preview stack" }, h("div", { className: "section-heading" }, h("h3", null, preview.filename || preview.path), h(Button, { quiet: true, small: true, onClick: close }, t("关闭"))),
+        h("code", null, preview.path), h("p", { className: "muted" }, t(resourceFields.find((item) => item.purpose === preview.purpose)?.label || "资源"), " · ", sizeText(preview.size)),
+        h(Button, { onClick: inspect, busy: model.view.operations[key]?.pending }, t("让 Agent 查看原文件")), h(Feedback, { model, name: key, retry: inspect, t }),
+        h("details", null, h("summary", null, t("文件版本")), h("code", null, "SHA-256 ", preview.hash)));
     }
     function LegacyResources({ model, t }) {
       const [open, setOpen] = useState(false);
@@ -511,53 +571,131 @@ window.__ModuleLoader__.load({
         ...(data?.references || []).map((reference) => h("section", { className: "resource-row", key: reference.id }, h("strong", null, reference.filename || reference.name || reference.title), h("p", null, reference.description || ""))), data && !data.guides.length && !data.references.length && h(Empty, { title: "暂无条目", t })));
     }
     function ResourcesView({ model, t }) {
-      const [purpose, setPurpose] = useState("style-guide"), [paths, setPaths] = useState({});
+      const [purpose, setPurpose] = useState("style-guide"), [paths, setPaths] = useState({}), [folder, setFolder] = useState(""), [query, setQuery] = useState(""), [offset, setOffset] = useState(0);
       const resource = resourceFields.find((item) => item.purpose === purpose), key = `resource:${purpose}`, config = model.workspace?.config || {}, preview = model.view.sections.preview;
-      const inspect = (path = paths[purpose]) => model.loadSection("preview", (token) => model.request({ action: "file", path: path?.trim(), purpose, register: false, projectId: token.view.projectId }, token));
+      const listing = resourcePage(config[resource.field] || [], { folder, query, offset });
+      const inspect = (path) => model.loadSection("preview", (token) => model.request({ action: "file", path, purpose, register: false, projectId: token.view.projectId }, token));
       const link = () => model.perform(key, async (token) => { const result = await model.request({ action: "file", path: paths[purpose]?.trim(), purpose, projectId: token.view.projectId }, token); token.view.sections.preview = result; await model.refresh(); return "已关联工作区文件"; });
       const unlink = (path) => model.perform(`unlink:${purpose}:${path}`, async (token) => {
         const latest = await model.request({ action: "workspace" }, token);
         await model.request({ action: "workspace", actionType: "configure", resources: { [resource.field]: (latest.config[resource.field] || []).filter((item) => item !== path) } }, token);
+        if (token.view.sections.preview?.path === path) delete token.view.sections.preview;
         await model.refresh(); return "已解除关联，工作区原件保留";
       });
-      return h("div", { className: "stack" }, h("div", null, h("h2", null, t("下次任务使用的资源")), h("p", null, t("这些路径引用工作区原件；新建批次时读取最新版。")),
-        h("div", { className: "type-tabs" }, ...resourceFields.map((item) => h("button", { key: item.purpose, type: "button", "aria-pressed": purpose === item.purpose, onClick: () => setPurpose(item.purpose) }, t(item.label), " ", (config[item.field] || []).length)))),
-        h("section", { className: "card stack" }, h("label", null, t("工作区相对路径"), h("input", { value: paths[purpose] || "", placeholder: resource.placeholder, onChange: (event) => setPaths({ ...paths, [purpose]: event.target.value }) })),
-          h("div", { className: "button-row" }, h(Button, { disabled: !paths[purpose]?.trim(), busy: model.view.operations["section:preview"]?.pending, onClick: () => inspect() }, t("预览最新版")), h(Button, { primary: true, disabled: !paths[purpose]?.trim(), busy: model.view.operations[key]?.pending, onClick: link }, t("关联到下次任务"))), h(Feedback, { model, name: key, retry: link, t })),
-        h(Feedback, { model, name: "section:preview", retry: () => inspect(), t }), preview && h(ResourcePreview, { preview, t, close: () => { delete model.view.sections.preview; model.emit(); } }),
-        h("section", null, h("h3", null, t("已关联"), " · ", t(resource.label)), ...(config[resource.field] || []).map((path) => h("div", { className: "resource-row", key: path }, h("strong", null, path), h("div", { className: "button-row" }, h(Button, { small: true, quiet: true, onClick: () => inspect(path) }, t("预览最新版")), h(Button, { small: true, quiet: true, onClick: () => unlink(path), busy: model.view.operations[`unlink:${purpose}:${path}`]?.pending }, t("解除关联"))), h(Feedback, { model, name: `unlink:${purpose}:${path}`, retry: () => unlink(path), t }))), !(config[resource.field] || []).length && h(Empty, { title: "尚未关联文件", t })), h(LegacyResources, { model, t }));
+      const changeFolder = (value) => { setFolder(value); setOffset(0); delete model.view.sections.preview; model.emit(); };
+      return h("div", { className: "stack" }, h("div", null, h("h2", null, t("工作区资源")), h("p", null, t("关联原文件，Agent 按任务需要查阅；新批次使用最新版本。")),
+        h("div", { className: "type-tabs" }, ...resourceFields.map((item) => h("button", { key: item.purpose, type: "button", "aria-pressed": purpose === item.purpose, onClick: () => { setPurpose(item.purpose); setFolder(""); setQuery(""); setOffset(0); } }, t(item.label), " ", (config[item.field] || []).length)))),
+        h("details", { className: "card", open: !(config[resource.field] || []).length || undefined }, h("summary", null, t("关联工作区文件")), h("div", { className: "quick-form" }, h("label", null, t("工作区相对路径"), h("input", { value: paths[purpose] || "", placeholder: resource.placeholder, onChange: (event) => setPaths({ ...paths, [purpose]: event.target.value }) })),
+          h(Button, { primary: true, disabled: !paths[purpose]?.trim(), busy: model.view.operations[key]?.pending, onClick: link }, t("关联文件")), h(Feedback, { model, name: key, retry: link, t }))),
+        h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t(resource.label)), h("span", { className: "muted" }, `${(config[resource.field] || []).length} ${t("个文件")}`)),
+          h("input", { type: "search", value: query, placeholder: t("搜索文件名或路径"), "aria-label": t("搜索资源文件"), onChange: (event) => { setQuery(event.target.value); setOffset(0); } }),
+          h("div", { className: "breadcrumbs" }, h(Button, { small: true, quiet: true, onClick: () => changeFolder("") }, t("全部文件")), folder && h(React.Fragment, null, h("span", { className: "muted" }, folder), h(Button, { small: true, quiet: true, onClick: () => changeFolder(folder.replace(/[^/]+\/$/u, "")) }, t("上一级")))),
+          h("div", { className: "file-list" }, ...listing.items.map((entry) => h("div", { className: "file-row", key: entry.path }, h("button", { type: "button", className: "file-title quiet", onClick: () => entry.folder ? changeFolder(entry.path) : inspect(entry.path) }, h(Glyph, { name: entry.folder ? "folder" : "tasks" }), h("span", null, entry.name), entry.folder && h("span", { className: "badge" }, entry.count)),
+            !entry.folder && h(Button, { small: true, quiet: true, onClick: () => unlink(entry.path), busy: model.view.operations[`unlink:${purpose}:${entry.path}`]?.pending }, t("解除关联")), h(Feedback, { model, name: `unlink:${purpose}:${entry.path}`, retry: () => unlink(entry.path), t }))), !listing.total && h(Empty, { title: "尚未关联文件", t })),
+          h(Pager, { offset: listing.offset, total: listing.total, onChange: setOffset, t })),
+        h(Feedback, { model, name: "section:preview", t }), preview?.purpose === purpose && h(ResourcePreview, { model, preview, t, close: () => { delete model.view.sections.preview; model.emit(); } }), h(LegacyResources, { model, t }));
     }
     function AssetsView({ model, t }) {
-      const [kind, setKind] = useState("term"), [input, setInput] = useState(""), [search, setSearch] = useState(""), [offset, setOffset] = useState(0);
-      const load = (token) => model.invoke(model.path("/api/library-entries", { kind, search, offset, limit: 50 }, token), "GET", undefined, token);
-      const data = useSection(model, "assets", load, [kind, search, offset]) || {};
-      return h("div", { className: "stack" }, h("div", null, h("h2", null, t("正式资产库")), h("p", null, t("工作区文件资源请在“资源”中关联，不会自动写入正式库。"))),
-        h("form", { className: "button-row", onSubmit: (event) => { event.preventDefault(); setSearch(input); setOffset(0); if (search === input) model.loadSection("assets", load); } }, h("select", { value: kind, "aria-label": t("资产"), onChange: (event) => { setKind(event.target.value); setOffset(0); } }, h("option", { value: "term" }, t("术语")), h("option", { value: "tm" }, t("翻译记忆"))), h("input", { value: input, placeholder: t("搜索资产"), "aria-label": t("搜索资产"), onChange: (event) => setInput(event.target.value) }), h(Button, { onClick: () => { setSearch(input); setOffset(0); if (search === input) model.loadSection("assets", load); } }, t("搜索"))),
-        h(Feedback, { model, name: "section:assets", retry: () => model.loadSection("assets", load), t }),
-        h("div", null, ...(data.items || []).map((item, index) => h("article", { className: "asset-row", key: item.id || index }, h("div", null, h("span", { className: "muted" }, t("原文")), h("p", null, item.source || item.name || "")), h("div", null, h("span", { className: "muted" }, t("译文")), h("p", null, item.target || item.translation || "")), h("span", { className: "badge" }, item.qualityStatus || item.status || ""))), !data.items?.length && h(Empty, { title: "暂无正式资产", t })),
-        h("div", { className: "pagination" }, h(Button, { small: true, disabled: !offset, onClick: () => setOffset(Math.max(0, offset - 50)) }, t("上一页")), h("span", { className: "muted" }, `${Math.min(offset + 1, data.total || 0)}–${offset + (data.items?.length || 0)} / ${data.total || 0}`), h(Button, { small: true, disabled: offset + 50 >= (data.total || 0), onClick: () => setOffset(offset + 50) }, t("下一页"))));
+      const [kind, setKind] = useState("term"), [libraryId, setLibraryId] = useState(""), [sourceFile, setSourceFile] = useState(null), [input, setInput] = useState(""), [search, setSearch] = useState(""), [offset, setOffset] = useState(0), [name, setName] = useState(""), [role, setRole] = useState("reference");
+      const loadLibraries = (token) => model.invoke(model.path(`/api/projects/${encodeURIComponent(token.view.projectId)}/libraries`, { withStats: 1 }, token), "GET", undefined, token);
+      const catalog = useSection(model, "asset-libraries", loadLibraries) || {};
+      const libraries = (catalog.libraries || []).filter((item) => item.kind === (kind === "term" ? "term_base" : "translation_memory"));
+      const library = libraries.find((item) => item.id === libraryId), filesMode = kind === "tm" && libraryId && libraryId !== "all" && sourceFile === null;
+      const section = `assets:${kind}:${libraryId}:${sourceFile}:${search}:${offset}`;
+      const load = (token) => libraryId ? model.invoke(model.path(filesMode ? "/api/library-files" : "/api/library-entries", { kind, libraryId: libraryId === "all" ? "" : libraryId, search, offset, limit: 20, ...(sourceFile === null ? {} : { sourceFile }) }, token), "GET", undefined, token) : Promise.resolve({});
+      const data = useSection(model, section, load, [kind, libraryId, sourceFile, search, offset]) || {};
+      const open = (id, file = null) => { setLibraryId(id); setSourceFile(file); setOffset(0); setInput(""); setSearch(""); };
+      const create = () => model.perform("library-create", async (token) => {
+        await model.invoke(`/api/projects/${encodeURIComponent(token.view.projectId)}/libraries`, "POST", { name: name.trim(), kind: kind === "term" ? "term_base" : "translation_memory", role: kind === "term" ? "reference" : role }, token);
+        setName(""); await model.loadSection("asset-libraries", loadLibraries); return "已创建资源库";
+      });
+      const enable = (item) => model.perform(`library-enable:${item.id}`, async (token) => {
+        await model.invoke(`/api/projects/${encodeURIComponent(token.view.projectId)}/libraries/${encodeURIComponent(item.id)}`, "PATCH", { enabled: item.enabled === false }, token);
+        await model.loadSection("asset-libraries", loadLibraries);
+      });
+      const rows = filesMode ? data.files || [] : data.items || [];
+      return h("div", { className: "stack" }, h("div", null, h("h2", null, t("项目资产库")), h("p", null, t("术语按库管理；TM 按库、来源文件和条目逐层浏览。")), h("div", { className: "type-tabs" }, ...[["term", "术语库"], ["tm", "记忆库 TM"]].map(([value, label]) => h("button", { type: "button", key: value, "aria-pressed": kind === value, onClick: () => { setKind(value); open(""); } }, t(label))))),
+        h(Feedback, { model, name: "section:asset-libraries", retry: () => model.loadSection("asset-libraries", loadLibraries), t }),
+        !libraryId ? h(React.Fragment, null, h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t(kind === "term" ? "术语库" : "记忆库 TM")), h("span", { className: "muted" }, `${libraries.length} ${t("个库")}`)),
+          h("p", { className: "muted" }, t(kind === "term" ? "启用的术语库参与翻译检索。" : "主 TM 保存人工确认译文，工作 TM 保存机器译文，参考 TM 提供检索参考。")),
+          h("div", { className: "library-list" }, h("div", { className: "library-row" }, h("div", null, h("strong", null, t("全部库（合并视图）")), h("p", { className: "muted" }, `${libraries.reduce((sum, item) => sum + (Number(item.entryCount) || 0), 0)} ${t("条")}`)), h(Button, { small: true, onClick: () => open("all") }, t("打开"))),
+            ...libraries.map((item) => h("div", { className: "library-row", key: item.id }, h("label", { className: "library-toggle" }, h("input", { type: "checkbox", checked: item.enabled !== false, disabled: model.view.operations[`library-enable:${item.id}`]?.pending, "aria-label": `${t("启用")} ${item.name}`, onChange: () => enable(item) }), h("span", { className: "badge" }, t(item.role === "master" ? "主 TM" : item.role === "working" ? "工作 TM" : kind === "term" ? "术语库" : "参考 TM"))),
+              h("div", { className: "library-title" }, h("strong", null, item.name), h("p", { className: "muted" }, `${item.entryCount || 0} ${t("条")} · ${t("优先级")} ${item.priority || 1}`, kind === "tm" ? ` · ${item.fileCount || 0} ${t("个文件")}` : "")), h(Button, { small: true, onClick: () => open(item.id) }, t("打开")), h(Feedback, { model, name: `library-enable:${item.id}`, t }))))),
+          h("details", { className: "card" }, h("summary", null, t("新增库")), h("div", { className: "quick-form" }, h("label", null, t("库名称"), h("input", { value: name, onChange: (event) => setName(event.target.value) })), kind === "tm" && h("label", null, t("库用途"), h("select", { value: role, onChange: (event) => setRole(event.target.value) }, ...[["master", "主 TM"], ["working", "工作 TM"], ["reference", "参考 TM"]].map(([value, label]) => h("option", { key: value, value }, t(label))))), h(Button, { disabled: !name.trim(), busy: model.view.operations["library-create"]?.pending, onClick: create }, t("创建库")), h(Feedback, { model, name: "library-create", retry: create, t }))))
+          : h("section", { className: "card stack" }, h("div", { className: "breadcrumbs" }, h(Button, { small: true, quiet: true, onClick: () => open("") }, t("全部库")), h("span", null, " / "), h(Button, { small: true, quiet: true, onClick: () => open(libraryId) }, library?.name || t("全部库（合并视图）")), sourceFile !== null && h("span", { className: "muted" }, " / ", sourceFile === "__none__" ? t("未标注来源") : sourceFile)),
+            h("form", { className: "button-row", onSubmit: (event) => { event.preventDefault(); setSearch(input); setOffset(0); if (search === input) model.loadSection(section, load); } }, h("input", { type: "search", value: input, placeholder: t(filesMode ? "搜索来源文件" : "搜索资产"), "aria-label": t(filesMode ? "搜索来源文件" : "搜索资产"), onChange: (event) => setInput(event.target.value) }), h(Button, { onClick: () => { setSearch(input); setOffset(0); if (search === input) model.loadSection(section, load); } }, t("搜索"))),
+            h(Feedback, { model, name: `section:${section}`, retry: () => model.loadSection(section, load), t }),
+            h("div", null, ...rows.map((item, index) => filesMode ? h("article", { className: "library-row", key: item.sourceFile || index }, h("div", { className: "library-title" }, h("strong", null, item.sourceFile || t("未标注来源")), h("p", { className: "muted" }, `${item.entryCount || item.count || 0} ${t("条")} · ${item.learning?.humanReviewed || 0} ${t("条人工终稿")}`), item.batch && h("p", { className: "muted" }, `${t("翻译进度")} ${item.batch.completedSegments || 0} / ${item.batch.totalSegments || 0}`)), h(Button, { small: true, onClick: () => open(libraryId, item.sourceFile || "__none__") }, t("查看条目")))
+              : h("article", { className: "asset-row", key: item.id || index }, h("div", null, h("span", { className: "muted" }, t("原文")), h("p", null, item.source || item.name || "")), h("div", null, h("span", { className: "muted" }, t("译文")), h("p", null, item.target || item.translation || "")), h("span", { className: "badge" }, t(({ human_approved: "人工确认", machine_verified: "机器译文", approved: "已批准", draft: "草稿" })[item.qualityStatus || item.status] || item.qualityStatus || item.status || "")))), !rows.length && !model.view.operations[`section:${section}`]?.pending && h(Empty, { title: filesMode ? "此库暂无来源文件" : "暂无正式资产", t })),
+            h(Pager, { offset, total: data.total || 0, onChange: setOffset, t })));
     }
     function StandaloneQa({ model, t }) {
       const [source, setSource] = useState(""), [target, setTarget] = useState("");
+      const withResources = resourceFields.some(({ field }) => model.workspace?.config?.[field]?.length);
+      const agentInspect = () => model.ask(`请用当前工作区已关联的资源审校下面的日中译文。先用 DSH 工具查阅原格式资源，不创建转换副本，然后执行 Kami 独立审校，并在主会话中说明问题。原文：${JSON.stringify(source)}；译文：${JSON.stringify(target)}。`, "agent-qa");
       const inspect = () => model.perform("standalone-qa", async (token) => { token.view.sections.standaloneQa = await model.invoke("/api/auto-qa", "POST", scopeArgs(model, token, { source, translation: target }), token); });
       return h("div", { className: "stack" }, h("div", null, h("h2", null, t("独立审校")), h("p", { className: "muted" }, t("当前工作区最新资源"))),
         h("div", { className: "pairs" }, h("label", null, t("原文"), h("textarea", { value: source, onChange: (event) => setSource(event.target.value) })), h("label", null, t("译文"), h("textarea", { value: target, onChange: (event) => setTarget(event.target.value) }))),
-        h("div", null, h(Button, { primary: true, disabled: !source.trim() || !target.trim(), busy: model.view.operations["standalone-qa"]?.pending, onClick: inspect }, t("运行 QA")), h(Feedback, { model, name: "standalone-qa", retry: inspect, t })), h(QaReport, { report: model.view.sections.standaloneQa, t }));
+        h("div", null, h(Button, { primary: true, disabled: !source.trim() || !target.trim(), busy: model.view.operations[withResources ? "agent-qa" : "standalone-qa"]?.pending, onClick: withResources ? agentInspect : inspect }, t(withResources ? "交给 Agent 审校" : "运行 QA")), h(Feedback, { model, name: "standalone-qa", retry: inspect, t }), h(Feedback, { model, name: "agent-qa", t })), h(QaReport, { report: model.view.sections.standaloneQa, t }));
+    }
+    function LearningEvidence({ model, t }) {
+      const [open, setOpen] = useState(false), [offset, setOffset] = useState(0), [search, setSearch] = useState("");
+      const load = (token) => open ? model.invoke(model.path("/api/learning/evidence", { contentType: "all", domain: "all", offset, limit: 20, search }, token), "GET", undefined, token) : Promise.resolve(null);
+      const data = useSection(model, "learning-evidence", load, [open, offset, search]);
+      return h("details", { className: "card", open, onToggle: (event) => setOpen(event.currentTarget.open) }, h("summary", null, t("来源证据与变更原因")), open && h("div", { className: "stack" },
+        h("input", { type: "search", value: search, placeholder: t("搜索原文、译文或来源"), "aria-label": t("搜索学习证据"), onChange: (event) => { setSearch(event.target.value); setOffset(0); } }),
+        h(Feedback, { model, name: "section:learning-evidence", retry: () => model.loadSection("learning-evidence", load), t }),
+        ...(data?.items || []).map((item) => h("article", { className: "resource-row", key: item.id }, h("span", { className: "badge" }, t(item.humanDecision?.accepted ? "人工确认" : "机器译文")), h("p", { className: "muted" }, item.sourceFile || t("未标注来源")), h("p", null, item.source), h("p", null, item.humanDecision?.finalTranslation || item.finalTranslation || item.initialTranslation || ""))),
+        data && !data.items?.length && h(Empty, { title: "暂无条目", t }), h(Pager, { offset, total: data?.total || 0, onChange: setOffset, t })));
     }
     function LearningView({ model, t }) {
-      const [selected, setSelected] = useState("general/game");
-      const load = async (token) => { const [learning, styles] = await Promise.all([model.invoke(model.path("/api/learning", { contentType: "all", domain: "all" }, token), "GET", undefined, token), model.invoke(model.path("/api/style-profiles", {}, token), "GET", undefined, token)]); return { ...learning, styleProfiles: styles.styleProfiles || [] }; };
-      const data = useSection(model, "learning", load) || {};
-      const operation = (key, path, body) => model.perform(key, async (token) => { await model.invoke(path, "POST", scopeArgs(model, token, Object.fromEntries(Object.entries(body || {}).filter(([, value]) => value !== undefined))), token); await model.loadSection("learning", load); return key.startsWith("activate") ? "已激活" : "已提交评测"; });
-      return h("div", { className: "stack" }, h("div", null, h("h2", null, t("学习与评测")), h("p", null, t("人工激活后才用于后续任务。"))),
-        h("div", { className: "button-row" }, h("select", { value: selected, "aria-label": t("学习范围"), onChange: (event) => setSelected(event.target.value) }, ...[...new Set(["general/game", ...(data.scopeCounts || []).map((scope) => `${scope.contentType}/${scope.domain}`)])].map((value) => h("option", { key: value, value }, value))), h(Button, { onClick: () => { const [contentType, domain] = selected.split("/"); return operation("generate", "/api/learning/skills/generate", { contentType, domain }); }, busy: model.view.operations.generate?.pending }, t("生成候选策略"))),
-        h(Feedback, { model, name: "generate", t }), h(Feedback, { model, name: "section:learning", retry: () => model.loadSection("learning", load), t }),
-        ...[["策略版本", data.skills || [], "/api/learning/skills"], ["风格规范", data.styleProfiles || [], "/api/style-profiles"]].map(([label, items, prefix]) => h("section", { key: label }, h("h3", null, t(label)), ...items.map((item) => {
-          const key = `${prefix}:${item.id}`;
-          return h("article", { className: "resource-row", key }, h("strong", null, item.name || `v${item.version}`), h("p", { className: "muted" }, `${item.contentType || ""} / ${item.domain || ""} · ${item.status || ""}`), h("p", null, item.description || item.instruction || item.strategy?.instruction || ""),
-            h("div", { className: "button-row" }, h(Button, { small: true, onClick: () => operation(`evaluate:${key}`, `${prefix}/${item.id}/evaluate`, { contentType: item.contentType, domain: item.domain }), busy: model.view.operations[`evaluate:${key}`]?.pending }, t("评测")),
-              h("details", null, h("summary", null, t("激活")), h("p", { className: "muted" }, t("人工激活后才用于后续任务。")), h(Button, { small: true, onClick: () => operation(`activate:${key}`, `${prefix}/${item.id}/activate`, { contentType: item.contentType, domain: item.domain }), busy: model.view.operations[`activate:${key}`]?.pending }, t("激活")))), h(Feedback, { model, name: `evaluate:${key}`, t }), h(Feedback, { model, name: `activate:${key}`, t }));
-        }), !items.length && h(Empty, { title: "暂无条目", t }))));
+      const [step, setStep] = useState("champion"), [selected, setSelected] = useState(""), [offset, setOffset] = useState(0), [styleOffset, setStyleOffset] = useState(0);
+      const load = async (token) => { const [learning, styles] = await Promise.all([model.invoke(model.path("/api/learning", { contentType: "general", domain: "general" }, token), "GET", undefined, token), model.invoke(model.path("/api/style-profiles", {}, token), "GET", undefined, token)]); return { ...learning, styleProfiles: styles.styleProfiles || [] }; };
+      const data = useSection(model, "learning", load) || {}, candidates = data.candidates || [], candidate = candidates.find((item) => item.id === selected) || candidates[0], candidateId = candidate?.id || "";
+      const champion = data.champion || data.champions?.[0], scope = { contentType: candidate?.contentType || "general", domain: candidate?.domain || "general" };
+      const gateKey = `learning-gate:${candidateId}`, loadGate = (token) => model.invoke(model.path("/api/quality/gate", { ...scope, ...(candidateId ? { skillId: candidateId } : {}) }, token), "GET", undefined, token);
+      const gate = useSection(model, gateKey, loadGate, [candidateId]);
+      const evaluation = (data.evaluations || []).find((item) => item.challengerSkillId === candidateId);
+      const evaluationKey = `evaluate-learning:${candidateId}`, gateActionKey = `run-gate:${candidateId}`, activationKey = `activate-learning:${candidateId}`;
+      const canPromote = promotionReady(evaluation, gate, candidateId) && candidate?.parentId === champion?.id && evaluation?.championSkillId === champion?.id;
+      const statuses = { promote: "评测通过", needs_review: "需要复核", reject: "未通过", pass: "已通过", block: "已阻断", insufficient: "证据不足", not_run: "尚未运行" };
+      const operation = (key, path, body = {}) => model.perform(key, async (token) => {
+        const value = await model.invoke(path, "POST", scopeArgs(model, token, { ...scope, ...body }), token);
+        if (value.skill?.id && key === "generate") { setSelected(value.skill.id); setStep("candidates"); }
+        await model.loadSection("learning", load); await model.loadSection(gateKey, loadGate);
+        return key.startsWith("activate-learning:") ? "已激活" : value.evaluation ? "评测结果已保存" : value.message || (value.jobId || value.backgroundTaskId ? "后台任务已提交，可在任务记录中查看进度。" : "已完成");
+      });
+      useEffect(() => {
+        if (!model.visible) return;
+        const timer = setInterval(() => { model.loadSection("learning", load); model.loadSection(gateKey, loadGate); }, 5000);
+        return () => clearInterval(timer);
+      }, [model, model.visible, model.scopeKey, candidateId]);
+      const previewGold = () => model.loadSection("gold-preview", (token) => model.invoke("/api/quality/gold-sets/from-trajectories", "POST", scopeArgs(model, token, scope), token));
+      const gold = model.view.sections["gold-preview"];
+      return h("div", { className: "stack learning-view" }, h("div", null, h("h2", null, t("学习中心")), h("p", null, t("按当前项目积累人工终稿；候选通过评测和门禁后，由你启用。"))),
+        h("div", { className: "learning-steps", "aria-label": t("学习流程") }, ...[["champion", "生效版本", champion ? `v${champion.version || 1}` : "暂无记录"], ["candidates", "候选", `${candidates.length}`], ["evaluation", "评测", evaluation ? statuses[evaluation.decision] || evaluation.decision : "尚未评测"], ["gate", "门禁", gate?.status ? statuses[gate.status] || gate.status : "尚未运行"], ["activate", "启用", canPromote ? "可以启用" : "等待检查"]].map(([value, label, hint], index) => h("button", { type: "button", key: value, "aria-pressed": step === value, onClick: () => setStep(value) }, h("span", { className: "muted" }, String(index + 1).padStart(2, "0")), h("strong", null, t(label)), h("span", { className: "step-hint" }, t(hint))))),
+        h(Feedback, { model, name: "section:learning", retry: () => model.loadSection("learning", load), t }),
+        step === "champion" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("当前生效版本")), champion && h("span", { className: "badge" }, `v${champion.version || 1}`)), champion ? h(React.Fragment, null, h("strong", null, skillLabel(champion, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h("p", null, champion.description || ""), h("details", null, h("summary", null, t("策略内容")), h("div", { className: "preview-text" }, champion.strategy?.instruction || champion.instruction || t("使用当前版本的默认策略")))) : h(Empty, { title: "暂无条目", t }), h(Button, { onClick: () => setStep("candidates") }, t("查看候选"))),
+        step === "candidates" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("候选版本")), h(Button, { small: true, onClick: () => operation("generate", "/api/learning/skills/generate"), busy: model.view.operations.generate?.pending }, t("生成候选策略"))),
+          h(Feedback, { model, name: "generate", t }), ...candidates.slice(offset, offset + 20).map((item) => h("article", { className: "candidate-row", key: item.id, "data-selected": candidateId === item.id }, h("div", { className: "section-heading" }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h(Button, { small: true, primary: candidateId === item.id, onClick: () => { setSelected(item.id); setStep("evaluation"); } }, t("选择候选"))), h("p", null, item.description || ""), h("details", null, h("summary", null, t("变更内容")), h("div", { className: "preview-text" }, item.strategy?.instruction || item.instruction || "")))), !candidates.length && h(Empty, { title: "暂无候选", description: "从人工确认的终稿生成候选，不会自动替换生效版本。", t }), h(Pager, { offset, total: candidates.length, onChange: setOffset, t })),
+        ["evaluation", "gate", "activate"].includes(step) && h("div", { className: "candidate-picker" }, h("label", null, t("受测候选"), h("select", { value: candidateId, onChange: (event) => setSelected(event.target.value) }, !candidates.length && h("option", { value: "" }, t("先生成候选")), ...candidates.map((item) => h("option", { key: item.id, value: item.id }, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)))))),
+        step === "evaluation" && h("section", { className: "card stack" }, h("h3", null, t("生效版本与候选评测")), h("p", { className: "muted" }, t("使用未参与候选学习的人工终稿做配对评测。")),
+          h(Button, { disabled: !candidateId, busy: model.view.operations[evaluationKey]?.pending, onClick: () => operation(evaluationKey, `/api/learning/skills/${encodeURIComponent(candidateId)}/evaluate`) }, t("开始评测")), h(Feedback, { model, name: evaluationKey, t }),
+          evaluation ? h(React.Fragment, null, h("span", { className: "badge" }, t(statuses[evaluation.decision] || evaluation.decision)), h("p", null, evaluation.report?.conclusion || evaluation.result?.conclusion || ""), h("p", { className: "muted" }, `${evaluation.sampleCount || 0} ${t("个配对样本")}`),
+            h("table", { className: "metric-table" }, h("thead", null, h("tr", null, h("th", null, t("指标")), h("th", null, t("生效版本")), h("th", null, t("候选")))), h("tbody", null, ...[["qaScore", "QA 分数"], ["hardErrorCount", "硬错误"], ["mandatoryTermAccuracy", "术语准确率"]].map(([key, label]) => h("tr", { key }, h("td", null, t(label)), h("td", null, Number.isFinite(evaluation.championMetrics?.[key]) ? evaluation.championMetrics[key] : "—"), h("td", null, Number.isFinite(evaluation.challengerMetrics?.[key]) ? evaluation.challengerMetrics[key] : "—")))))) : h(Empty, { title: "尚未评测", t }), h(Button, { quiet: true, onClick: () => setStep("gate") }, t("查看门禁"))),
+        step === "gate" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("固定 Gold Set 与失败回归")), h("span", { className: "badge" }, t(statuses[gate?.status] || "尚未运行"))), h(Feedback, { model, name: `section:${gateKey}`, retry: () => model.loadSection(gateKey, loadGate), t }),
+          h("div", { className: "gate-metrics" }, h("div", null, h("strong", null, gate?.assets?.goldSampleCount || 0), h("span", null, t("启用 Gold 样本"))), h("div", null, h("strong", null, gate?.assets?.regressionCaseCount || 0), h("span", null, t("启用回归案例")))),
+          h("p", { className: "muted" }, gate?.assets?.coverage?.reason || t("尚未运行门禁")), ...(gate?.latestRun?.blocking || []).map((item, index) => h("p", { className: "error", key: index }, item.message)),
+          h(Button, { disabled: !candidateId, busy: model.view.operations[gateActionKey]?.pending, onClick: () => operation(gateActionKey, "/api/quality/runs", { skillId: candidateId }) }, t("运行门禁")), h(Feedback, { model, name: gateActionKey, t }),
+          h("details", { className: "rule" }, h("summary", null, t("管理固定质量资产")), h("div", { className: "stack" }, h(Button, { onClick: previewGold, busy: model.view.operations["section:gold-preview"]?.pending }, t("从人工终稿预览 Gold Set")), h(Feedback, { model, name: "section:gold-preview", t }),
+            gold && h("div", { className: "notice" }, `${gold.candidates?.length || 0} ${t("个样本")}`, gold.candidates?.length > 0 && h(Button, { onClick: () => operation("create-gold", "/api/quality/gold-sets", { samples: gold.candidates, status: "active", changeNote: "从人工终稿生成" }), busy: model.view.operations["create-gold"]?.pending }, t("确认建立并启用"))), h(Feedback, { model, name: "create-gold", t }),
+            h(Button, { onClick: () => operation("build-regression", "/api/quality/regression-suites"), busy: model.view.operations["build-regression"]?.pending }, t("按最新证据重建回归集")), h(Feedback, { model, name: "build-regression", t })))),
+        step === "activate" && h("section", { className: "card stack" }, h("h3", null, t("启用候选")), h("p", null, t(canPromote ? "当前候选评测和门禁已通过，可由你确认启用。" : "需要当前候选的配对评测通过，且门禁结论覆盖最新质量资产。")),
+          h(Button, { primary: true, disabled: !canPromote, busy: model.view.operations[activationKey]?.pending, onClick: () => operation(activationKey, `/api/learning/skills/${encodeURIComponent(candidateId)}/activate`) }, t("确认启用候选")), h(Feedback, { model, name: activationKey, t })),
+        h("details", { className: "card" }, h("summary", null, t("风格规范"), ` · ${data.styleProfiles?.length || 0}`), h("div", { className: "stack" }, ...(data.styleProfiles || []).slice(styleOffset, styleOffset + 20).map((item) => {
+          const key = `style:${item.id}`;
+          return h("article", { className: "resource-row", key }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h("p", { className: "muted" }, stateText(item.status, t)), h("details", null, h("summary", null, t("规范内容")), h("div", { className: "preview-text" }, item.instruction || "")), item.status === "draft" && h("div", { className: "button-row" }, h(Button, { small: true, onClick: () => operation(`evaluate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/evaluate`), busy: model.view.operations[`evaluate:${key}`]?.pending }, t("评测")), h("details", null, h("summary", null, t("激活")), h("p", { className: "muted" }, t("人工激活后才用于后续任务。")), h(Button, { small: true, onClick: () => operation(`activate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/activate`), busy: model.view.operations[`activate:${key}`]?.pending }, t("确认启用")))), h(Feedback, { model, name: `evaluate:${key}`, t }), h(Feedback, { model, name: `activate:${key}`, t }));
+        }), !data.styleProfiles?.length && h(Empty, { title: "暂无条目", t }), h(Pager, { offset: styleOffset, total: data.styleProfiles?.length || 0, onChange: setStyleOffset, t }))), h(LearningEvidence, { model, t }));
     }
     function SettingsView({ model, t }) {
       const data = useSection(model, "settings", (token) => model.invoke("/api/settings", "GET", undefined, token));
@@ -588,7 +726,7 @@ window.__ModuleLoader__.load({
     }
     function Workbench(props) {
       const [, render] = useState(0), modelRef = useRef(null), scrollRef = useRef(null);
-      if (!modelRef.current) modelRef.current = new WorkbenchModel({ sessionId: props.sessionId, call: props.call, visible: props.visible !== false });
+      if (!modelRef.current) modelRef.current = new WorkbenchModel({ sessionId: props.sessionId, call: props.call, prompt: props.prompt, visible: props.visible !== false });
       const model = modelRef.current, t = props.t || ((key) => key);
       useEffect(() => model.subscribe(() => render((value) => value + 1)), [model]);
       useEffect(() => {

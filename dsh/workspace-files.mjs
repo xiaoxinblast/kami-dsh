@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { extractStyleGuideFile } from "../src/style-guide-import.mjs";
 import { extractTermPairs } from "../src/table-term-extractor.mjs";
 import { extractXliffPairs } from "../src/xliff-document.mjs";
-import { chunkReferencePages, extractReferenceFile, MAX_REFERENCE_FILE_BYTES, scanReferenceRisk } from "../src/reference-materials.mjs";
+import { chunkReferencePages, extractReferenceFile, scanReferenceRisk } from "../src/reference-materials.mjs";
 
 const CONFIG = ".kami/project.json";
 const fields = { "style-guide": "styleGuides", terms: "terms", tm: "translationMemories", reference: "references" };
@@ -46,15 +46,25 @@ async function checkedTarget(root, path, context) {
   return { name, target, actual };
 }
 
-async function readSource(root, path, context, maxBytes = 20 * 1024 * 1024) {
+async function readSource(root, path, context, maxBytes, metadataOnly = false) {
   const entry = await checkedTarget(root, path, context);
   const info = await context.fs.stat(entry.target, context.signal);
   if (info?.type !== "file") throw new Error(`不是普通文件：${entry.name}`);
-  if (info.size > maxBytes) throw new Error(`文件超过 ${maxBytes / 1024 / 1024} MB：${entry.name}`);
-  const bytes = Buffer.from(await context.fs.readBytes(entry.target, context.signal, maxBytes));
+  if (maxBytes !== undefined && info.size > maxBytes) throw new Error(`文件超过 ${maxBytes / 1024 / 1024} MB：${entry.name}`);
+  let bytes, digest;
+  if (metadataOnly && typeof context.fs.readByteRange === "function") {
+    const hasher = createHash("sha256");
+    for (let offset = 0; offset < info.size; offset += 1024 * 1024) {
+      const length = Math.min(1024 * 1024, info.size - offset);
+      const chunk = await context.fs.readByteRange(entry.target, { offset, length }, context.signal);
+      if (chunk.length !== length) throw new Error(`读取期间文件发生变化，请重试：${entry.name}`);
+      hasher.update(chunk);
+    }
+    digest = hasher.digest("hex");
+  } else bytes = Buffer.from(await context.fs.readBytes(entry.target, context.signal, maxBytes ?? info.size));
   const after = await context.fs.stat(entry.target, context.signal);
-  if (bytes.length > maxBytes || after?.version !== info.version || await realpath(context.fs.processPath(entry.target)) !== entry.actual) throw new Error(`读取期间文件发生变化，请重试：${entry.name}`);
-  return { path: entry.name, filename: basename(entry.name), hash: hash(bytes), bytes, size: bytes.length };
+  if ((maxBytes !== undefined && bytes?.length > maxBytes) || after?.version !== info.version || await realpath(context.fs.processPath(entry.target)) !== entry.actual) throw new Error(`读取期间文件发生变化，请重试：${entry.name}`);
+  return { path: entry.name, filename: basename(entry.name), hash: digest || hash(bytes), ...(metadataOnly ? {} : { bytes }), size: info.size };
 }
 
 async function writeTarget(root, path, context) {
@@ -139,9 +149,18 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     if (projectId && projectId !== state.config.projectId) throw new Error("指定项目与当前工作区绑定不一致");
     return state;
   }
-  async function parseResource(root, purpose, path, context) {
+  async function parseResource(root, purpose, path, context, resourceContext = []) {
     if (!fields[purpose]) throw new Error("未知的文件用途");
-    const source = await readSource(root, path, context, purpose === "style-guide" ? 5 * 1024 * 1024 : purpose === "reference" ? MAX_REFERENCE_FILE_BYTES : 20 * 1024 * 1024);
+    const observation = resourceContext.find((item) => relativePath(item.path) === relativePath(path));
+    const source = await readSource(root, path, context, undefined, Boolean(observation));
+    if (observation) {
+      if (observation.hash !== source.hash) throw new Error(`Agent 查阅后原文件版本发生变化，请重新查看：${source.path}`);
+      const text = String(observation.text || "").trim();
+      const candidates = (observation.pairs || []).filter((item) => typeof item.source === "string" && item.source.trim() && typeof item.target === "string" && item.target.trim());
+      if (["terms", "tm"].includes(purpose) ? !candidates.length : !text) throw new Error(`Agent 尚未提供此资源的查阅结果：${source.path}`);
+      return { path: source.path, filename: source.filename, purpose, hash: source.hash, size: source.size, reader: "agent",
+        parsed: { text, candidates, chunks: chunkReferencePages([{ text }]), characters: text.length } };
+    }
     const cachePath = join(dataDirectory, "runtime", "workspace-resources", hash(`${root}\0${purpose}\0${source.path}`), `${source.hash}.json`);
     let parsed;
     try { parsed = JSON.parse(await readFile(cachePath, "utf8")); }
@@ -162,13 +181,20 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     }
     return { path: source.path, filename: source.filename, purpose, hash: source.hash, size: source.size, parsed };
   }
-  async function snapshot(state, resources, context) {
+  async function snapshot(state, resources, context, resourceContext = []) {
+    if (!resources || Array.isArray(resources) || typeof resources !== "object" || !Object.keys(resources).every((key) => [...Object.values(fields), "outputDirectory"].includes(key))) throw new Error("未知的任务资源字段");
+    if (!Array.isArray(resourceContext)) throw new Error("resourceContext 必须是 Agent 查阅结果数组");
+    for (const item of resourceContext) {
+      if (!item || typeof item.path !== "string" || !/^[a-f\d]{64}$/u.test(item.hash || "") || (item.text !== undefined && typeof item.text !== "string")
+        || (item.pairs !== undefined && (!Array.isArray(item.pairs) || item.pairs.some((pair) => typeof pair?.source !== "string" || typeof pair?.target !== "string")))) throw new Error("resourceContext 需要原文件 path、hash 和 text 或 pairs 查阅结果");
+      relativePath(item.path);
+    }
     const config = configValue({ ...state.config, ...resources });
     const result = { id: randomUUID(), workspace: state.workspace, projectId: config.projectId, createdAt: new Date().toISOString(), outputDirectory: config.outputDirectory, resources: [], terms: [], memories: [], referenceChunks: [], guide: null };
     const guides = [];
     for (const [purpose, field] of Object.entries(fields)) {
       for (const path of config[field]) {
-        const resource = await parseResource(state.workspace, purpose, path, context);
+        const resource = await parseResource(state.workspace, purpose, path, context, resourceContext);
         const { parsed, ...metadata } = resource;
         result.resources.push(metadata);
         if (purpose === "style-guide") guides.push(`【${path}】\n${parsed.text}`);
@@ -191,13 +217,14 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     // Older callers may supply an absolute in-workspace translation path.
     const path = isAbsolute(args.path || "") ? relative(state.workspace, await realpath(args.path)) : args.path;
     if (purpose !== "translation") {
-      const resource = await parseResource(state.workspace, purpose, path, context);
+      if (!fields[purpose]) throw new Error("未知的文件用途");
+      const source = await readSource(state.workspace, path, context, undefined, true);
+      const resource = { ...source, purpose };
       if (args.register !== false) await update(context, (config) => ({ ...config, [fields[purpose]]: [...new Set([...config[fields[purpose]], resource.path])] }));
-      const { parsed, ...metadata } = resource;
-      return { ...metadata, registered: args.register !== false, characters: parsed.characters || 0, count: parsed.candidates?.length || parsed.chunks?.length || 0, preview: parsed.text || (parsed.candidates || parsed.chunks || []).slice(0, 5), taskScoped: true };
+      return { ...resource, registered: args.register !== false, readMode: "agent", taskScoped: true };
     }
     const source = await readSource(state.workspace, path, context);
-    const resources = await snapshot(state, args.resources || {}, context);
+    const resources = await snapshot(state, args.resources || {}, context, args.resourceContext);
     const originalFile = `runtime/workspace-snapshots/${resources.id}/${source.filename}`;
     await mkdir(dirname(join(dataDirectory, originalFile)), { recursive: true });
     await writeFile(join(dataDirectory, originalFile), source.bytes, { flag: "wx" });

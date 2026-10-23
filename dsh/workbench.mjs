@@ -46,10 +46,10 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
     }
     if (!context.workspaceSnapshot && context.cwd && context.fs && method === "POST" && /^\/api\/(?:translate|auto-qa)$/u.test(url.pathname)) {
       const state = await files.bound(context, body.projectId);
-      context = { ...context, workspaceSnapshot: await withRuntimeCall(context, () => files.snapshot(state, body.resources || {}, context)) };
+      context = { ...context, workspaceSnapshot: await withRuntimeCall(context, () => files.snapshot(state, body.resources || {}, context, body.resourceContext)) };
     }
     const projectId = body.projectId || url.searchParams.get("projectId");
-    if (projectId && url.pathname.startsWith("/api/learning")) {
+    if (projectId && /^\/api\/(?:learning|quality)(?:\/|$)/u.test(url.pathname)) {
       const project = body.project || url.searchParams.get("project");
       if (project && project !== projectId) throw new Error("Conflicting project scope");
       if (method === "GET") url.searchParams.set("project", projectId);

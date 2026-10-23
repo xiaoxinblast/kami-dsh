@@ -1366,7 +1366,7 @@ async function readJsonBody(req, { limitBytes = MAX_BODY_BYTES } = {}) {
   let overflowed = false;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limitBytes) {
+    if (!runtimeOptions().embedded && size > limitBytes) {
       overflowed = true;
       chunks.length = 0;
       continue;
@@ -1402,7 +1402,7 @@ async function readRawBody(req, { limitBytes = IMPORT_FILE_BYTES } = {}) {
   let overflowed = false;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limitBytes) {
+    if (!runtimeOptions().embedded && size > limitBytes) {
       overflowed = true;
       chunks.length = 0;
       continue;
@@ -4488,7 +4488,11 @@ async function apiHandler(req, res, url) {
     const projectId = String(url.searchParams.get("projectId") || "").trim();
     const libraryId = String(url.searchParams.get("libraryId") || "").trim();
     if (!projectId || !libraryId) return json(res, 400, { error: "缺少项目或资源库" });
-    const files = await listLibraryFiles({ locale, projectId, libraryId });
+    const allFiles = await listLibraryFiles({ locale, projectId, libraryId });
+    const search = String(url.searchParams.get("search") || "").trim().toLowerCase();
+    const files = allFiles.filter((file) => !search || String(file.sourceFile || "").toLowerCase().includes(search));
+    const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+    const limit = url.searchParams.has("limit") ? Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 20)) : files.length;
     // 文件层顺带回答两个问题：这个文件翻译到哪一步了（批次进度）、有没有学习轨迹。
     // 轨迹里带 human_decision.accepted 就说明人工审校版本已经回填过这个文件。
     const [runs, trajectoryCounts] = await Promise.all([
@@ -4504,8 +4508,8 @@ async function apiHandler(req, res, url) {
     }
     const learningByFile = new Map(trajectoryCounts.map((item) => [item.sourceFile, item]));
     return json(res, 200, {
-      libraryId,
-      files: files.map((file) => {
+      libraryId, total: files.length, offset, limit,
+      files: files.slice(offset, offset + limit).map((file) => {
         const name = String(file.sourceFile || "").trim();
         const run = name ? runByFile.get(name) : null;
         const learning = learningByFile.get(name);
@@ -8666,7 +8670,7 @@ async function disposeEmbeddedWorkbench() {
     ...[...batchWorkers.values(), ...batchQaWorkers.values()].map((control) => control.promise),
     ...contextAnalysisTasks.values(), ...consistencyCheckTasks.values(), ...termSurveyTasks.values(),
     ...[...runningBackgroundTasks.values()].map((control) => control.settled),
-    ...referenceIngestQueues.values(), evaluationJobs.stop(), styleEvaluationJobs.stop()
+    referenceIngestQueue, evaluationJobs.stop(), styleEvaluationJobs.stop()
   ]);
   await matcherPool.close();
 }
