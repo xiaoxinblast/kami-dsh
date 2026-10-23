@@ -110,6 +110,7 @@ test("导出立即给反馈，并且走后台任务（任务中心可见）", { 
     await page.waitForFunction(() => document.querySelector("#tertiaryAction")?.textContent === "正在检查导出条件…", null, { timeout: 3000 });
     assert.equal(await exportButton.isDisabled(), true, "检查期间要禁用，防止重复点");
     assert.equal(preflightCalls.length, 1);
+    assert.equal(JSON.parse(preflightCalls[0]).batchId, "batch-1", "预检请求要带 batchId，服务端才能复用已保存的术语匹配");
 
     // 生成文件走后台任务；完成后弹窗说明落点，并指明任务中心可追溯。
     await page.waitForFunction(() => /导出完成|导出失败/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 30000 });

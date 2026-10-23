@@ -140,7 +140,7 @@
                 <div class="panel-head"><div><span class="card-kicker">SOURCE DOCUMENT</span><h2>待译文件</h2></div><span class="count" id="batchSourceMeta">尚未载入</span></div>
                 <label class="drop-zone batch-drop-zone" id="batchDropZone" for="batchFile">
                   <input id="batchFile" type="file" accept=".txt,.md,.docx,.xlsx,.csv,.xliff,.mqxliff" hidden />
-                  <span class="upload-mark">↑</span><strong id="batchFilePrompt">拖入或点击选择文件</strong><small id="batchFileMeta">拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 20MB。单句或片段请用「单句输入」。</small>
+                  <span class="upload-mark">↑</span><strong id="batchFilePrompt">拖入或点击选择文件</strong><small id="batchFileMeta">拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 32MB。单句或片段请用「单句输入」。</small>
                 </label>
               </article>
               <article class="panel batch-policy-panel">
@@ -242,7 +242,7 @@
             </div>
 
             <div class="qa-source-body" data-qa-panel="file" hidden>
-              <label class="drop-zone compact"><input id="qaFile" type="file" accept=".mqxliff,.xliff,.xlsx,.csv" hidden /><strong id="qaFilePrompt">上传双语文件</strong><small>mqxliff / xliff / xlsx / csv，单文件 ≤ 20MB</small></label>
+              <label class="drop-zone compact"><input id="qaFile" type="file" accept=".mqxliff,.xliff,.xlsx,.csv" hidden /><strong id="qaFilePrompt">上传双语文件</strong><small>mqxliff / xliff / xlsx / csv，单文件 ≤ 32MB</small></label>
               <label class="log-autorefresh"><input type="checkbox" id="qaDeepCheck" /><span class="log-switch" aria-hidden="true"></span><span>同时跑 AI 深度检查（逐条调模型，慢且花额度）</span></label>
               <button class="button primary" id="qaFileRun" type="button" disabled>开始质检</button>
               <p class="qa-hint">表格一行一条、XLIFF 一个 trans-unit 一条，本身就是逐句的，所以直接按原生句段检查，不再切句与对齐。</p>
@@ -281,12 +281,17 @@
         <section class="view" id="view-tasks">
           <article class="panel task-center-panel">
             <div class="panel-head"><div><span class="card-kicker">PERSISTENT WORK QUEUE</span><h2>历史翻译任务</h2></div><div class="asset-count" id="taskCount">0 个任务</div></div>
-            <div class="task-toolbar">
+            <div class="task-tools-row">
+              <div class="task-tools-left">
+                <button class="button ghost small task-filter-toggle" id="taskFilterToggle" type="button" aria-expanded="false" aria-controls="taskFilterPanel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" /></svg><span>筛选</span><i class="task-filter-dot" id="taskFilterDot" hidden></i></button>
+                <span class="task-tools-summary" id="taskToolsSummary">全部任务</span>
+              </div>
+              <button class="button secondary small" id="refreshTasks" type="button">刷新列表</button>
+            </div>
+            <div class="task-filter-panel" id="taskFilterPanel" hidden>
               <label><span>任务类型</span><select id="taskType"><option value="">全部类型</option><option value="batch">翻译批次</option><option value="autoqa">译文质检报告</option><option value="background">后台任务</option></select></label>
               <label><span>语言对</span><select id="taskLocale"><option value="zh-CN">日语→简体中文</option></select></label>
-              <label><span>任务状态</span><select id="taskStatus"><option value="">全部状态</option><option value="in_progress">进行中</option><option value="review">QA 待处理</option><option value="needs_attention">存在失败</option><option value="completed">已完成</option></select></label>
               <label class="task-search"><span>搜索任务</span><input id="taskSearch" placeholder="文件名或任务名称" /></label>
-              <button class="button secondary" id="refreshTasks">刷新列表</button>
             </div>
             <div class="task-summary" id="taskSummary"></div>
             <div class="task-list" id="taskList"><div class="empty-list">正在读取历史任务……</div></div>
@@ -326,7 +331,7 @@
               </div>
               <label class="drop-zone" id="dropZone" for="termFile">
                 <input id="termFile" type="file" accept=".xlsx,.csv,.xliff,.mqxliff" multiple hidden />
-                <span class="upload-mark">↑</span><strong id="filePrompt">拖入或点击选择双语资产文件</strong><small id="fileMeta">支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 20MB；先本地预检，再确认导入</small>
+                <span class="upload-mark">↑</span><strong id="filePrompt">拖入或点击选择双语资产文件</strong><small id="fileMeta">支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 32MB；先本地预检，再确认导入</small>
               </label>
               <div class="import-file-list" id="importFileList" hidden></div>
               <div class="smart-import-capabilities" aria-label="自动识别能力">
@@ -735,7 +740,7 @@
       <div class="dialog-card memory-import-card">
         <div class="dialog-head"><div><span class="card-kicker">IMPORT TM</span><h2>导入人工 TM</h2></div><button class="icon-button" type="button" data-close="memoryImportDialog" aria-label="关闭">×</button></div>
         <p class="panel-caption" id="memoryImportTarget">目标库：—</p>
-        <div class="task-toolbar"><label class="drop-zone compact"><input id="memoryFile" type="file" accept=".xliff,.mqxliff,.xlsx,.csv" multiple hidden /><strong>选择人工 TM 文件</strong><small>支持 XLSX / CSV / XLIFF / MQXLIFF，可多选，单个文件不超过 20MB</small></label><button class="button secondary" id="memoryImportButton" type="button" disabled>预检 TM</button></div>
+        <div class="task-toolbar"><label class="drop-zone compact"><input id="memoryFile" type="file" accept=".xliff,.mqxliff,.xlsx,.csv" multiple hidden /><strong>选择人工 TM 文件</strong><small>支持 XLSX / CSV / XLIFF / MQXLIFF，可多选，单个文件不超过 32MB</small></label><button class="button secondary" id="memoryImportButton" type="button" disabled>预检 TM</button></div>
         <div class="memory-import-files" id="memoryImportFiles" hidden></div>
         <label class="import-toggle memory-evidence-toggle"><input type="checkbox" id="memoryStyleEvidence" checked /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>作为风格学习证据</strong><small>勾选后这批人工 TM 同时进入风格证据池，攒够条数会参与风格蒸馏；取消勾选则只写目标 TM。</small></span></label>
         <div class="mapping-note" id="memoryImportNote">选择文件后会自动本地预检（不调用模型）；确认后才写入目标 TM，并自动接回当前项目中可唯一定位的原翻译轨迹。</div>

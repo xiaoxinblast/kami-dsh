@@ -26,7 +26,7 @@ test("只接受已知扩展名，拒绝路径穿越与超大文件", async () =>
   assert.equal(await readBatchOriginal({ dataRoot, relativePath: "../directus/.env" }), null, "不能读到存档目录之外");
   assert.equal(await readBatchOriginal({ dataRoot, relativePath: "other/b.txt" }), null);
   assert.equal(await readBatchOriginal({ dataRoot, relativePath: "" }), null);
-  await assert.rejects(() => saveBatchOriginal({ dataRoot, batchId: "b", filename: "a.xlsx", buffer: Buffer.alloc(21 * 1024 * 1024) }), /超过/u);
+  await assert.rejects(() => saveBatchOriginal({ dataRoot, batchId: "b", filename: "a.xlsx", buffer: Buffer.alloc(33 * 1024 * 1024) }), /超过/u);
   await assert.rejects(() => saveBatchOriginal({ dataRoot, batchId: "", filename: "a.xlsx", buffer: Buffer.from("x") }), /缺少批次 ID/u);
   await assert.rejects(() => saveBatchOriginal({ dataRoot, batchId: "b", filename: "a.xlsx", buffer: Buffer.alloc(0) }), /内容为空/u);
 });

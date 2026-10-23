@@ -57,8 +57,9 @@ test("记忆库支持批量选择文件导入，并可选择是否写入风格�
   assert.match(html, /id="memoryFile"[^>]+accept="\.xliff,\.mqxliff,\.xlsx,\.csv" multiple/u);
   assert.match(html, /id="memoryStyleEvidence" checked/u);
   assert.match(script, /state\.memoryImportFiles = \[\.\.\.event\.target\.files\]/u);
-  // 逐文件预检：进度按文件推进，单个文件坏了不影响其余文件。
-  assert.match(script, /for \(const \[index, file\] of files\.entries\(\)\)/u);
+  // 逐文件预检：进度按文件推进；单个文件坏了（含超限）不影响其余文件。
+  assert.match(script, /const importable = files\.filter\(\(file\) => !oversized\.has\(file\.name\)\);/u);
+  assert.match(script, /for \(const \[index, file\] of importable\.entries\(\)\)/u);
   assert.match(script, /本地预检识别 \$\{preview\.total\} 条双语 TM（来自 \$\{files\.length - failures\.length\} \/ \$\{files\.length\} 个文件/u);
   // 提交走后台任务，页面按任务进度显示进度条。
   // 提交走后台任务，并且带上"导入到哪个库"（库页行内导入的目标库）。

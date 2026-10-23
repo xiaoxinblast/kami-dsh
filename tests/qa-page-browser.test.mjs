@@ -112,7 +112,7 @@ test("译文质检：批次回放、文件质检、筛选与跳转", { skip: !pr
     assert.equal(await page.locator('#qaSourceTabs .qa-source-tab').count(), 3);
     // 批次下拉是切页之后异步拉的：等它真的出现再断言，别和接口抢时序。
     assert.match(await waitForText(page.locator("#qaBatchSelect"), /interrupted\.xlsx/u), /interrupted\.xlsx/u);
-    assert.match(await page.locator('[data-qa-panel="file"]').textContent(), /单文件 ≤ 20MB/u);
+    assert.match(await page.locator('[data-qa-panel="file"]').textContent(), /单文件 ≤ 32MB/u);
     assert.equal(await page.locator("#primaryAction").textContent(), "查看质检结果", "顶部按钮要跟着来源走");
 
     // ① 批次回放

@@ -6,7 +6,7 @@ import { applyColumnMapping, buildSpreadsheetSnapshot, describeSpreadsheetAnalys
 import { exportXliffDocument, prepareXliffDocument } from "./xliff-document.mjs";
 
 const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".docx", ".xlsx", ".csv", ".xliff", ".mqxliff"]);
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const MAX_SEGMENTS = 2_000;
 
 function fail(message, statusCode = 400) {
@@ -20,7 +20,7 @@ function decodeBase64(value) {
   if (!compact) fail("文件内容为空");
   const buffer = Buffer.from(compact, "base64");
   if (!buffer.length) fail("文件内容无法读取");
-  if (buffer.length > MAX_FILE_BYTES) fail("文件超过 20MB 限制", 413);
+  if (buffer.length > MAX_FILE_BYTES) fail(`文件超过 ${Math.round(MAX_FILE_BYTES / (1024 * 1024))}MB 限制`, 413);
   return buffer;
 }
 

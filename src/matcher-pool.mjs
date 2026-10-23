@@ -27,15 +27,26 @@ export function createMatcherPool({ workerUrl = new URL("./matcher-worker.mjs", 
     return token;
   };
 
-  const failPending = (error) => {
+  // 单 worker 串行执行：并发请求先排队，超时从"真的开始执行"算起。
+  // 以前的实现每个请求入队就开始计时，worker 慢时后面的请求会先超时，
+  // 触发同步回退把主线程堵死。
+  let queue = [];
+  let active = null;
+  let dispatchNext = () => {};
+
+  const failAll = (error) => {
     const entries = [...pending.values()];
     pending.clear();
     sentAssets.clear();
     worker = null;
+    active = null;
     for (const entry of entries) {
       clearTimeout(entry.timer);
       entry.reject(error);
     }
+    const queued = queue;
+    queue = [];
+    for (const job of queued) job.reject(error);
   };
 
   const ensureWorker = () => {
@@ -48,44 +59,70 @@ export function createMatcherPool({ workerUrl = new URL("./matcher-worker.mjs", 
       if (!entry) return;
       pending.delete(message.id);
       clearTimeout(entry.timer);
+      active = null;
       if (message.error) entry.reject(new Error(message.error));
       else entry.resolve(message.matches);
+      dispatchNext();
     });
-    worker.on("error", (error) => failPending(error instanceof Error ? error : new Error(String(error))));
-    worker.on("exit", (code) => failPending(new Error(`matcher worker exited (${code})`)));
+    worker.on("error", (error) => failAll(error instanceof Error ? error : new Error(String(error))));
+    worker.on("exit", (code) => failAll(new Error(`matcher worker exited (${code})`)));
     return worker;
+  };
+
+  dispatchNext = () => {
+    if (active || !queue.length) return;
+    const job = queue.shift();
+    active = job;
+    job.timer = setTimeout(() => {
+      // 这一条确实执行超时：重建 worker，避免后续请求永远排在坏进程后面。
+      const stuck = worker;
+      worker = null;
+      sentAssets.clear();
+      active = null;
+      pending.delete(job.id);
+      stuck?.terminate?.().catch?.(() => {});
+      job.reject(new Error("matcher worker timeout"));
+      dispatchNext();
+    }, timeoutMs);
+    pending.set(job.id, { resolve: job.resolve, reject: job.reject, timer: job.timer });
+    try {
+      const message = { type: "match", id: job.id, text: job.text, options: job.options, assetsToken: job.assetsToken };
+      if (!sentAssets.has(job.assetsToken)) {
+        message.assets = job.assets;
+        sentAssets.add(job.assetsToken);
+      }
+      ensureWorker().postMessage(message);
+    } catch (error) {
+      pending.delete(job.id);
+      clearTimeout(job.timer);
+      active = null;
+      job.reject(error);
+      dispatchNext();
+    }
   };
 
   return {
     match(text, assets, options = {}) {
       return new Promise((resolve, reject) => {
-        const id = ++nextId;
-        const assetsToken = tokenFor(assets);
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          reject(new Error("matcher worker timeout"));
-        }, timeoutMs);
-        pending.set(id, { resolve, reject, timer });
-        try {
-          const message = { type: "match", id, text, options, assetsToken };
-          if (!sentAssets.has(assetsToken)) {
-            message.assets = assets;
-            sentAssets.add(assetsToken);
-          }
-          ensureWorker().postMessage(message);
-        } catch (error) {
-          pending.delete(id);
-          clearTimeout(timer);
-          reject(error);
-        }
+        const job = { id: ++nextId, text, assets, options, assetsToken: tokenFor(assets), resolve, reject, timer: null };
+        queue.push(job);
+        dispatchNext();
       });
     },
     async close() {
       const current = worker;
       worker = null;
       sentAssets.clear();
-      for (const entry of pending.values()) clearTimeout(entry.timer);
+      const error = new Error("matcher worker closed");
+      for (const entry of pending.values()) {
+        clearTimeout(entry.timer);
+        entry.reject(error);
+      }
       pending.clear();
+      const queued = queue;
+      queue = [];
+      active = null;
+      for (const job of queued) job.reject(error);
       await current?.terminate().catch(() => {});
     }
   };

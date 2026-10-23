@@ -444,3 +444,72 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
     styleProfile: styleProfile ? { id: styleProfile.id || "", name: styleProfile.name || "", version: styleProfile.version || 1 } : null
   };
 }
+
+/**
+ * 待核对项的 AI 终审：规则/模型已经报出、但没有证据可自动统一的条目，
+ * 交给模型逐条判断"要不要改、改成什么"（只允许短语级替换，不重写整段）。
+ */
+export function adjudicationMessages({ filename = "", locale = "zh-CN", purpose = "general", findings = [], segments = [] } = {}) {
+  const byId = new Map((Array.isArray(segments) ? segments : []).map((segment) => [String(segment.id || ""), segment]));
+  const items = (Array.isArray(findings) ? findings : []).map((finding, index) => ({
+    index,
+    type: finding?.type || "",
+    detail: clip(finding?.detail, 300),
+    suggestion: clip(finding?.suggestion, 200),
+    ids: (finding?.ids || []).map(String),
+    segments: (finding?.ids || []).map((id) => {
+      const segment = byId.get(String(id));
+      return segment ? { id: String(id), source: clip(segment.source, 200), translation: clip(segment.translation, 200) } : null;
+    }).filter(Boolean).slice(0, 8)
+  }));
+  return [
+    {
+      role: "system",
+      content: [
+        "你是本地化项目的终审编辑。输入是一批「跨条目不一致」问题：规则或模型已经发现，但没有术语库/主 TM/文件内多数等证据可自动统一。",
+        "请逐条判断：改不改？改成什么？",
+        "只允许做短语级替换（from 必须是某段译文里真实出现的连续子串，target 是统一后的写法）；不要重写整段，不要改占位符、数字、URL、格式标记。",
+        "拿不准就 keep。保留人工已经采纳的段落不动。",
+        '只输出紧凑 JSON：{"decisions":[{"index":0,"verdict":"unify","from":"旧写法","target":"新写法","ids":["段落id"],"reason":"一句话依据"},{"index":1,"verdict":"keep","reason":"为什么不用改"}]}。',
+        "ids 省略或为空表示这条 finding 的全部段落；verdict 只能是 unify 或 keep。"
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: [
+        `文件：${clip(filename, 120) || "(未命名)"}｜语言：${locale}｜内容类型：${purpose}`,
+        `待裁决的 ${items.length} 条：`,
+        JSON.stringify({ decisions: [] , findings: items })
+      ].join("\n")
+    }
+  ];
+}
+
+/** 解析 AI 裁决；只接受本批 finding 序号和本批段落 id，避免模型改到别处。 */
+export function parseAdjudicationDecisions(content, { validIndexes = [], validIds = [] } = {}) {
+  const payload = extractJsonObject(content);
+  const allowedIndexes = new Set((Array.isArray(validIndexes) ? validIndexes : []).map(Number));
+  const allowedIds = new Set((Array.isArray(validIds) ? validIds : []).map(String));
+  const decisions = [];
+  for (const item of Array.isArray(payload.decisions) ? payload.decisions : []) {
+    const index = Number(item?.index);
+    if (!allowedIndexes.has(index)) continue;
+    const verdict = item?.verdict === "unify" ? "unify" : "keep";
+    const from = clip(item?.from, 120);
+    const target = clip(item?.target, 120);
+    if (verdict === "unify" && (!from || !target)) {
+      decisions.push({ index, verdict: "keep", from: "", target: "", ids: [], reason: "模型没有给出可执行的替换写法" });
+      continue;
+    }
+    const ids = [...new Set((Array.isArray(item?.ids) ? item.ids : []).map(String).filter((id) => allowedIds.has(id)))];
+    decisions.push({
+      index,
+      verdict,
+      from: verdict === "unify" ? from : "",
+      target: verdict === "unify" ? target : "",
+      ids,
+      reason: clip(item?.reason, 240)
+    });
+  }
+  return decisions;
+}

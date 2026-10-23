@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import vm from "node:vm";
 import { retryServerBatchQa } from "../src/batch-runner.mjs";
-import { buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows, summarizeBatchSegments } from "../public/batch-status.js";
+import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows, summarizeBatchSegments } from "../public/batch-status.js";
 import { runTaskPool } from "../src/task-pool.mjs";
 import { surveyPairs, normalizeSurveyTerms } from "../src/term-survey.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
@@ -116,7 +116,7 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
     createBackgroundTask: async (input) => { const task = { ...input, id: `task-${tasks.size}`, status: "in_progress", createdAt: new Date().toISOString() }; tasks.set(task.id, task); return task; },
     updateBackgroundTaskProgress: async (id, update) => tasks.set(id, { ...tasks.get(id), ...update, updatedAt: new Date().toISOString() }),
     beginBackgroundRun: (id) => { const control = { cancelRequested: false }; controls.set(id, control); return control; }, endBackgroundRun: (id) => controls.delete(id),
-    retryServerBatchQa, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows,
+    retryServerBatchQa, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows,
     runServerBatch: async (_id, options) => { await options.finalize(run); await options.review(run); return run; },
     runEvolutionReview: async () => { signalReview(); await reviewGate; }, getProject: async () => ({ settings: {} }), classify: async () => ({ contentType: "general" }),
     workbenchSessionMonitor: null, setInterval: () => ({ unref: () => {} }), clearInterval: () => {},

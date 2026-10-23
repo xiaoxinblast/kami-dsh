@@ -81,7 +81,8 @@ test("翻译与任务中心展示阶段进度、失败原因和 QA 批量重试�
     const task = page.locator("#taskList .task-row");
     assert.equal(await task.count(), 1);
     assert.ok((await task.locator(".task-title > strong").boundingBox()).width > 100, "新增重试按钮不能挤掉任务文件名");
-    assert.match(await task.textContent(), /本轮已结束 · 1 段失败/u);
+    assert.match(await task.textContent(), /生成质量报告/u);
+    assert.match(await task.textContent(), /1 段失败/u);
     assert.match(await task.textContent(), /AIQA 未完成 1 段/u);
     assert.match(await task.textContent(), /1 \/ 4 片/u);
     assert.match(await task.textContent(), /3 \/ 5 片/u);
@@ -91,7 +92,7 @@ test("翻译与任务中心展示阶段进度、失败原因和 QA 批量重试�
     await task.locator('[data-action="open-task"]').click();
     await page.waitForSelector("#batchWorkflow:not([hidden])");
     assert.match(await page.locator("#primaryAction").textContent(), /重试失败句段（1）/u);
-    assert.match(await page.locator("#batchProgressText").textContent(), /本轮翻译已结束/u);
+    assert.match(await page.locator("#batchProgressText").textContent(), /正在生成质量报告/u);
     assert.match(await page.locator("#batchWorkflowStages").textContent(), /1 \/ 4 片/u);
     assert.match(await page.locator("#batchWorkflowStages").textContent(), /3 \/ 5 片/u);
     await shot(page, "batch-workflow-progress");

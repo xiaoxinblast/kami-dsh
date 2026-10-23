@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import v8 from "node:v8";
 import { ACTIVE_LOCALES, CONTENT_TAGS, CONTENT_TYPES, LOCALES, assertActiveLocale, assertLocale } from "./src/config.mjs";
 import { classifyContent, descriptorFromContext, inferContentTags, resolveDomain } from "./src/classifier.mjs";
@@ -16,7 +17,8 @@ import { resolveSegmentMatches } from "./src/batch-matches.mjs";
 import { createTokenCache } from "./src/token-cache.mjs";
 import { settleReadSections } from "./src/read-sections.mjs";
 import { createMatcherPool } from "./src/matcher-pool.mjs";
-import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, resolveSurveyTargetsWithModel, reviewGateFailuresWithModel, surveyTermsWithModel, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig, learnWorkingTermsWithModel } from "./src/provider.mjs";
+import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel,
+  adjudicateConsistencyFindingsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, resolveSurveyTargetsWithModel, reviewGateFailuresWithModel, surveyTermsWithModel, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig, learnWorkingTermsWithModel } from "./src/provider.mjs";
 import { formalTermKeys, mergeWorkingAssets, normalizeWorkingTerms } from "./src/working-glossary.mjs";
 import { buildPatternKey } from "./src/pattern-memory.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
@@ -60,8 +62,8 @@ import { assessTranslationRisk, decideQualityRoute, qualityThresholdForRisk, sel
 import { QUALITY_TIERS, describeTierStrength, planQualityTier, resolveManualTier, selectQualityTier } from "./src/quality-tier.mjs";
 import { CONTEXT_BRIEF_MIN_SEGMENTS, contextBriefEntries, mergeContextBrief, purposeForIndex, splitContextChunks, summarizeContextBrief } from "./src/context-brief.mjs";
 import { CONSISTENCY_EVIDENCE_LIMITS, buildQualityReport, deterministicConsistencyFindings, mergeConsistencyFindings, splitConsistencyChunks } from "./src/consistency-check.mjs";
-import { REPAIR_EVIDENCE_LABELS, REPAIR_SKIP_REASONS, planConsistencyRepairs, summarizeSourceGroups } from "./src/consistency-repair.mjs";
-import { normalizeSource } from "./src/text.mjs";
+import { REPAIR_EVIDENCE_LABELS, REPAIR_SKIP_REASONS, applyDeterministicReplacement, planConsistencyRepairs, summarizeSourceGroups } from "./src/consistency-repair.mjs";
+import { extractProtectedTokens, normalizeSource } from "./src/text.mjs";
 import { deriveTermCandidatesFromHumanFinal, MEMORY_PURPOSES } from "./src/asset-governance.mjs";
 import { buildReviewReceipt, normalizeReviewDecision } from "./src/review-receipt.mjs";
 import { createRegressionCandidateFromQaCase, decideRegressionCandidate, normalizeGoldSet, normalizeRegressionSuite } from "./src/gold-regression.mjs";
@@ -76,7 +78,7 @@ import { WorkbenchSessionMonitor, shutdownDockerDesktop } from "./src/workbench-
 import { BACKGROUND_TASK_STALE_MS, interruptedTaskPatch, selectStaleRunningTasks } from "./src/background-task-sweep.mjs";
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 import { runServerBatch, retryServerBatchQa } from "./src/batch-runner.mjs";
-import { buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows } from "./public/batch-status.js";
+import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows } from "./public/batch-status.js";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public", import.meta.url));
 const PROJECT_ROOT = fileURLToPath(new URL("./", import.meta.url));
@@ -86,8 +88,8 @@ const AUTO_QA_MODEL_ALIGNMENT_SEGMENT_LIMIT = 24;
 const MAX_BODY_BYTES = 15 * 1024 * 1024;
 /** 导入类请求要把多个文件按 base64 塞进一个 JSON，额度单独放宽。 */
 const IMPORT_BODY_BYTES = 48 * 1024 * 1024;
-/** 所有导入入口统一的单文件上限（前端同值，两边都要有）。 */
-const IMPORT_FILE_BYTES = 20 * 1024 * 1024;
+/** 所有导入入口统一的单文件上限（前端同值，两边都要有）。base64 后约 43MB，仍在上面的总额度内。 */
+const IMPORT_FILE_BYTES = 32 * 1024 * 1024;
 /** TM 预检只把前 N 条样例发给浏览器，其余按页取：8 万行表格有 8 万条候选。 */
 const TM_PREVIEW_SAMPLE = 200;
 const TERM_AI_CONCURRENCY = 5;
@@ -130,6 +132,8 @@ const workingGlossaryOverrides = new Map();
  * 已写入的数据完整保留，剩下的稍后可以用同一个批次「继续导入」。
  */
 const runningBackgroundTasks = new Map();
+/** 已排进参考资料串行队列、还没轮到执行的任务：清扫不能把它们当"长时间没进度"杀掉。 */
+const queuedReferenceTasks = new Set();
 const CANCELLED = Symbol("taskCancelled");
 
 function beginBackgroundRun(taskId) {
@@ -238,10 +242,24 @@ function backgroundTaskHoldId(id) {
  */
 async function sweepStaleBackgroundTasks({ reason = "startup" } = {}) {
   const tasks = await listBackgroundTasks({ limit: 500 }).catch(() => []);
-  const stale = selectStaleRunningTasks(tasks, { now: Date.now(), staleMs: BACKGROUND_TASK_STALE_MS });
+  // 本进程正在推进的任务（哪怕一次模型调用超过 5 分钟）和排队中的参考资料任务都不能算陈旧。
+  const stale = selectStaleRunningTasks(tasks, { now: Date.now(), staleMs: BACKGROUND_TASK_STALE_MS })
+    .filter((task) => !runningBackgroundTasks.has(task.id) && !queuedReferenceTasks.has(String(task.id)));
   for (const task of stale) {
     await updateBackgroundTaskProgress(task.id, interruptedTaskPatch(task)).catch(() => {});
     workbenchSessionMonitor?.release(backgroundTaskHoldId(task.id));
+    // 参考资料被清扫时也要把资料状态从 indexing 收尾，否则文件夹又会被"正在导入"拦住。
+    if (task.type === "reference_ingest" && task.payload?.documentId) {
+      const document = await getReferenceDocument(String(task.payload.documentId)).catch(() => null);
+      if (document && document.status === "indexing") {
+        const hasChunks = Number(document.chunkCount) > 0;
+        await updateReferenceDocument(document.id, {
+          status: hasChunks ? "ready" : "failed",
+          error: hasChunks ? "" : "导入被服务中断，请重新导入",
+          ingestReport: { ...(document.ingestReport || {}), stage: hasChunks ? "ready" : "failed" }
+        }).catch(() => {});
+      }
+    }
   }
   if (stale.length) {
     logInfo("已把长时间没有进度的后台任务标记为中断", { reason, count: stale.length, ids: stale.map((task) => task.id) });
@@ -853,20 +871,58 @@ async function saveReferencePlan(document, plan, stage) {
   });
 }
 
-/** 同一份资料只能有一个写回者：覆盖重导时排队，旧任务不能把新结果覆盖掉。 */
-const referenceIngestQueues = new Map();
+/**
+ * 参考资料导入一次只跑一份：PDF 预扫是同步 CPU 重活，多份并发会把事件循环占满，
+ * 整个工作台连 /api/health 都会超时（真机踩过：3 个大 PDF 同时预扫）。
+ */
+let referenceIngestQueue = Promise.resolve();
+let referenceIngestQueued = 0;
 
 function enqueueReferenceIngest({ taskId, documentId, visionMode = "all", autoScan = false }) {
-  const previous = referenceIngestQueues.get(String(documentId)) || Promise.resolve();
-  const next = previous
+  queuedReferenceTasks.add(String(taskId));
+  referenceIngestQueued += 1;
+  const ahead = referenceIngestQueued - 1;
+  if (ahead > 0) {
+    updateBackgroundTaskProgress(taskId, { progress: { phase: "queued", message: `排队中：前面还有 ${ahead} 份参考资料在导入`, percent: 1 } }).catch(() => {});
+  }
+  const next = referenceIngestQueue
     .catch(() => {})
-    .then(() => runReferenceIngestInBackground({ taskId, documentId, visionMode, autoScan }))
+    .then(() => {
+      queuedReferenceTasks.delete(String(taskId));
+      referenceIngestQueued = Math.max(0, referenceIngestQueued - 1);
+      return runReferenceIngestInBackground({ taskId, documentId, visionMode, autoScan });
+    })
     .catch((error) => console.error("[Kami] 参考资料导入失败", error))
-    .finally(() => {
-      if (referenceIngestQueues.get(String(documentId)) === next) referenceIngestQueues.delete(String(documentId));
-    });
-  referenceIngestQueues.set(String(documentId), next);
+    .finally(() => queuedReferenceTasks.delete(String(taskId)));
+  referenceIngestQueue = next;
   return next;
+}
+
+/** 预扫放进 worker：pdf.js 对异常字体会长时间占满主线程，放独立线程并加超时，工作台不再被拖死。 */
+const REFERENCE_PLAN_TIMEOUT_MS = 180_000;
+
+function planReferenceExtractionIsolated({ filename, path }) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./src/reference-plan-worker.mjs", import.meta.url), {
+      workerData: { filename, path },
+      resourceLimits: { maxOldGenerationSizeMb: 2_048 }
+    });
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.terminate().catch(() => {});
+      fn(value);
+    };
+    const timer = setTimeout(() => finish(reject, Object.assign(new Error(`预扫超过 ${Math.round(REFERENCE_PLAN_TIMEOUT_MS / 1000)} 秒，已中止（文件可能含异常字体或超大页面）；可先转成文本/图片再导入`), { statusCode: 422 })), REFERENCE_PLAN_TIMEOUT_MS);
+    worker.once("message", (message) => {
+      if (message?.ok) finish(resolve, message.plan);
+      else finish(reject, new Error(message?.error || "参考资料预扫失败"));
+    });
+    worker.once("error", (error) => finish(reject, error));
+    worker.once("exit", (code) => { if (!settled && code !== 0) finish(reject, new Error(`参考资料预扫进程异常退出（code ${code}）`)); });
+  });
 }
 
 /**
@@ -947,7 +1003,9 @@ async function startReferenceUpload({ body, params, req }) {
     title: `参考资料导入：${filename}`,
     locale: ACTIVE_LOCALES[0],
     projectId,
-    progress: { phase: "queued", message: "等待预扫", percent: 1 }
+    progress: { phase: "queued", message: "等待预扫", percent: 1 },
+    // 带 documentId：中断收尾时要能把资料状态从 indexing 里救出来。
+    payload: { documentId: document.id, groupId: String(read("uploadGroupId") || "").slice(0, 64) }
   });
   const rawVision = body?.vision ?? params?.get("vision");
   const visionMode = String(rawVision).trim().toLowerCase() === "none" || rawVision === false ? "none" : "all";
@@ -967,7 +1025,7 @@ async function runReferenceIngestInBackground({ taskId, documentId, visionMode =
     let plan = document.ingestReport?.plan || null;
     if (!plan) {
       await updateBackgroundTaskProgress(taskId, { progress: { phase: "planning", message: "正在预扫页数与图片张数", percent: 3, completed: 0, total: 0 } });
-      plan = await planReferenceExtraction({ filename: document.sourceFile || document.name, path: join(DATA_ROOT, String(document.ingestReport?.sourcePath || "")) });
+      plan = await planReferenceExtractionIsolated({ filename: document.sourceFile || document.name, path: join(DATA_ROOT, String(document.ingestReport?.sourcePath || "")) });
       document = await saveReferencePlan(document, plan, "planning");
     }
     const vision = visionMode !== "none";
@@ -1027,6 +1085,16 @@ async function runReferenceIngestInBackground({ taskId, documentId, visionMode =
       progress: { phase: cancelled ? "cancelled" : "failed", message: error.message, percent: 100 },
       payload: { error: error.message }
     }).catch(() => {});
+    // 失败/中断的资料不能一直停在 indexing：那会让整份文件夹都删不掉。
+    const latest = await getReferenceDocument(documentId).catch(() => null);
+    if (latest && latest.status === "indexing") {
+      const hasChunks = Number(latest.chunkCount) > 0;
+      await updateReferenceDocument(latest.id, {
+        status: hasChunks ? "ready" : "failed",
+        error: String(error.message || error).slice(0, 500),
+        ingestReport: { ...(latest.ingestReport || {}), stage: hasChunks ? "ready" : "failed" }
+      }).catch(() => {});
+    }
   } finally {
     endBackgroundRun(taskId, control);
   }
@@ -1417,7 +1485,7 @@ async function getMemoryCandidates(locale, options = {}) {
 /**
  * 翻译主路径的术语匹配交给 worker：5,800+ 条术语、长句滑窗一次要数秒，
  * 放在主线程会让批次进度、/api/health 和 UI 轮询全部排队。
- * worker 失败/超时时回退同步匹配，保证译文不受影响。
+ * worker 失败/超时时只回退"精确命中"匹配：术语量大时同步模糊匹配会堵死事件循环。
  */
 const matcherPool = createMatcherPool();
 
@@ -1425,8 +1493,14 @@ async function matchTermsForTranslation(text, assets, options) {
   try {
     return await matcherPool.match(text, assets, options);
   } catch (error) {
-    console.warn(`[Kami] 术语匹配 worker 失败，回退同步：${error.message}`);
-    return matchTerms(text, assets, options);
+    // 术语量涨到几万条后，同步模糊匹配一次要几十秒，会把事件循环堵死（/api/health 都超时）。
+    // 回退只取精确命中：仍然能用上术语库，但不再做滑窗模糊/智能匹配。
+    console.warn(`[Kami] 术语匹配 worker 失败，回退精确匹配：${error.message}`);
+    try {
+      return matchTerms(text, assets, { ...options, exactOnly: true });
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -1877,7 +1951,10 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
  * "继续导入"改读本地预检缓存（`data/runtime/tm-preview`，7 天）。
  */
 async function runTmImportInBackground({ taskId, projectId, filename, batchId, candidates, styleEvidence, sourceFileType, tmLibraryId = "", requestedLocale = "zh-CN" }) {
-  const auditBatchId = String(batchId || randomUUID());
+  // batchId 可能是多文件预检缓存号的逗号列表，只能拿来读/清缓存；
+  // 写库必须用单独的新批次号，否则 batch_id / 审计主键会因超长被 Directus 拒绝。
+  const previewBatchIds = String(batchId || "");
+  const auditBatchId = randomUUID();
   let progressWrites = Promise.resolve();
   const control = beginBackgroundRun(taskId);
   const shouldCancel = () => control.cancelRequested;
@@ -1889,7 +1966,7 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
   };
   try {
     // 批次号在建任务时就定下来，并立刻写进任务载荷：失败/重启后「继续导入」靠它找预检缓存。
-    await updateBackgroundTaskProgress(taskId, { payload: { batchId: auditBatchId, filename, tmLibraryId, resumable: true } }).catch(() => {});
+    await updateBackgroundTaskProgress(taskId, { payload: { batchId: previewBatchIds, auditBatchId, filename, tmLibraryId, resumable: true } }).catch(() => {});
     report({ phase: "importing", message: `开始写入主 TM：共 ${candidates.length} 条`, percent: 6, completed: 0, total: candidates.length });
     const result = await commitTermImport(
       { projectId, batchId: auditBatchId, filename, candidates, styleEvidence, tmLibraryId },
@@ -1908,7 +1985,7 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
       candidates,
       decisions: result.decisions
     });
-    await releasePreviewCaches(auditBatchId);
+    await releasePreviewCaches(previewBatchIds);
     await progressWrites;
     const summary = result.summary;
     await updateBackgroundTaskProgress(taskId, {
@@ -1921,7 +1998,8 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
         total: candidates.length
       },
       payload: {
-        batchId: auditBatchId,
+        batchId: previewBatchIds,
+        auditBatchId,
         filename,
         summary,
         skippedDetails: summary.skippedDetails || [],
@@ -1944,7 +2022,7 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
         total: candidates.length
       },
       // 预检缓存留着：任务中心的「继续导入」用它重跑（记忆/证据按原文去重，不会写重）。
-      payload: { batchId: auditBatchId, filename, error: error.message, resumable: true }
+      payload: { batchId: previewBatchIds, auditBatchId, filename, error: error.message, resumable: true }
     }).catch(() => {});
     reportImportProgress(taskId, { status: cancelled ? "needs_attention" : "failed", phase: cancelled ? "cancelled" : "failed", message: error.message, error: cancelled ? "" : error.message, percent: cancelled ? undefined : 100 });
     console.error(cancelled ? `[Kami] 人工 TM 导入已中断：${filename} · ${error.message}` : `[Kami] 人工 TM 导入失败：${filename} · ${error.message}`);
@@ -1991,12 +2069,19 @@ async function resolveTmImportCandidates(body = {}) {
     return { candidates, batchId: batchIds.join(","), sourceFileType };
   }
   if (body.batchId && !Array.isArray(body.candidates)) {
-    const batchId = String(body.batchId);
-    const stored = await readPreviewCandidates(batchId);
-    if (!stored) return { candidates: [], error: "预检缓存已过期，请重新预检后再导入" };
+    // 多文件导入时缓存批次号是逗号列表（也用于"继续导入"）：逐个读回来合并。
+    // 不能整串当成一个批次号去读缓存，也不能拿它当写库的批次号（会超过字段长度）。
+    const batchIds = String(body.batchId).split(",").map((value) => value.trim()).filter(Boolean);
+    if (!batchIds.length) return { candidates: [], error: "TM 导入批次或候选无效" };
+    const candidates = [];
+    for (const batchId of batchIds) {
+      const stored = await readPreviewCandidates(batchId);
+      if (!stored) return { candidates: [], error: "预检缓存已过期，请重新预检后再导入" };
+      candidates.push(...applySelection(stored, deselectSet(body.deselected)));
+    }
     return {
-      candidates: applySelection(stored, deselectSet(body.deselected)),
-      batchId,
+      candidates,
+      batchId: batchIds.join(","),
       sourceFileType: String(body.sourceFileType || "")
     };
   }
@@ -2246,6 +2331,12 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
     skipCounts.set(reason, (skipCounts.get(reason) || 0) + 1);
     if (skipped.length < SKIPPED_DETAIL_LIMIT) skipped.push({ ...entry, reason });
   };
+  /** 跳过（重复/未选择）也要推进入库进度：否则整批都跳过时任务会一直显示 0 / N。 */
+  const reportImporting = () => {
+    if (done % TERM_WRITE_BATCH_SIZE === 0 || done === total) {
+      report({ phase: "importing", message: `正在入库：${done} / ${total}`, percent: 10 + Math.round((done / Math.max(total, 1)) * 70), completed: done, total });
+    }
+  };
   const skippedTotal = () => [...skipCounts.values()].reduce((sum, count) => sum + count, 0);
   const decisions = [];
   const trajectoryLinks = [];
@@ -2309,7 +2400,10 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
       const index = await styleEvidenceIndexFor(locale);
       let saved = [];
       try {
-        saved = await saveStyleEvidences(entries.map((entry) => entry.input), { index });
+        saved = await saveStyleEvidences(entries.map((entry) => entry.input), {
+          index,
+          onProgress: (update) => report({ phase: "evidence", message: `正在写风格证据：${update.completed} / ${update.total}`, percent: 86, completed: done, total })
+        });
       } catch (error) {
         for (const entry of entries) recordSkip({ source: entry.input.source, locale, reason: `风格证据写入失败：${error.message}` });
         continue;
@@ -2320,6 +2414,7 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
           recordSkip({ source: entry.input.source, locale, reason: result?.error || "风格证据写入失败" });
           return;
         }
+        if (result.unchanged) return;
         const scopeKey = `${locale}\u0000${entry.input.contentType}\u0000${entry.input.domain}`;
         const group = styleEvidenceByScope.get(scopeKey) || [];
         group.push({ ...entry.candidate, evidenceId: result.id });
@@ -2339,7 +2434,9 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
     for (const [locale, entries] of groups.entries()) {
       let saved = [];
       try {
-        saved = await saveMemories(locale, entries.map((entry) => entry.input));
+        saved = await saveMemories(locale, entries.map((entry) => entry.input), {
+        onProgress: (update) => report({ phase: "flushing", message: `正在写入翻译记忆：${update.completed} / ${update.total}`, percent: 84, completed: done, total })
+      });
       } catch (error) {
         for (const entry of entries) {
           entry.decision.status = "rejected";
@@ -2352,6 +2449,12 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
         if (!result?.id) {
           entry.decision.status = "rejected";
           recordSkip({ source: entry.input.source, locale, reason: result?.error || "写入翻译记忆失败" });
+          continue;
+        }
+        if (result.unchanged) {
+          // 和库里完全一致的重复条目：不更新、不重写证据，按"已存在"计入跳过。
+          entry.decision.status = "rejected";
+          recordSkip({ source: entry.input.source, locale, reason: "已存在相同译本" });
           continue;
         }
         imported.push({ id: result.id, source: entry.input.source, target: entry.input.target, locale, assetType: "memory", contentType: entry.input.contentType, domain: entry.input.domain });
@@ -2403,6 +2506,8 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
     if (!candidate.selected || candidate.existing || candidate.decision === "excluded") {
       recordSkip({ source: candidate.source, locale: candidate.locale, reason: candidate.existing ? "已存在" : "未选择" });
       decisions.push(decision);
+      done += 1;
+      reportImporting();
       continue;
     }
     try {
@@ -2477,12 +2582,16 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
         if (index.pairs.has(pairKey)) {
           recordSkip({ source, locale, reason: "已存在相同对照" });
           decisions.push(decision);
+          done += 1;
+          reportImporting();
           continue;
         }
         const existingTargets = index.sourcesWithTargets.get(sourceKey) || [];
         if (existingTargets.length) {
           recordSkip({ source, locale, reason: `库内已有译法：${existingTargets[0]}` });
           decisions.push(decision);
+          done += 1;
+          reportImporting();
           continue;
         }
         // 先记进索引，同一批里后面重复的原文就会按"库内已有译法"跳过，
@@ -2511,10 +2620,9 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
       decisions.push(decision);
     }
     done += 1;
-    if (done % TERM_WRITE_BATCH_SIZE === 0 || done === total) {
-      report({ phase: "importing", message: `正在入库：${done} / ${total}`, percent: 10 + Math.round((done / Math.max(total, 1)) * 70), completed: done, total });
-    }
+    reportImporting();
   }
+  report({ phase: "finalizing", message: "正在收尾：写完剩余的翻译记忆与风格证据", percent: 85, completed: done, total });
   await flushMemories();
   await flushEvidence();
   await flushTerms();
@@ -3601,6 +3709,84 @@ function annotateConsistencyFindings(findings, repair, verification) {
  * 模型只报漂移与候选写法，统一成哪个由证据定案（见 src/consistency-repair.mjs）。
  * 结果写回批次记录，供批次页与任务中心查看。
  */
+/**
+ * 规则/模型发现、但没有证据可自动统一的问题（就是把报告里的"待核对"），
+ * 再交给模型终审一次：能确定改法的做短语级替换，拿不准的写进"AI 判断保留"。
+ */
+async function adjudicateRemainingFindings({ run, segments, findings, repair, assets, taskId = "" }) {
+  const report = taskProgressReporter(taskId);
+  const repairedIndexes = new Set((repair.changed || []).map((change) => change.findingIndex));
+  const unresolved = [];
+  for (const [index, finding] of findings.entries()) {
+    if (repairedIndexes.has(index)) continue;
+    if (!Array.isArray(finding.ids) || !finding.ids.length) continue;
+    unresolved.push(index);
+  }
+  if (!unresolved.length) return { segments, repair, decisions: [] };
+  const budget = Math.max(0, Number(getSettings().quality?.consistencyRepairMaxSegments ?? 20) - (repair.changed?.length || 0));
+  if (!budget) return { segments, repair, decisions: [] };
+  const inputs = unresolved.slice(0, 12).map((index) => findings[index]);
+  report({ phase: "adjudicating", message: `AI 终审待核对项：0 / ${inputs.length} 条`, percent: 45, completed: 0, total: inputs.length });
+  let decisions = [];
+  try {
+    decisions = await adjudicateConsistencyFindingsWithModel({
+      filename: run.filename, locale: run.locale, purpose: run.contentType || "general",
+      findings: inputs,
+      segments: segments.map((segment) => ({ id: segment.id, source: segment.source, translation: segment.translation }))
+    });
+  } catch (error) {
+    console.error(`[Kami] 一致性 AI 终审失败：${error.message}`);
+    report({ phase: "adjudicating", message: `AI 终审失败，保留待核对：${error.message}` });
+    return { segments, repair, decisions: [] };
+  }
+  report({ phase: "adjudicating", message: `AI 终审完成：${decisions.length} 条结论，正在应用`, percent: 48, completed: decisions.length, total: inputs.length });
+  const updated = new Map(segments.map((segment) => [String(segment.id || ""), { ...segment }]));
+  let changed = 0;
+  for (const decision of decisions) {
+    const originalIndex = unresolved[decision.index];
+    const finding = findings[originalIndex];
+    if (!finding) continue;
+    if (decision.verdict === "keep") {
+      repair.skipped.push({ findingIndex: originalIndex, type: finding.type, ids: (finding.ids || []).map(String), reason: `AI 判断保留：${decision.reason || "无需统一"}` });
+      continue;
+    }
+    const targetIds = (decision.ids?.length ? decision.ids : finding.ids).map(String).slice(0, 12);
+    for (const id of targetIds) {
+      if (changed >= budget) {
+        repair.skipped.push({ findingIndex: originalIndex, type: finding.type, ids: [id], reason: REPAIR_SKIP_REASONS.limit });
+        continue;
+      }
+      const segment = updated.get(id);
+      if (!segment || segment.accepted === true) continue;
+      const before = String(segment.translation || "");
+      if (!before) continue;
+      const replaced = applyDeterministicReplacement({ translation: before, from: decision.from, to: decision.target, protectedTokens: extractProtectedTokens(segment.source) });
+      let after = replaced.ok ? replaced.value : "";
+      const method = replaced.ok ? "replace" : "revise";
+      if (!after) {
+        try {
+          after = await reviseSegmentForConsistency({ run, segment, assets, source: decision.from || segment.source || "", target: decision.target, reason: "AI 终审" });
+        } catch (error) {
+          repair.skipped.push({ findingIndex: originalIndex, type: finding.type, ids: [id], reason: `AI 定向修订失败：${error.message}` });
+          continue;
+        }
+      }
+      if (!after || after === before) {
+        repair.skipped.push({ findingIndex: originalIndex, type: finding.type, ids: [id], reason: REPAIR_SKIP_REASONS.no_variant });
+        continue;
+      }
+      updated.set(id, { ...segment, translation: after });
+      repair.changed.push({
+        findingIndex: originalIndex, type: finding.type, segmentId: id, before, after, method,
+        source: decision.from, target: decision.target,
+        evidence: { kind: "ai_judgement", ref: "AI 终审", note: decision.reason }
+      });
+      changed += 1;
+    }
+  }
+  return { segments: segments.map((segment) => updated.get(String(segment.id || "")) || segment), repair, decisions };
+}
+
 async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
   const run = await getBatchRun(batchId);
   if (!run) throw new Error("未找到这条翻译任务");
@@ -3680,6 +3866,12 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
   const modelFindings = mergeConsistencyFindings(results.filter((result) => result.status === "fulfilled").map((result) => result.value));
   const merged = [...deterministic, ...modelFindings];
   const repaired = await applyConsistencyRepairs({ run, segments, findings: merged, assets, taskId });
+  // 剩下"待核对"的项再让 AI 终审一次：能改的按短语替换改掉，改完再出报告。
+  // 自动统一被关闭、或有人工回填的批次，终审也必须一起停下。
+  if (!repaired.repair.blocked) {
+    const adjudicated = await adjudicateRemainingFindings({ run, segments: repaired.segments, findings: merged, repair: repaired.repair, assets, taskId });
+    repaired.segments = adjudicated.segments;
+  }
   const changedIds = new Set((repaired.repair.changed || []).map((change) => String(change.segmentId)));
   let verification = null;
   if (changedIds.size) {
@@ -4717,14 +4909,16 @@ async function apiHandler(req, res, url) {
       return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId, accepted: candidates.length, background: true, tmLibraryId });
     }
     // 同步路径（接口测试 / 小批量）：同样是"先写主 TM，成功后再写审计"。
+    // 写库用新的单一批次号：缓存批次号可能是逗号列表，直接写库会超长。
+    const auditBatchId = randomUUID();
     const result = await commitTermImport(
-      { ...body, projectId, batchId, candidates, tmLibraryId },
+      { ...body, projectId, batchId: auditBatchId, candidates, tmLibraryId },
       null,
       null,
       { skipQueueCompletion: true }
     );
     await saveTmImportAudit({
-      batchId,
+      batchId: auditBatchId,
       filename,
       fileType: body.sourceFileType || "tm",
       projectId,
@@ -6704,7 +6898,10 @@ async function apiHandler(req, res, url) {
     const knownTasks = new Map(backgroundTasks.map((task) => [task.id, task]));
     const batchTasks = await Promise.all(batches.map(async (item) => {
       try {
-        return { ...item, type: "batch", workflow: await loadBatchWorkflow(item, knownTasks) };
+        const workflow = await loadBatchWorkflow(item, knownTasks);
+        // 质量报告没跑完不算完成：任务中心把它留在「进行中」，并显示"生成质量报告"。
+        const reportPending = batchQualityReportPending(item, workflow);
+        return { ...item, type: "batch", status: reportPending ? "in_progress" : item.status, workflow };
       } catch (error) {
         console.warn(`[Kami] 批次 ${item.batchId} 的阶段进度读取失败：${error.message}`);
         return { ...item, type: "batch", workflow: null };
@@ -6726,6 +6923,13 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     assertActiveLocale(run.locale);
+    // 质量报告（含 AI 终审）没跑完不能导出：它可能还会改译文。
+    const exportWorkflow = await loadBatchWorkflow(run);
+    if (batchQualityReportPending(run, exportWorkflow)) {
+      const error = new Error("质量报告还在生成（含 AI 终审），完成后才能导出。进度可在任务中心查看。");
+      error.statusCode = 409;
+      throw error;
+    }
     /**
      * 导出方式（批次页与文件列表共用这一个后台端点，任务中心因此永远看得到导出进度）：
      *   in-place         写回原文件里该在的位置（翻译界面的「写回原文件」）
@@ -7050,6 +7254,10 @@ async function apiHandler(req, res, url) {
     const projectSettings = project?.settings || null;
     const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
     const segments = Array.isArray(body.segments) ? body.segments.filter((segment) => segment?.selected !== false) : [];
+    // 桌面端只传 id/原文/译文：术语匹配在这里逐段重算，4 万条术语时整段导出预检要几十秒。
+    // 批次库里已经存了翻译时的 matches，原文没改就复用；只有用户改了原文的段落才重算。
+    const savedRun = body.batchId ? await getBatchRun(String(body.batchId)).catch(() => null) : null;
+    const savedById = new Map((savedRun?.segments || []).map((segment) => [String(segment.id || ""), segment]));
     // 参考译例只算一次：原来每段都对整库（本项目 8000+ 条）跑一次排序，67 段就要几分钟，
     // 用户点"导出"后只看到按钮变灰、最后什么都等不到。文档级参考足够驱动导出前的规则检查。
     const documentText = segments.map((segment) => segment?.source || "").join("\n").slice(0, 8_000);
@@ -7080,7 +7288,15 @@ async function apiHandler(req, res, url) {
       : [];
     const issues = segments.flatMap((segment, index) => {
       // 导出预检与批次详情同一个坑：逐段重算术语匹配，几千条术语时整页会卡几十秒。
-      const matches = resolveSegmentMatches(segment, assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
+      // 优先复用批次里翻译时保存的 matches；原文改过或老批次没有存才重算（有缓存兜底）。
+      const savedMatches = (() => {
+        const saved = savedById.get(String(segment.id || ""));
+        if (!saved || String(saved.source || "") !== String(segment.source || "")) return null;
+        if (Array.isArray(saved.result?.matches)) return saved.result.matches;
+        return Array.isArray(segment.result?.matches) ? segment.result.matches : null;
+      })();
+      const withMatches = savedMatches ? { ...segment, result: { ...(segment.result || {}), matches: savedMatches } } : segment;
+      const matches = resolveSegmentMatches(withMatches, assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
       return runQa({ source: segment.source || "", translation: segment.translation || "", matches, translationReferences, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
     });
     const blocking = issues.filter((issue) => ["error", "critical"].includes(issue.severity));
@@ -7854,7 +8070,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
       title: `参考资料导入：${document.sourceFile || document.name}`,
       locale: ACTIVE_LOCALES[0],
       projectId: document.projectId,
-      progress: { phase: "queued", message: body.vision === false ? "等待解析（只读文字）" : "等待解析", percent: 1 }
+      progress: { phase: "queued", message: body.vision === false ? "等待解析（只读文字）" : "等待解析", percent: 1 },
+      payload: { documentId: id }
     });
     enqueueReferenceIngest({
       taskId: task.id,
@@ -8408,6 +8625,7 @@ try {
   await recoverInterruptedBatchWorkers();
   await recoverInterruptedImportTasks();
   await recoverLegacyReferenceIngestTasks();
+  await recoverInterruptedReferenceDocuments();
 } catch (error) {
   if (runtimeOptions().embedded) throw error;
   console.error(`[Kami] 启动失败\n${error.message}`);
@@ -8802,6 +9020,29 @@ async function recoverInterruptedImportTasks() {
     });
     console.log(`[Kami] 已标记被服务重启打断的后台导入：${task.title}`);
   }
+}
+
+/**
+ * 服务重启会打断参考资料导入：任务被标成"中断"，但资料本身可能还停在 indexing，
+ * 既显示成"正在导入"，也会让所在文件夹删不掉。启动时统一收尾成可重试状态。
+ */
+async function recoverInterruptedReferenceDocuments() {
+  let items = [];
+  try {
+    items = (await listReferenceDocuments({ status: "indexing", limit: 0 })).items;
+  } catch (error) {
+    console.warn(`[Kami] 扫描中断的参考资料失败：${error.message}`);
+    return;
+  }
+  for (const document of items) {
+    const hasChunks = Number(document.chunkCount) > 0;
+    await updateReferenceDocument(document.id, {
+      status: hasChunks ? "ready" : "failed",
+      error: hasChunks ? "" : "服务重启导致导入中断，请重新导入",
+      ingestReport: { ...(document.ingestReport || {}), stage: hasChunks ? "ready" : "failed" }
+    }).catch(() => {});
+  }
+  if (items.length) console.log(`[Kami] 已把 ${items.length} 份中断的参考资料标成可重试状态`);
 }
 
 /**

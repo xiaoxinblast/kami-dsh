@@ -3,7 +3,7 @@ import { runtimeOptions } from "./runtime-context.mjs";
 import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-qa.mjs";
 import { contextBriefMessages, parseContextBriefPart } from "./context-brief.mjs";
-import { consistencyMessages, parseConsistencyFindings } from "./consistency-check.mjs";
+import { adjudicationMessages, consistencyMessages, parseAdjudicationDecisions, parseConsistencyFindings } from "./consistency-check.mjs";
 import { parseTermAlign, parseTermSurvey, termAlignMessages, termSurveyMessages } from "./term-survey.mjs";
 import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
 import { parseModelJsonObject } from "./text.mjs";
@@ -2146,6 +2146,28 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
     } catch {
       throw new Error(`一致性检查模型返回格式无效：${error.message}`);
     }
+  }
+}
+
+/**
+ * 一致性核对后的 AI 终审：没有证据可自动统一的"待核对"项，交给模型逐条决定改不改。
+ * 只允许短语级替换；解析层会限制 finding 序号与段落 id，越界整条丢弃。
+ */
+export async function adjudicateConsistencyFindingsWithModel({ filename = "", locale = "zh-CN", purpose = "general", findings = [], segments = [], onUsage = null } = {}) {
+  const messages = adjudicationMessages({ filename, locale, purpose, findings, segments });
+  const requestOptions = { temperature: 0.1, timeoutMs: 120_000, maxTokens: 2_000, requestLabel: "一致性终审", responseFormat: { type: "json_object" }, onUsage };
+  const content = await chat(messages, configForRole("main"), requestOptions);
+  const validIndexes = findings.map((_, index) => index);
+  const validIds = (Array.isArray(segments) ? segments : []).map((segment) => String(segment.id || ""));
+  try {
+    return parseAdjudicationDecisions(content, { validIndexes, validIds });
+  } catch (error) {
+    const retry = await chat([
+      ...messages,
+      { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
+      { role: "user", content: '上一个回答不是可解析的严格 JSON。请只重新输出 {"decisions":[]} 这种形状的紧凑 JSON，不要 Markdown 或解释。' }
+    ], configForRole("main"), { temperature: 0, timeoutMs: 60_000, maxTokens: 2_000, requestLabel: "一致性终审格式重试", responseFormat: { type: "json_object" }, onUsage });
+    return parseAdjudicationDecisions(retry, { validIndexes, validIds });
   }
 }
 

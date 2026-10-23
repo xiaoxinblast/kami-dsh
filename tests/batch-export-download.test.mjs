@@ -81,7 +81,8 @@ test("后台生成 MQXLIFF 后可下载真实译文；原文件下载保持字�
     createBackgroundTask: async (input) => { const task = { ...input, id: `export-${tasks.size}`, status: "in_progress" }; tasks.set(task.id, task); return task; },
     updateBackgroundTaskProgress: async (id, update) => tasks.set(id, { ...tasks.get(id), ...update }),
     assertActiveLocale: () => {}, json, exportBatchDocument, saveBatchOriginal, readBatchOriginal,
-    DATA_ROOT: root, Buffer, readFile, writeFile, mkdir: (await import("node:fs/promises")).mkdir, join, extname, logInfo: () => {}, console
+    DATA_ROOT: root, Buffer, readFile, writeFile, mkdir: (await import("node:fs/promises")).mkdir, join, extname, logInfo: () => {}, console,
+    loadBatchWorkflow: async () => ({ qualityReport: { status: "not_started" } }), batchQualityReportPending: () => false
   });
   const server = createServer(async (req, res) => {
     try { await handler(req, res, new URL(req.url, "http://localhost")); }

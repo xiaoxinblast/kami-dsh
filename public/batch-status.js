@@ -48,22 +48,44 @@ export function buildBatchWorkflow(run, { qualityTask = null, termTask = null, q
   const qualityReport = followup(qualityTask, run.qualityReport ? { ...run.qualityReport.report, warning: run.qualityReport.warning } : null, autoConsistencyCheck, "质量报告");
   const termSurvey = followup(termTask, run.runnerOptions?.termSurvey, termSurveyEnabled, "术语普查");
   if (ended && termSurvey.status === "waiting" && ["waiting", "in_progress"].includes(qualityReport.status)) termSurvey.message = "等待质量报告 / 一致性修复结束后开始";
+  const translation = {
+    finished: ended,
+    status: running ? "in_progress" : paused ? "paused" : ended ? summary.failed || summary.pending || run.runnerOptions?.translationError ? "needs_attention" : "completed" : "not_started",
+    message: `${running ? "正在翻译" : paused ? "已暂停 / 中断" : ended ? "本轮翻译已结束" : "等待翻译"}：${summary.completed} / ${summary.total} 段${summary.failed ? ` · ${summary.failed} 段失败` : ""}${ended && summary.pending ? ` · ${summary.pending} 段未执行` : ""}${run.runnerOptions?.translationError ? ` · 执行异常：${run.runnerOptions.translationError}` : ""}`
+  };
+  const reportPending = batchQualityReportPending(run, { qualityReport });
+  // 质量报告（含 AI 终审）没跑完之前，这一批不算完成：任务中心/翻译页都显示"正在生成质量报告"，导出也挡着。
+  const overall = reportPending
+    ? { status: "in_progress", message: `翻译已结束，正在生成质量报告：${qualityReport.message || "处理中"}` }
+    : { status: translation.status, message: translation.message };
   return {
     batchId: run.batchId || "",
     summary,
-    translation: {
-      finished: ended,
-      status: running ? "in_progress" : paused ? "paused" : ended ? summary.failed || summary.pending || run.runnerOptions?.translationError ? "needs_attention" : "completed" : "not_started",
-      message: `${running ? "正在翻译" : paused ? "已暂停 / 中断" : ended ? "本轮翻译已结束" : "等待翻译"}：${summary.completed} / ${summary.total} 段${summary.failed ? ` · ${summary.failed} 段失败` : ""}${ended && summary.pending ? ` · ${summary.pending} 段未执行` : ""}${run.runnerOptions?.translationError ? ` · 执行异常：${run.runnerOptions.translationError}` : ""}`
-    },
+    translation,
+    overall,
     aiQa: qaTask?.status === "in_progress" ? taskStage(qaTask) : {
       status: summary.qaIncomplete ? "needs_attention" : summary.completed ? "completed" : "not_started",
       message: summary.qaIncomplete ? `${summary.qaIncomplete} 段 AIQA 未完成，可仅重试 QA${summary.qaReason ? `：${summary.qaReason}` : ""}${qaTask && taskStage(qaTask)?.status === "needs_attention" ? ` · ${taskStage(qaTask).message}` : ""}`
         : `${summary.qaChecked || 0} 段 AIQA 已检查${summary.ruleOnly ? ` · ${summary.ruleOnly} 段使用规则检查` : ""}`
     },
     qualityReport,
-    termSurvey
+    termSurvey: termSurvey
   };
+}
+
+/**
+ * 这一轮翻译是否还在等质量报告（含 AI 终审）。
+ * 老批次没有报告任务、也没有新的 translationCompletedAt，不能因此永远挡住导出。
+ */
+export function batchQualityReportPending(run, workflow) {
+  const stage = workflow?.qualityReport;
+  if (!stage) return false;
+  if (run?.runState && !["completed", "needs_attention"].includes(run.runState)) return false;
+  if (stage.status === "in_progress") return true;
+  if (stage.status !== "waiting") return false;
+  if (run?.runnerOptions?.workflowTasks?.qualityReport) return true;
+  const completedAt = Date.parse(String(run?.runnerOptions?.translationCompletedAt || ""));
+  return Number.isFinite(completedAt) && Date.now() - completedAt < 2 * 60_000;
 }
 
 export function mergeBatchTaskRows(batches, backgroundTasks) {

@@ -2,8 +2,9 @@ import { renderTranslationMarkup } from "./term-highlighter.js";
 import { segmentIds, segmentMatchesQuery, segmentNotes } from "./segment-search.js";
 import { learningEvaluationResult } from "./learning-utils.js";
 import { styleProfileDiff } from "./style-utils.js";
-import { buildBatchWorkflow, summarizeBatchSegments } from "./batch-status.js";
+import { batchQualityReportPending, buildBatchWorkflow, summarizeBatchSegments } from "./batch-status.js";
 import { startWorkbenchSession } from "./session-lifecycle.js";
+import { groupTaskEntries, taskEntryStatus } from "./task-groups.js";
 import { createProjectSettingsPanel } from "./project-settings.js";
 import { createProjectWizard } from "./project-wizard.js";
 import { createParameterSettingsPanel, createProviderSettingsPanel } from "./settings-panels.js";
@@ -59,6 +60,8 @@ const state = {
   referenceSearch: "",
   referenceDetail: null,
   tasks: [],
+  taskFilter: "",
+  taskGroupExpanded: new Set(),
   // 通知中心：由任务列表 + 待处理 QA 案例推导，未读只记一个时间点。
   notifications: [],
   notificationHighlight: null,
@@ -544,7 +547,7 @@ function refreshActions() {
     if (state.translationMode === "files") {
       primary.textContent = "添加新文件";
       primary.disabled = false;
-      primary.title = "上传待译文件（TXT / Markdown / DOCX / XLSX / CSV / XLIFF / MQXLIFF，最大 20MB）";
+      primary.title = `上传待译文件（TXT / Markdown / DOCX / XLSX / CSV / XLIFF / MQXLIFF，最大 ${UPLOAD_FILE_LABEL}）`;
     } else if (state.translationMode === "single") {
       primary.textContent = "开始翻译";
       secondary.hidden = false;
@@ -557,12 +560,13 @@ function refreshActions() {
       const segments = state.batchPreview?.segments || [];
       const hasPending = segments.some((segment) => segment.selected && segment.status !== "done");
       const hasCompleted = segments.some((segment) => segment.status === "done" && segment.translation);
+      const reportPending = hasCompleted && batchQualityReportPending(state.batchPreview, currentBatchWorkflow());
       // 语境分析是硬门禁：没就绪就不让点，点了只会被服务端 409 挡住、干等十分钟。
       const briefBlocked = Boolean(state.batchPreview?.requiresBrief) && state.batchBrief?.status !== "ready";
       primary.textContent = state.batchRunning ? (state.batchPaused ? "暂停中…" : "暂停批次")
         : !state.batchPreview ? "解析并分段"
           : briefBlocked ? (state.batchBriefPending ? "等待语境分析…" : "语境分析未就绪")
-            : hasPending ? (segments.some((segment) => segment.selected && segment.status === "error") && !segments.some((segment) => segment.selected && ["pending", "running"].includes(segment.status)) ? `重试失败句段（${segments.filter((segment) => segment.selected && segment.status === "error").length}）` : state.batchPreview.runState === "paused" ? "继续翻译" : "开始批次翻译") : "本轮翻译已结束";
+            : hasPending ? (segments.some((segment) => segment.selected && segment.status === "error") && !segments.some((segment) => segment.selected && ["pending", "running"].includes(segment.status)) ? `重试失败句段（${segments.filter((segment) => segment.selected && segment.status === "error").length}）` : state.batchPreview.runState === "paused" ? "继续翻译" : "开始批次翻译") : reportPending ? "质量报告生成中…" : "本轮翻译已结束";
       primary.disabled = state.batchRunning ? state.batchPaused : briefBlocked || (!state.batchPreview && !state.batchFile) || (Boolean(state.batchPreview) && !hasPending);
       if (briefBlocked) {
         primary.title = state.batchBriefPending
@@ -582,7 +586,9 @@ function refreshActions() {
       }
       if (hasCompleted) {
         tertiary.hidden = false;
-        tertiary.textContent = "导出";
+        tertiary.textContent = reportPending ? "等质量报告…" : "导出";
+        tertiary.disabled = reportPending;
+        tertiary.title = reportPending ? "质量报告还在生成（含 AI 终审），完成后才能导出" : "";
       }
     }
   } else if (state.view === "import") {
@@ -1685,11 +1691,15 @@ async function openBatchFile(batchId, { silent = false } = {}) {
     setTranslationMode("batch");
     renderBatchSegments();
     renderBatchBrief();
+    renderBatchWorkflow();
     renderBatchReport();
     renderBatchTermSurvey();
     renderBatchTabs();
     await loadBatchBrief(run.batchId);
     startBatchBriefWatch(run.batchId);
+    // 从文件列表打开正在跑的批次时也要持续轮询：否则这一页只在打开时取一次进度，
+    // 任务中心却一直在刷新，看起来就是这边更新慢。
+    if (state.batchRunning) pollServerBatch(batchId).catch((error) => toast(error.message));
     refreshActions();
     return true;
   } catch (error) {
@@ -1722,6 +1732,10 @@ async function exportBatchTask(batchId, button, { segments = null } = {}) {
   try {
     const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}?projectId=${encodeURIComponent(state.activeProjectId || "")}`);
     if (segments) run.segments = segments;
+    if (batchQualityReportPending(run, run.workflow)) {
+      await openExportDialog({ title: "质量报告生成中", summary: "本轮翻译已结束，质量报告（含 AI 终审）还在生成；完成后才能导出。进度可在任务中心查看。", items: [] });
+      return;
+    }
     const hasOriginal = Boolean(run.runnerOptions?.originalFile);
     let base64 = state.batchPreview?.batchId === batchId ? state.batchBase64 || undefined : undefined;
     const needsSource = ["xlsx", "csv", "xliff", "mqxliff"].includes(run.format);
@@ -1794,6 +1808,7 @@ async function exportPreflightForBatch(batchId, file) {
     signal: AbortSignal.timeout(EXPORT_PREFLIGHT_TIMEOUT_MS),
     body: JSON.stringify({
       ...projectPayload(),
+      batchId,
       locale: run.locale,
       contentType: run.contentType || "general",
       domain: run.domain || "general",
@@ -2010,7 +2025,7 @@ function resetBatchFileSelection() {
   state.batchColumnMapping = null;
   $("#batchFile").value = "";
   $("#batchFilePrompt").textContent = "拖入或点击选择文件";
-  $("#batchFileMeta").textContent = "拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 20MB";
+  $("#batchFileMeta").textContent = `拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 ${UPLOAD_FILE_LABEL}`;
   $("#batchDropZone").classList.remove("has-file");
   $("#batchSourceMeta").textContent = "等待文件";
   renderBatchSegments();
@@ -2029,7 +2044,7 @@ async function resetBatch() {
   localStorage.removeItem("kami-batch-id");
   $("#batchFile").value = "";
   $("#batchFilePrompt").textContent = "拖入或点击选择文件";
-  $("#batchFileMeta").textContent = "拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 20MB";
+  $("#batchFileMeta").textContent = `拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 ${UPLOAD_FILE_LABEL}`;
   $("#batchDropZone").classList.remove("has-file");
   $("#batchSourceMeta").textContent = "尚未载入";
   $("#spreadsheetAnalysis").hidden = true;
@@ -2293,7 +2308,7 @@ function renderBatchWorkflow() {
   if (!workflow) return;
   $("#batchWorkflowStages").innerHTML = batchWorkflowCards(workflow);
   const summary = workflow.summary;
-  $("#batchWorkflowSummary").textContent = `${workflow.translation.message}${summary.qaIncomplete ? ` · AIQA 未完成 ${summary.qaIncomplete} 段` : ""}`;
+  $("#batchWorkflowSummary").textContent = `${workflow.overall?.message || workflow.translation.message}${summary.qaIncomplete ? ` · AIQA 未完成 ${summary.qaIncomplete} 段` : ""}`;
   $("#batchWorkflowNote").textContent = summary.failed || summary.qaIncomplete
     ? `报告与普查继续使用已有译文，覆盖缺口会保留提示：${summary.failed ? `翻译失败 ${summary.failed} 段` : ""}${summary.failed && summary.qaIncomplete ? "；" : ""}${summary.qaIncomplete ? `AIQA 未完成 ${summary.qaIncomplete} 段` : ""}。重试后会自动刷新收尾结果。`
     : "质量报告与术语普查的执行状态分别显示；本轮翻译结束后，后续检查仍可能进行中。";
@@ -2405,7 +2420,10 @@ function renderBatchSegments() {
   const percent = selected.length ? Math.round((completed / selected.length) * 100) : 0;
   const styleSuffix = state.batchStyleProfile?.name ? ` · ${state.batchStyleProfile.name}` : "";
   const qaIncomplete = summarizeBatchSegments(selected).qaIncomplete;
-  $("#batchProgressText").textContent = `${state.batchRunning ? (state.batchPaused ? "将在当前段后暂停" : "批次翻译中") : ["completed", "needs_attention"].includes(state.batchPreview?.runState) || completed + failed === selected.length ? "本轮翻译已结束" : failed ? "部分分段待重试" : "分段已就绪"}${styleSuffix}`;
+  const reportPending = batchQualityReportPending(state.batchPreview, currentBatchWorkflow());
+  $("#batchProgressText").textContent = reportPending
+    ? `正在生成质量报告…${styleSuffix}`
+    : `${state.batchRunning ? (state.batchPaused ? "将在当前段后暂停" : "批次翻译中") : ["completed", "needs_attention"].includes(state.batchPreview?.runState) || completed + failed === selected.length ? "本轮翻译已结束" : failed ? "部分分段待重试" : "分段已就绪"}${styleSuffix}`;
   $("#batchProgressMeta").textContent = `成功 ${completed} / ${selected.length}${failed ? ` · 翻译失败 ${failed} 段` : ""}${qaIncomplete ? ` · AIQA 未完成 ${qaIncomplete} 段` : ""}`;
   $("#batchProgressBar").style.width = `${percent}%`;
   // 筛选 chips + 跳转：几十上百段时不用靠肉眼滚（口径与任务中心"待处理"一致）。
@@ -2612,6 +2630,9 @@ function mergeServerBatchRun(run) {
   state.batchPreview.runnerOptions = run.runnerOptions || null;
   state.batchWorkflow = run.workflow || null;
   if (run.termSurvey !== undefined) state.batchPreview.termSurvey = run.termSurvey;
+  // 轮询返回的 workflow 必须立刻渲染：否则翻译进行中只有段落列表在刷新，
+  // 顶部「正在翻译：N / M 段」会停在上次打开页面时的状态，看起来比任务中心慢。
+  renderBatchWorkflow();
   state.batchPreview.segments = (run.segments || []).map((segment, index) => ({
     ...(current.get(segment.id) || {}),
     ...segment,
@@ -2643,7 +2664,7 @@ async function pollServerBatch(batchId) {
       renderBatchSegments();
       await loadBatchBrief(batchId);
       await loadBatchReport(batchId);
-      if (run.runState === "completed") toast("本轮翻译已结束，质量报告与术语普查进度可在阶段状态中查看");
+      if (run.runState === "completed") toast(batchQualityReportPending(run, run.workflow) ? "翻译已结束，正在生成质量报告；完成后才能导出" : "本轮翻译已结束，质量报告与术语普查进度可在阶段状态中查看");
       else if (run.runState === "paused" && run.runnerOptions?.cancelled) toast("批次已中断，已完成的段落保留，可随时继续");
       else if (run.runState === "paused") toast("后台批次已暂停，进度已保存");
       else toast("本轮翻译已结束，失败段可点「重试失败句段」，已有译文继续生成报告与术语普查");
@@ -2917,7 +2938,8 @@ const REPAIR_EVIDENCE_LABELS = {
   tm_master: "主 TM 人工条",
   tm_reference: "参考 TM 人工条",
   file_majority: "文件内多数",
-  paired_scheme: "配对方案"
+  paired_scheme: "配对方案",
+  ai_judgement: "AI 终审"
 };
 
 /** 一条待核对项最后是怎么处理的：自动统一、部分修复、还是只报告。 */
@@ -3455,7 +3477,6 @@ async function loadTasks() {
     const query = new URLSearchParams();
     if ($("#taskType")?.value) query.set("type", $("#taskType").value);
     if ($("#taskLocale")?.value) query.set("locale", $("#taskLocale").value);
-    if ($("#taskStatus")?.value) query.set("status", $("#taskStatus").value);
     if ($("#taskSearch")?.value.trim()) query.set("search", $("#taskSearch").value.trim());
     if (state.activeProjectId) query.set("projectId", state.activeProjectId);
     state.tasks = await api(`/api/tasks?${query}`);
@@ -3609,40 +3630,69 @@ function startNotificationPolling() {
 }
 
 function renderTasks() {
-  const tasks = state.tasks || [];
-  $("#taskCount").textContent = `${tasks.length} 个任务`;
-  const completed = tasks.filter((item) => item.status === "completed").length;
-  const review = tasks.filter((item) => item.status === "review" || item.status === "needs_attention").length;
-  const pending = tasks.filter((item) => item.status === "in_progress").length;
-  const unitCount = tasks.filter((item) => item.type === "batch").reduce((sum, item) => sum + (item.totalSegments || 0), 0);
-  $("#taskSummary").innerHTML = `<span class="task-stat running"><strong>${pending}</strong> 进行中</span><span class="task-stat attention"><strong>${review}</strong> 待处理</span><span class="task-stat done"><strong>${completed}</strong> 已完成</span><span class="task-stat total">共 ${tasks.length} 个任务 · ${unitCount} 个翻译单元</span>`;
+  const allTasks = state.tasks || [];
+  const entries = groupTaskEntries(allTasks, { labelFor: (type) => BACKGROUND_TASK_LABELS[type] || type });
+  const statusOf = (entry) => taskEntryStatus(entry);
+  const counts = { running: 0, attention: 0, done: 0, other: 0 };
+  const bucketOf = (status) => status === "in_progress" ? "running" : status === "needs_attention" ? "attention" : status === "completed" ? "done" : "other";
+  for (const entry of entries) counts[bucketOf(statusOf(entry))] += 1;
+  $("#taskCount").textContent = `${allTasks.length} 个任务`;
+  const chip = (id, label, count) => `<button class="task-stat ${id}${state.taskFilter === id ? " active" : ""}" type="button" data-task-filter="${id}" aria-pressed="${state.taskFilter === id}"><strong>${count}</strong> ${label}</button>`;
+  const filterNames = { running: "进行中", attention: "待处理", done: "已完成" };
+  $("#taskSummary").innerHTML = `${chip("running", "进行中", counts.running)}${chip("attention", "待处理", counts.attention)}${chip("done", "已完成", counts.done)}<button class="task-stat total" type="button" data-task-filter="all" aria-pressed="${!state.taskFilter}">共 ${allTasks.length} 个任务 · ${entries.length} 条记录</button>`;
+  const advanced = [];
+  const typeSelect = $("#taskType");
+  if (typeSelect?.value) advanced.push(typeSelect.options[typeSelect.selectedIndex]?.textContent || "已筛类型");
+  const search = $("#taskSearch")?.value.trim() || "";
+  if (search) advanced.push(`“${search}”`);
+  if (state.taskFilter) advanced.unshift(filterNames[state.taskFilter] || "");
+  $("#taskToolsSummary").textContent = advanced.length ? `已筛选：${advanced.filter(Boolean).join(" · ")}` : "全部任务";
+  $("#taskFilterDot").hidden = !(typeSelect?.value || search);
   const renderCard = (task) => {
     if (task.type === "autoqa") return renderQaTaskRow(task);
     if (task.type === "background") return renderBackgroundTaskRow(task);
     return renderBatchTaskRow(task);
   };
-  // 按状态分三段：先看"正在跑什么"，再看"要我处理什么"，历史放最后。
-  const groups = [
-    { id: "running", title: "进行中", hint: "后台正在跑，关掉页面也会继续", match: (task) => ["in_progress", "paused"].includes(task.status) },
-    { id: "attention", title: "待处理", hint: "失败、待复核或等你确认", match: (task) => ["review", "needs_attention"].includes(task.status) },
-    { id: "done", title: "已完成", hint: "结果、导出与审计记录", match: (task) => task.status === "completed" },
+  const renderBundle = (bundle) => {
+    const status = statusOf(bundle);
+    const expanded = state.taskGroupExpanded.has(bundle.key);
+    const label = status === "in_progress" ? "进行中" : status === "needs_attention" ? "待处理" : status === "completed" ? "已完成" : "其他";
+    const summary = bundle.summary;
+    const parts = [`完成 ${summary.completed}`];
+    if (summary.attention) parts.push(`待处理 ${summary.attention}`);
+    if (summary.running) parts.push(`进行中 ${summary.running}`);
+    return `<section class="task-bundle" data-task-bundle="${escapeHtml(bundle.key)}">
+      <button class="task-bundle-head" type="button" data-task-bundle-toggle="${escapeHtml(bundle.key)}" aria-expanded="${expanded}">
+        <span class="task-bundle-caret" aria-hidden="true">${expanded ? "▾" : "▸"}</span>
+        <span class="task-bundle-title"><strong>${escapeHtml(bundle.title)}</strong><small>${escapeHtml(parts.join(" · "))} · ${escapeHtml(formatTaskTime(bundle.updatedAt))}</small></span>
+        <span class="task-status ${status}">${label}</span>
+      </button>
+      <div class="task-bundle-body" ${expanded ? "" : "hidden"}>${bundle.tasks.map(renderCard).join("")}</div>
+    </section>`;
+  };
+  const sections = [
+    { id: "running", title: "进行中", hint: "后台正在跑，关掉页面也会继续", match: (entry) => statusOf(entry) === "in_progress" },
+    { id: "attention", title: "待处理", hint: "失败、待复核或等你确认", match: (entry) => statusOf(entry) === "needs_attention" },
+    { id: "done", title: "已完成", hint: "结果、导出与审计记录", match: (entry) => statusOf(entry) === "completed" },
     { id: "other", title: "其他", hint: "", match: () => true }
   ];
+  const filter = state.taskFilter || "";
+  const visibleSections = filter ? sections.filter((section) => section.id === filter) : sections;
   const claimed = new Set();
-  const sections = tasks.length ? groups.map((group) => {
+  const html = entries.length ? visibleSections.map((section) => {
     const items = [];
-    for (const task of tasks) {
-      if (claimed.has(task) || !group.match(task)) continue;
-      claimed.add(task);
-      items.push(task);
+    for (const entry of entries) {
+      if (claimed.has(entry) || !section.match(entry)) continue;
+      claimed.add(entry);
+      items.push(entry);
     }
     if (!items.length) return "";
-    return `<section class="task-group" data-task-group="${group.id}">
-      <div class="task-group-head"><strong>${escapeHtml(group.title)}</strong><span>${items.length} 个${group.hint ? ` · ${escapeHtml(group.hint)}` : ""}</span></div>
-      <div class="task-group-list">${items.map(renderCard).join("")}</div>
+    return `<section class="task-group" data-task-group="${section.id}">
+      <div class="task-group-head"><strong>${escapeHtml(section.title)}</strong><span>${items.length} 条${section.hint ? ` · ${escapeHtml(section.hint)}` : ""}</span></div>
+      <div class="task-group-list">${items.map((entry) => entry.kind === "group" ? renderBundle(entry) : renderCard(entry)).join("")}</div>
     </section>`;
   }).join("") : "";
-  $("#taskList").innerHTML = sections || '<div class="empty-list task-empty">没有符合当前筛选条件的历史任务</div>';
+  $("#taskList").innerHTML = html || `<div class="empty-list task-empty">${filter ? "当前筛选下没有任务；点「共 N 个任务」回到全部。" : "没有符合当前筛选条件的历史任务"}</div>`;
   $$(".task-row [data-action]").forEach((button) => button.addEventListener("click", () => {
     const id = button.closest(".task-row").dataset.taskId;
     const action = button.dataset.action;
@@ -3671,7 +3721,6 @@ function renderTasks() {
     else if (action === "open-reference") openReferenceTaskTarget(button).catch((error) => toast(error.message));
   }));
 }
-
 async function openReferenceTaskTarget(button) {
   const taskKind = button.dataset.referenceTaskKind || "";
   const targetId = button.dataset.referenceTarget || "";
@@ -4374,6 +4423,8 @@ async function uploadReferenceItems(items, destinationFolderId = state.reference
   }
   const tasks = [];
   const failures = [...rejected];
+  // 同一次批量上传共用一个组号：任务中心把它们折叠成"这一次的导入"，下次上传另起一组。
+  const uploadGroupId = globalThis.crypto?.randomUUID?.() || `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   for (let index = 0; index < accepted.length; index += 1) {
     const item = accepted[index];
     const file = item.file;
@@ -4386,7 +4437,8 @@ async function uploadReferenceItems(items, destinationFolderId = state.reference
         filename: file.name,
         name: file.name.replace(/\.[^.]+$/u, ""),
         vision: state.referenceVisionMode,
-        autoScan: state.referenceAutoScan ? "1" : "0"
+        autoScan: state.referenceAutoScan ? "1" : "0",
+        uploadGroupId
       });
       const started = await api(`/api/references/file?${query}`, {
         method: "POST",
@@ -4887,15 +4939,18 @@ function renderBatchTaskRow(task) {
   const qaIncomplete = workflow.summary.qaIncomplete || Number(task.qaIncomplete) || 0;
   const ended = ["completed", "needs_attention"].includes(task.runState);
   const endedLabel = task.failedSegments ? `本轮已结束 · ${task.failedSegments} 段失败` : hasPending ? `本轮已结束 · ${Number(task.totalSegments) - Number(task.completedSegments)} 段未完成` : qaIncomplete ? `翻译完成 · AIQA 未完成 ${qaIncomplete} 段` : task.qaPending ? "翻译完成 · QA 待处理" : "翻译完成";
+  const reportPending = batchQualityReportPending(task, workflow);
+  const rowStatus = cancelled ? "已中断" : reportPending ? `生成质量报告${task.failedSegments ? ` · ${task.failedSegments} 段失败` : ""}` : ended ? endedLabel : taskStatusLabel(task.status);
+  const rowStatusClass = reportPending ? "in_progress" : task.status;
   const qaRunning = ["waiting", "in_progress"].includes(workflow.aiQa.status) || workflow.qaRetryBusy;
   const tierText = describeQualityTiers(task.qualityTiers);
   return `<article class="task-row task-card task-batch-card" data-task-id="${escapeHtml(task.batchId)}" data-task-status="${escapeHtml(task.status || "")}">
-    <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.filename)}</strong><span class="task-status ${escapeHtml(task.status)}">${cancelled ? "已中断" : ended ? endedLabel : taskStatusLabel(task.status)}</span><span class="task-type-chip">批次</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small>${tierText ? `<small class="task-tiers" title="质量档按每段的风险自动判定；未记录的段落来自旧版本翻译">质量档：${escapeHtml(tierText)}</small>` : ""}</div>
+    <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.filename)}</strong><span class="task-status ${escapeHtml(rowStatusClass)}">${escapeHtml(rowStatus)}</span><span class="task-type-chip">批次</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small>${tierText ? `<small class="task-tiers" title="质量档按每段的风险自动判定；未记录的段落来自旧版本翻译">质量档：${escapeHtml(tierText)}</small>` : ""}</div>
     <div class="task-progress"><div><i style="width:${progress}%"></i></div><span>${task.completedSegments} / ${task.totalSegments}</span></div>
     <div class="task-qa">${task.qaPending
       ? `<button class="qa-jump" type="button" data-action="jump-qa" title="打开这条批次并跳到第一条待处理"><strong>${task.qaPending} 条待处理</strong><small>点击定位 →</small></button>`
       : "<strong>QA 已清</strong>"}${qaIncomplete ? `<small>AIQA 未完成 ${qaIncomplete} 段</small>` : ""}${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
-    <div class="task-actions"><button class="button secondary small" data-action="open-task">打开文件</button>${canResume ? `<button class="button primary small" data-action="continue-task">${ended && task.failedSegments ? "重试失败句段" : "继续翻译"}</button>` : ""}${qaIncomplete || qaRunning ? `<button class="button secondary small" data-action="retry-qa-task" ${runningState || qaRunning ? "disabled" : ""}>${qaRunning ? "AIQA 重试中…" : `重试未完成 AIQA（${qaIncomplete}）`}</button>` : ""}${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}<button class="button secondary small" data-action="export-task">导出</button>${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small danger" data-action="delete-task">删除</button></div>
+    <div class="task-actions"><button class="button secondary small" data-action="open-task">打开文件</button>${canResume ? `<button class="button primary small" data-action="continue-task">${ended && task.failedSegments ? "重试失败句段" : "继续翻译"}</button>` : ""}${qaIncomplete || qaRunning ? `<button class="button secondary small" data-action="retry-qa-task" ${runningState || qaRunning ? "disabled" : ""}>${qaRunning ? "AIQA 重试中…" : `重试未完成 AIQA（${qaIncomplete}）`}</button>` : ""}${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}<button class="button secondary small" data-action="export-task"${reportPending ? ' disabled title="质量报告还在生成（含 AI 终审），完成后才能导出"' : ""}>导出</button>${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small danger" data-action="delete-task">删除</button></div>
     <div class="task-workflow"><div class="batch-workflow-stages">${batchWorkflowCards(workflow)}</div>${workflow.qualityReport.status === "needs_attention" ? '<button class="button ghost small" data-action="retry-report-task">重试质量报告</button>' : ""}${workflow.termSurvey.status === "needs_attention" ? '<button class="button ghost small" data-action="retry-survey-task">重试术语普查</button>' : ""}</div>
   </article>`;
 }
@@ -5046,6 +5101,7 @@ function applyStoredBatchRun(run) {
   state.batchQaCursor = -1;
   renderBatchSegments();
   renderBatchBrief();
+  renderBatchWorkflow();
   renderBatchReport();
   renderBatchTermSurvey();
   renderBatchTabs();
@@ -6068,7 +6124,7 @@ async function setImportFiles(files = [], {
   const supported = /\.(xlsx|csv|xliff|mqxliff)$/iu;
   const invalid = selected.find((file) => !supported.test(file.name));
   if (invalid) return toast(`${invalid.name} 不是支持的双语资产格式`);
-  // 与记忆库、批次入口统一：单文件 20MB，一次最多 200 个文件；不再限制单次总量
+  // 与记忆库、批次入口统一：单文件 32MB，一次最多 200 个文件；不再限制单次总量
   //（预检是逐文件请求，请求体积不随文件数量增长）。
   const oversize = selected.find((file) => file.size > MEMORY_IMPORT_FILE_BYTES);
   if (oversize) return toast(`${oversize.name} 超过单文件 ${UPLOAD_FILE_LABEL} 上限（${formatBytes(oversize.size)}）`);
@@ -6133,6 +6189,9 @@ async function setImportFiles(files = [], {
     }
     progress(`预检完成：${selected.length - failures.length} / ${selected.length} 个文件，共 ${merged.statistics.entries} 条双语条目`, 100);
     state.assetPreflight = { ...merged, failures };
+    // 上一轮提交把弹窗切成了"关闭窗口，后台继续"并收起候选表；新一轮预检必须复位，
+    // 否则用户第二次导入时弹窗里根本没有确认按钮。
+    resetAssetPreflightSubmitState();
     renderAssetPreflight();
     resetAssetImportProgress();
     $("#assetPreflightDialog").showModal();
@@ -6206,6 +6265,23 @@ function resetAssetImportProgress() {
   $("#assetImportProgressBar").style.width = "0%";
 }
 
+/**
+ * 预检弹窗的"还没提交"界面状态。提交成功后确认按钮会被隐藏、换成"关闭窗口"，
+ * 候选表也会收起；下一轮预检必须回到可确认的状态，不能沿用上一轮的结果。
+ */
+function resetAssetPreflightSubmitState() {
+  const confirm = $("#assetPreflightConfirm");
+  if (confirm) {
+    confirm.hidden = false;
+    confirm.disabled = false;
+    confirm.textContent = "确认并继续";
+  }
+  const close = $("#assetPreflightClose");
+  if (close) close.hidden = true;
+  const tableWrap = $("#assetPreflightTableWrap");
+  if (tableWrap) tableWrap.hidden = false;
+}
+
 function updateAssetImportProgress(progress = {}) {
   const container = $("#assetImportProgress");
   if (!container) return;
@@ -6240,12 +6316,16 @@ function rememberAssetImportProgress(progress) {
 function renderAssetPreflight() {
   const preview = state.assetPreflight;
   if (!preview) return;
+  // 已经提交过的批次不能再用"确认后进入后台导入"的文案：任务在服务端跑，
+  // 这里改出来的去向只对下一次导入有效，摘要必须说清楚当前这一批去了哪里。
+  const submitted = assetPreflightOutcome?.submitted === true;
+  const submittedLabel = submitted ? assetPreflightOutcome.destinationLabel || importDestinationLabel(assetPreflightOutcome.purpose) : "";
   renderAssetPreflightDestination();
   const aiRow = $("#assetPreflightAiRow");
   if (aiRow) aiRow.hidden = state.assetImportPurpose !== "term";
   if ($("#assetPreflightAiCleaning")) $("#assetPreflightAiCleaning").checked = state.assetImportAiCleaning;
   if ($("#assetPreflightStyleEvidence")) $("#assetPreflightStyleEvidence").checked = state.assetImportStyleEvidence;
-  const purposeLabel = importDestinationLabel();
+  const purposeLabel = submitted ? submittedLabel : importDestinationLabel();
   $("#assetPreflightBody").innerHTML = (preview.files || []).map((file) => {
     const duplicates = file.duplicates || {};
     const duplicateBadges = [
@@ -6262,13 +6342,17 @@ function renderAssetPreflight() {
   const duplicateText = duplicates.existing || duplicates.conflict
     ? ` 其中库内已存在相同对照 ${duplicates.existing || 0} 条（入库时跳过）、与库内译法冲突 ${duplicates.conflict || 0} 条（不会覆盖库内条目，要改用术语库页面手动改）。`
     : "";
-  $("#assetPreflightSummary").textContent = `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。去向：${purposeLabel}；${cleaningText}。${duplicateText}确认后进入后台导入。`;
+  $("#assetPreflightSummary").textContent = submitted
+    ? `已提交后台导入：${preview.files?.length || 0} 个文件、${Number(assetPreflightOutcome.count) || 0} 条双语条目。去向：${submittedLabel}；${assetPreflightOutcome.aiCleaning ? "先做 AI 清洗再入库" : "按本地规则分流写入"}。可以关掉这个窗口，进度与结果在任务中心可查。`
+    : `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。去向：${purposeLabel}；${cleaningText}。${duplicateText}确认后进入后台导入。`;
   const termLibrary = libraryById("term", state.importTermLibraryId);
   const tmLibrary = libraryById("tm", state.importTmLibraryId);
   const targetParts = state.assetImportPurpose === "tm"
     ? [`人工 TM → ${tmLibrary?.name || "主 TM"}`]
     : [`术语 → ${termLibrary?.name || "默认术语库"}`, `句段 → ${tmLibrary?.name || "主 TM"}`];
-  $("#assetPreflightTarget").textContent = `目标库：${targetParts.join(" · ")}。下面的去向可以在这里直接改；缺库时点「＋ 新增库」，新增和优先级都在同一个面板里。`;
+  $("#assetPreflightTarget").textContent = submitted
+    ? `目标库：${submittedLabel}。这一批已经提交，改选只影响下一次导入。`
+    : `目标库：${targetParts.join(" · ")}。下面的去向可以在这里直接改；缺库时点「＋ 新增库」，新增和优先级都在同一个面板里。`;
 }
 
 /**
@@ -6406,16 +6490,16 @@ async function confirmAssetPreflight() {
       count: accepted,
       files: state.importFiles?.length || 0,
       aiCleaning,
-      purpose
+      purpose,
+      // 提交时的去向要冻结下来：之后再改下拉，摘要也不能换成别的库。
+      destinationLabel: importDestinationLabel(purpose)
     };
     $("#assetPreflightConfirm").hidden = true;
     $("#assetPreflightClose").hidden = false;
+    if (returnView) $("#assetPreflightTableWrap").hidden = true;
     rememberAssetImportProgress({ status: "running", message: aiCleaning ? "任务已创建：先写审核队列，再做 AI 清洗" : "任务已创建：先写审核队列，再按表导入", percent: 1 });
     toast(`已开始后台导入 ${accepted} 条；可以关掉这个窗口继续下一步`);
-    if (returnView) {
-      $("#assetPreflightTableWrap").hidden = true;
-      $("#assetPreflightSummary").textContent = `已提交后台导入：${state.importFiles?.length || 0} 个文件、${accepted} 条双语条目。去向：${importDestinationLabel()}；${aiCleaning ? "先做 AI 清洗再入库。" : "按本地规则分流写入。"}可以关掉这个窗口，向导会继续下一步，进度与结果在任务中心可查。`;
-    }
+    renderAssetPreflight();
     watchAssetImportTask(state.assetImportTaskId, { returnView }).catch(() => {});
   } catch (error) {
     stopAssetImportTicker();
@@ -6476,18 +6560,18 @@ function formatBytes(bytes = 0) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-const UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
+const UPLOAD_FILE_BYTES = 32 * 1024 * 1024;
 const UPLOAD_FILE_LABEL = String(Math.round(UPLOAD_FILE_BYTES / (1024 * 1024))) + "MB";
 /** 兼容旧名字：预检与上传共用同一个单文件上限。 */
 const MEMORY_IMPORT_FILE_BYTES = UPLOAD_FILE_BYTES;
 /** 一次最多选多少个文件：预检是逐文件的，这里只是防止误拖几百个文件把界面卡住。 */
 const IMPORT_MAX_FILES = 200;
 
-function validateMemoryImportFiles(files) {
-  const tooBig = files.find((file) => file.size > MEMORY_IMPORT_FILE_BYTES);
-  if (tooBig) return `${tooBig.name} 超过单文件 ${UPLOAD_FILE_LABEL} 上限（${formatBytes(tooBig.size)}）`;
-  if (files.length > IMPORT_MAX_FILES) return `一次最多选择 ${IMPORT_MAX_FILES} 个文件，当前 ${files.length} 个`;
-  return "";
+/** 只挑出超限的文件（文件名 → 原因）：一个 22MB 的文件不该让同批其它文件都导不进来。 */
+function oversizedMemoryImportFiles(files) {
+  return new Map(files
+    .filter((file) => file.size > MEMORY_IMPORT_FILE_BYTES)
+    .map((file) => [file.name, `超过单文件 ${UPLOAD_FILE_LABEL} 上限（${formatBytes(file.size)}）`]));
 }
 
 /** 记忆库页行内「导入」：目标库固定为这一行，打开弹窗再选文件（预检 → 确认写库）。 */
@@ -6560,26 +6644,33 @@ async function previewMemoryImport() {
   if (!files.length) return;
   const invalid = files.find((file) => !/\.(xlsx|csv|xliff|mqxliff)$/iu.test(file.name));
   if (invalid) return toast(`${invalid.name}：人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff`);
-  const sizeError = validateMemoryImportFiles(files);
-  if (sizeError) {
-    $("#memoryImportNote").textContent = sizeError;
-    renderMemoryImportFiles(new Map(files.map((file) => [file.name, { status: "failed", entries: 0, error: sizeError }])));
-    return toast(sizeError);
+  if (files.length > IMPORT_MAX_FILES) return toast(`一次最多选择 ${IMPORT_MAX_FILES} 个文件，当前 ${files.length} 个`);
+  // 超限只挡它自己：同批其它文件照常预检，不能因为一个超限文件整批失败。
+  const oversized = oversizedMemoryImportFiles(files);
+  const importable = files.filter((file) => !oversized.has(file.name));
+  if (!importable.length) {
+    const message = [...oversized.values()][0];
+    $("#memoryImportNote").textContent = message;
+    renderMemoryImportFiles(new Map(files.map((file) => [file.name, { status: "failed", entries: 0, error: oversized.get(file.name) || "" }])));
+    return toast(message);
   }
   try {
     $("#memoryImportButton").disabled = true;
     const startedAt = Date.now();
-    const fileStates = new Map(files.map((file) => [file.name, { status: "pending", entries: 0, error: "" }]));
+    const fileStates = new Map(files.map((file) => [file.name, oversized.has(file.name)
+      ? { status: "failed", entries: 0, error: oversized.get(file.name) }
+      : { status: "pending", entries: 0, error: "" }]));
     renderMemoryImportFiles(fileStates);
     const batches = [];
     const rows = [];
-    const failures = [];
+    // 超限文件也记进失败清单：末尾摘要的"N / M 个文件"要把它算上，不能悄悄少一个。
+    const failures = [...oversized].map(([filename, error]) => ({ filename, error }));
     let offsetBase = 0;
     let truncated = null;
-    for (const [index, file] of files.entries()) {
+    for (const [index, file] of importable.entries()) {
       fileStates.get(file.name).status = "running";
       renderMemoryImportFiles(fileStates);
-      $("#memoryImportNote").textContent = `正在本地预检 ${index + 1} / ${files.length}：${file.name} · 已用时 ${elapsedText(startedAt)}（解析表格 / XLIFF，不调用模型）`;
+      $("#memoryImportNote").textContent = `正在本地预检 ${index + 1} / ${importable.length}：${file.name} · 已用时 ${elapsedText(startedAt)}（解析表格 / XLIFF，不调用模型）`;
       try {
         const result = await api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({
           ...projectPayload(),
@@ -6618,7 +6709,7 @@ async function previewMemoryImport() {
     };
     state.memoryImportPreview = preview;
     const evidenceText = state.memoryStyleEvidence ? "确认后同时写入主 TM 与风格学习证据。" : "确认后只写入主 TM，不进入风格证据池。";
-    const failureText = failures.length ? `；${failures.length} 个文件解析失败：${failures.map((item) => `${item.filename}（${item.error}）`).join("、")}` : "";
+    const failureText = failures.length ? `；${failures.length} 个文件未导入：${failures.map((item) => `${item.filename}（${item.error}）`).join("、")}` : "";
     const sampleText = preview.total > rows.length ? `列表先展示前 ${rows.length} 条用于抽查（未展示的同样按默认写入）` : "列表已展示全部条目";
     const truncationText = truncated
       ? `⚠️ ${truncated.file} 共 ${truncated.totalRows} 行，本次只读取前 ${truncated.rowsScanned} 行（单表上限 ${truncated.rowLimit} 行），超出部分没有导入。`
@@ -7322,7 +7413,7 @@ function resetImport() {
   state.importBatchLearning = [];
   $("#termFile").value = "";
   $("#filePrompt").textContent = "拖入或点击选择双语资产文件";
-  $("#fileMeta").textContent = "支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 20MB；先本地预检，再确认导入";
+  $("#fileMeta").textContent = `支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 ${UPLOAD_FILE_LABEL}；先本地预检，再确认导入`;
   $("#dropZone").classList.remove("has-file");
   renderImportFileList($("#importFileList"), [], new Map());
   $("#mappingNote").textContent = "拖入表格后会自动识别结构并生成审核队列。";
@@ -9544,10 +9635,30 @@ function bindEvents() {
     else preview.deselected.add(index);
   });
   $("#taskLocale").addEventListener("change", loadTasks);
-  $("#taskStatus").addEventListener("change", loadTasks);
   $("#taskType").addEventListener("change", loadTasks);
   $("#taskSearch").addEventListener("input", () => { clearTimeout(state.taskSearchTimer); state.taskSearchTimer = setTimeout(() => loadTasks().catch((error) => toast(error.message)), 250); });
   $("#refreshTasks").addEventListener("click", () => loadTasks().catch((error) => toast(error.message)));
+  $("#taskFilterToggle").addEventListener("click", () => {
+    const panel = $("#taskFilterPanel");
+    const open = panel.hidden;
+    panel.hidden = !open;
+    $("#taskFilterToggle").setAttribute("aria-expanded", String(open));
+  });
+  $("#taskSummary").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-task-filter]");
+    if (!button) return;
+    const value = button.dataset.taskFilter;
+    state.taskFilter = value === "all" || value === state.taskFilter ? "" : value;
+    renderTasks();
+  });
+  $("#taskList").addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-task-bundle-toggle]");
+    if (!toggle) return;
+    const key = toggle.dataset.taskBundleToggle;
+    if (state.taskGroupExpanded.has(key)) state.taskGroupExpanded.delete(key);
+    else state.taskGroupExpanded.add(key);
+    renderTasks();
+  });
   $("#styleStatus").addEventListener("change", renderStyleGuidance);
   $("#refreshStyles").addEventListener("click", () => loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message)));
   $("#logLevels").addEventListener("click", (event) => {

@@ -147,7 +147,9 @@ test("批量写入一律按 2,000 条分块：7 万条一次请求会撞 Directu
   assert.match(directusStore, /chunkDirectusRecords\(records, maxItems \? \{ maxItems \} : undefined\)/u);
   const chunked = directusStore.match(/maxItems: BULK_INSERT_CHUNK_ITEMS/gu) || [];
   assert.ok(chunked.length >= 5, `证据/审计/审核队列/术语/记忆都要分块（当前 ${chunked.length} 处）`);
-  assert.match(directusStore, /createItemsInChunks\("\/items\/style_evidence", creates\.map\(\(entry\) => entry\.body\), \{ maxItems: BULK_INSERT_CHUNK_ITEMS \}\)/u);
+  assert.match(directusStore, /createItemsInChunks\("\/items\/style_evidence", creates\.map\(\(entry\) => entry\.body\), \{/u);
+  // 收尾的批量更新也必须分块：3.5 万条候选一个 PATCH 会把 Directus 压到 120 秒超时（真机踩过）。
+  assert.match(directusStore, /async function updateItemsInChunks\(path, records\) \{\r?\n\s+for \(const chunk of chunkDirectusRecords\(records, \{ maxItems: BULK_INSERT_CHUNK_ITEMS \}\)\)/u);
 });
 
 test("术语注释取自原表，记账信息移出 note", async () => {
@@ -199,28 +201,30 @@ test("跳过原因与任务文案都做了截断，界面不会被长报错撑�
   assert.match(app, /<strong title="\$\{escapeHtml\(payloadText \|\| ""\)\}">/u);
 });
 
-test("导入体积规则各入口统一：单文件 20MB、只限文件个数", async () => {
+test("导入体积规则各入口统一：单文件 32MB、只限文件个数", async () => {
   const app = await read("../public/app.js");
   assert.doesNotMatch(app, /MEMORY_IMPORT_TOTAL_BYTES/u);
-  assert.match(app, /const UPLOAD_FILE_BYTES = 20 \* 1024 \* 1024;/u);
+  assert.match(app, /const UPLOAD_FILE_BYTES = 32 \* 1024 \* 1024;/u);
   assert.match(app, /const IMPORT_MAX_FILES = 200;/u);
   const server = await read("../server.mjs");
-  assert.match(server, /const IMPORT_FILE_BYTES = 20 \* 1024 \* 1024;/u);
+  assert.match(server, /const IMPORT_FILE_BYTES = 32 \* 1024 \* 1024;/u);
   assert.match(server, /const tooLarge = files\.find\(\(file\) => Buffer\.byteLength\(String\(file\.base64 \|\| ""\), "base64"\) > IMPORT_FILE_BYTES\);/u);
   const html = await read("../public/index.html");
-  assert.match(html, /单个文件不超过 20MB/u);
-  // 文件类请求的 body 额度必须容得下 20MB 文件 base64 后的体积（约 27MB）。
+  assert.match(html, /单个文件不超过 32MB/u);
+  // 文件类请求的 body 额度必须容得下 32MB 文件 base64 后的体积（约 43MB）。
   assert.match(server, /const IMPORT_BODY_BYTES = 48 \* 1024 \* 1024;/u);
   for (const route of ["/api/term-import/preview", "/api/term-import/commit", "/api/batch/prepare"]) {
     const index = server.indexOf(`url.pathname === "${route}"`);
     assert.ok(index > 0, `找不到路由 ${route}`);
     assert.match(server.slice(index, index + 220), /readJsonBody\(req, \{ limitBytes: IMPORT_BODY_BYTES \}\)/u, `${route} 需要放宽请求体额度`);
   }
-  // 解析器侧的上限也要跟着改，否则 20MB 文件仍会被拒。
+  // 解析器侧的上限也要跟着改，否则 32MB 文件仍会被拒。
   const extractor = await read("../src/table-term-extractor.mjs");
-  assert.match(extractor, /const MAX_FILE_BYTES = 20 \* 1024 \* 1024;/u);
+  assert.match(extractor, /const MAX_FILE_BYTES = 32 \* 1024 \* 1024;/u);
   const batchDocument = await read("../src/batch-document.mjs");
-  assert.match(batchDocument, /const MAX_FILE_BYTES = 20 \* 1024 \* 1024;/u);
+  assert.match(batchDocument, /const MAX_FILE_BYTES = 32 \* 1024 \* 1024;/u);
+  const batchOriginals = await read("../src/batch-originals.mjs");
+  assert.match(batchOriginals, /const MAX_BYTES = 32 \* 1024 \* 1024;/u);
 });
 
 test("人工 TM 导入支持后台任务：接口立刻返回任务号，页面跟进度", async () => {
@@ -240,10 +244,20 @@ test("人工 TM 导入支持后台任务：接口立刻返回任务号，页面�
   assert.match(job, /scaleProgressReport\(report, 6, 90\)/u);
   assert.match(job, /\{ skipQueueCompletion: true \}/u);
   assert.match(job, /await saveTmImportAudit\(\{/u);
-  assert.match(job, /releasePreviewCaches\(auditBatchId\)/u);
   assert.doesNotMatch(job, /saveImportPreview\(/u, "TM 导入不再先写审核队列");
-  assert.match(job, /payload: \{ batchId: auditBatchId, filename, error: error\.message, resumable: true \}/u);
+  // 多文件导入的缓存批次号是逗号列表，只能用来读/清缓存；写库必须换成单个新批次号，
+  // 否则 10 个文件拼成 369 字符会撞 batch_id / 审计主键的长度限制（真机踩过）。
+  assert.match(job, /const previewBatchIds = String\(batchId \|\| ""\);/u);
+  assert.match(job, /const auditBatchId = randomUUID\(\);/u);
+  assert.match(job, /await releasePreviewCaches\(previewBatchIds\);/u);
+  assert.match(job, /payload: \{ batchId: previewBatchIds, auditBatchId, filename, error: error\.message, resumable: true \}/u);
   assert.match(server, /async function releasePreviewCaches\(batchId\)/u);
+  // 跳过重复/未选择的候选也要推进进度，否则整批都跳过时任务一直显示 0 / N。
+  assert.ok((server.match(/reportImporting\(\);/gu) || []).length >= 4, "三处 continue 与正常收尾都要推进进度");
+  // 「继续导入」把逗号列表原样传回来：解析器要逐个读缓存，不能整串当批次号。
+  assert.match(server, /const batchIds = String\(body\.batchId\)\.split\(","\)\.map\(\(value\) => value\.trim\(\)\)\.filter\(Boolean\);/u);
+  // 同步路径（接口测试/小批量）同样用新的单一批次号写审计。
+  assert.match(route, /const auditBatchId = randomUUID\(\);/u);
   // 进度辅助函数与资产导入共用一份实现。
   assert.match(server, /function scaleProgressReport\(report, from, to\)/u);
   assert.match(server, /function countProgressReport\(report, from, to\)/u);
@@ -297,4 +311,11 @@ test("条目 ID 从待译段落一路带到提示词与译文记忆库", async (
   assert.match(memory, /entryKey && memory\?\.entryKey && String\(entryKey\) === String\(memory\.entryKey\)/u);
   const app = await read("../public/app.js");
   assert.match(app, /entryKey: segment\.entryKey \|\| segment\.locator\?\.entryKey \|\| "",/u);
+});
+
+test("Directus 压力保护（503）会让读请求退避重试", async () => {
+  const store = await readFile(new URL("../src/directus-store.mjs", import.meta.url), "utf8");
+  assert.ok(store.includes("const busy = isDirectusBusy(error);"), "读请求要识别 503 Under pressure");
+  assert.ok(store.includes("(!connectionFailure && !busy)"));
+  assert.ok(store.includes("busy ? 600 * attempt : 120 * attempt"), "压力保护要退避，不能立刻判死长任务");
 });

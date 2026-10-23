@@ -1238,6 +1238,7 @@ dialog::backdrop { background: rgba(14,28,22,.45); }
   .topbar { align-items: stretch; }
   .command-dock { align-self: stretch; }
   .task-toolbar { grid-template-columns: repeat(2, minmax(160px,1fr)); }
+  .task-filter-panel { grid-template-columns: 1fr; }
   .task-search { grid-column: 1 / -1; }
   .task-toolbar > .button { grid-column: 1 / -1; justify-self: end; }
   .task-row { grid-template-columns: minmax(260px,1fr) 180px auto; gap: 16px; }
@@ -1539,6 +1540,27 @@ dialog::backdrop { background: rgba(14,28,22,.45); }
 /* ---------------------------------------------------------------------------
    任务中心：按状态分组的卡片流
    --------------------------------------------------------------------------- */
+.task-tools-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 14px 0 8px; }
+.task-tools-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.task-filter-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.task-filter-toggle svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.task-filter-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--lime-deep); display: inline-block; }
+.task-tools-summary { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-filter-panel { display: grid; grid-template-columns: 160px 160px minmax(220px, 1fr); gap: 10px; align-items: end; margin-bottom: 12px; padding: 12px; border: 1px solid #e3e9df; border-radius: 10px; background: #fbfdf9; }
+.task-filter-panel[hidden] { display: none; }
+.task-stat { cursor: pointer; font: inherit; font-weight: 700; }
+.task-stat.active { border-color: var(--forest); background: #fff; box-shadow: 0 0 0 2px rgba(31, 74, 51, .08); }
+.task-stat:focus-visible { outline: 2px solid var(--lime-deep); outline-offset: 2px; }
+.task-bundle { border: 1px solid #dfe7da; border-radius: 12px; background: #fff; overflow: hidden; }
+.task-bundle-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; border: 0; background: #f7faf3; text-align: left; cursor: pointer; }
+.task-bundle-head:hover { background: #f1f7ea; }
+.task-bundle-caret { width: 12px; color: #728174; font-size: 12px; }
+.task-bundle-title { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.task-bundle-title strong { color: var(--ink); font-size: 13px; }
+.task-bundle-title small { color: var(--muted); font-size: 11px; }
+.task-bundle-body { display: grid; gap: 8px; padding: 10px; background: #fff; }
+.task-bundle-body[hidden] { display: none; }
+
 .task-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 6px; }
 .task-stat {
   display: inline-flex; align-items: baseline; gap: 6px; padding: 7px 12px; border-radius: 999px;

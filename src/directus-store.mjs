@@ -125,14 +125,17 @@ async function request(path, { method = "GET", body, timeoutMs = 10_000 } = {}) 
       // Directus 重启、容器抖动），undici 报的是 TypeError: fetch failed。
       // 这类抖动不该把只读接口变成 500：重试两次。写请求与业务错误一律直接抛出。
       const connectionFailure = error?.name === "TypeError";
-      if (!idempotent || !connectionFailure || attempt >= DIRECTUS_READ_ATTEMPTS) {
+      // Directus 压力保护（503 Under pressure）只是"太忙"，读请求退避重试不会多写；
+      // 否则一次瞬时压力就会把正在跑的长任务（批次翻译/进度保存）判死。
+      const busy = isDirectusBusy(error);
+      if (!idempotent || (!connectionFailure && !busy) || attempt >= DIRECTUS_READ_ATTEMPTS) {
         // 日志里只写一句 fetch failed 没法定位，把 undici 的 cause 带出来。
         if (connectionFailure && error.cause) {
           error.message = `Directus ${method} ${plainPath} 连接失败（${error.cause.code || error.cause.message || "unknown"}）`;
         }
         throw error;
       }
-      await new Promise((resolve) => setTimeout(resolve, 120 * attempt));
+      await new Promise((resolve) => setTimeout(resolve, busy ? 600 * attempt : 120 * attempt));
     }
   }
 }
@@ -172,7 +175,7 @@ async function createItemsInChunks(path, records, { onProgress, maxItems } = {})
 }
 
 async function updateItemsInChunks(path, records) {
-  for (const chunk of chunkDirectusRecords(records)) {
+  for (const chunk of chunkDirectusRecords(records, { maxItems: BULK_INSERT_CHUNK_ITEMS })) {
     await request(path, { method: "PATCH", body: chunk, timeoutMs: DIRECTUS_BULK_WRITE_TIMEOUT_MS });
   }
 }
@@ -572,6 +575,21 @@ function chunkList(items = [], size = 1) {
  * 返回与入参等长的数组：成功是 `{ id, ... }`，失败是 `{ error }`，
  * 单条失败不会连累整批（调用方按行记账）。
  */
+/** 命中已有行且这些字段全部一致时视为"重复未变"，不再 PATCH：重复导入否则会逐条更新几万次。 */
+const MEMORY_MATCH_FIELDS = "id,source,target,entry_key,source_hash,entry_id,previous_source,next_source,domain,content_type,content_tags,quality_status,qa_score,provenance,source_file,source_row,asset_tier,project_id,library_id";
+const MEMORY_COMPARE_KEYS = ["target", "entry_id", "entry_key", "source_hash", "previous_source", "next_source", "domain", "content_type", "content_tags", "quality_status", "qa_score", "provenance", "source_file", "source_row", "asset_tier", "project_id", "library_id"];
+
+function sameMemoryField(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) return JSON.stringify(left || []) === JSON.stringify(right || []);
+  if (left === null || left === undefined || left === "") return right === null || right === undefined || right === "";
+  if (right === null || right === undefined || right === "") return false;
+  return String(left) === String(right);
+}
+
+function memoryRowUnchanged(row, body) {
+  return MEMORY_COMPARE_KEYS.every((key) => sameMemoryField(row?.[key], body?.[key]));
+}
+
 export async function saveDirectusMemories(locale, inputs = [], { onProgress } = {}) {
   const collection = memoryCollectionFor(locale);
   const results = new Array(inputs.length).fill(null);
@@ -606,24 +624,24 @@ export async function saveDirectusMemories(locale, inputs = [], { onProgress } =
   const emptyHashed = prepared.filter((item) => !item.entryKey && !item.hash);
   const existingByEntryKey = new Map();
   for (const group of chunkList(keyed, DIRECTUS_IN_QUERY_ITEMS)) {
-    const params = scope(new URLSearchParams({ limit: "-1", fields: "id,source,entry_key" }), group[0].input);
+    const params = scope(new URLSearchParams({ limit: "-1", fields: MEMORY_MATCH_FIELDS }), group[0].input);
     params.set("filter[entry_key][_in]", [...new Set(group.map((item) => item.entryKey))].join(","));
     const rows = await request(`/items/${collection}?${params}`);
-    for (const row of rows) existingByEntryKey.set(`${String(row.entry_key || "")}\u0000${normalizeMemoryText(row.source)}`, row.id);
+    for (const row of rows) existingByEntryKey.set(`${String(row.entry_key || "")}\u0000${normalizeMemoryText(row.source)}`, row);
   }
   const existingByPair = new Map();
   for (const group of chunkList(hashed, DIRECTUS_IN_QUERY_ITEMS)) {
-    const params = scope(new URLSearchParams({ limit: "-1", fields: "id,source,target,source_hash" }), group[0].input);
+    const params = scope(new URLSearchParams({ limit: "-1", fields: MEMORY_MATCH_FIELDS }), group[0].input);
     params.set("filter[source_hash][_in]", [...new Set(group.map((item) => item.hash))].join(","));
     const rows = await request(`/items/${collection}?${params}`);
-    for (const row of rows) existingByPair.set(`${String(row.source_hash || "")}\u0000${normalizeMemoryText(row.source)}\u0000${normalizeMemoryText(row.target)}`, row.id);
+    for (const row of rows) existingByPair.set(`${String(row.source_hash || "")}\u0000${normalizeMemoryText(row.source)}\u0000${normalizeMemoryText(row.target)}`, row);
   }
   // 空哈希（整段只有内联标签占位符）不能进 `_in`：Directus 会报 400/431，改用 `_empty`。
   if (emptyHashed.length) {
-    const params = scope(new URLSearchParams({ limit: "-1", fields: "id,source,target" }), emptyHashed[0].input);
+    const params = scope(new URLSearchParams({ limit: "-1", fields: MEMORY_MATCH_FIELDS }), emptyHashed[0].input);
     params.set("filter[source_hash][_empty]", "true");
     const rows = await request(`/items/${collection}?${params}`);
-    for (const row of rows) existingByPair.set(`\u0000${normalizeMemoryText(row.source)}\u0000${normalizeMemoryText(row.target)}`, row.id);
+    for (const row of rows) existingByPair.set(`\u0000${normalizeMemoryText(row.source)}\u0000${normalizeMemoryText(row.target)}`, row);
   }
   const creates = [];
   const updates = [];
@@ -634,11 +652,15 @@ export async function saveDirectusMemories(locale, inputs = [], { onProgress } =
       ? `k:${item.entryKey}\u0000${normalizeMemoryText(item.source)}`
       : `p:${item.hash || ""}\u0000${normalizeMemoryText(item.source)}\u0000${normalizeMemoryText(item.target)}`;
     const body = directusMemoryBody(item.input, item);
-    const existingId = item.entryKey
+    const existingRow = item.entryKey
       ? existingByEntryKey.get(`${item.entryKey}\u0000${normalizeMemoryText(item.source)}`)
       : existingByPair.get(`${item.hash || ""}\u0000${normalizeMemoryText(item.source)}\u0000${normalizeMemoryText(item.target)}`);
-    if (existingId) {
-      updates.push({ index: item.index, id: existingId, body, item });
+    if (existingRow) {
+      if (memoryRowUnchanged(existingRow, body)) {
+        results[item.index] = { id: existingRow.id, locale, source: item.source, target: item.target, qualityStatus: existingRow.quality_status, qaScore: Number(existingRow.qa_score) || 0, unchanged: true };
+        continue;
+      }
+      updates.push({ index: item.index, id: existingRow.id, body, item });
       continue;
     }
     const first = claimed.get(key);
@@ -661,9 +683,12 @@ export async function saveDirectusMemories(locale, inputs = [], { onProgress } =
         : { error: "批量写入没有返回这一条" };
     });
   }
-  for (const entry of updates) {
-    const row = await request(`/items/${collection}/${entry.id}`, { method: "PATCH", body: entry.body });
-    results[entry.index] = { id: row.id, locale, source: entry.item.source, target: entry.item.target, qualityStatus: row.quality_status, qaScore: Number(row.qa_score) || 0 };
+  if (updates.length) {
+    // 只有内容确实变了的行才更新；一次性批量 PATCH，避免几万条串行请求。
+    await updateItemsInChunks(`/items/${collection}`, updates.map((entry) => ({ id: entry.id, ...entry.body })));
+    for (const entry of updates) {
+      results[entry.index] = { id: entry.id, locale, source: entry.item.source, target: entry.item.target, qualityStatus: entry.body.quality_status, qaScore: Number(entry.body.qa_score) || 0 };
+    }
   }
   for (const [index, sourceIndex] of linkedTo.entries()) {
     results[index] = results[sourceIndex] ? { ...results[sourceIndex] } : { error: "同一批里的重复条目没有写成功" };
@@ -872,7 +897,7 @@ export async function loadDirectusStyleEvidenceIndex(locale, { projectId = "" } 
  * `index` 由 loadDirectusStyleEvidenceIndex 建好并在多次调用之间复用，
  * 写进去的新行会立刻记进索引，后续批次不会重复创建。
  */
-export async function saveDirectusStyleEvidences(inputs = [], { index = null } = {}) {
+export async function saveDirectusStyleEvidences(inputs = [], { index = null, onProgress } = {}) {
   const results = new Array(inputs.length).fill(null);
   if (!inputs.length) return results;
   const pairs = index?.pairs || new Map();
@@ -895,7 +920,8 @@ export async function saveDirectusStyleEvidences(inputs = [], { index = null } =
     const key = entryKey ? `k:${entryKey}` : `p:${pairKey}`;
     const existingId = entryKey ? entryKeys.get(entryKey) : pairs.get(pairKey);
     if (existingId) {
-      updates.push({ position, id: existingId, body });
+      // 证据是派生数据：同一对照再次导入时不必更新，跳过可省掉几万次 PATCH。
+      results[position] = { id: existingId, source, target, unchanged: true };
       continue;
     }
     const first = claimed.get(key);
@@ -908,7 +934,10 @@ export async function saveDirectusStyleEvidences(inputs = [], { index = null } =
   }
   if (creates.length) {
     // 分块写入：7 万条证据一次请求会在真机上撞 120 秒超时（整批失败）。
-    const saved = await createItemsInChunks("/items/style_evidence", creates.map((entry) => entry.body), { maxItems: BULK_INSERT_CHUNK_ITEMS });
+    const saved = await createItemsInChunks("/items/style_evidence", creates.map((entry) => entry.body), {
+      maxItems: BULK_INSERT_CHUNK_ITEMS,
+      onProgress: (update) => onProgress?.({ ...update, total: inputs.length })
+    });
     creates.forEach((entry, position) => {
       const row = saved[position];
       if (!row?.id) {
@@ -919,10 +948,6 @@ export async function saveDirectusStyleEvidences(inputs = [], { index = null } =
       if (entry.entryKey) entryKeys.set(entry.entryKey, row.id);
       else pairs.set(entry.pairKey, row.id);
     });
-  }
-  for (const entry of updates) {
-    const row = await request(`/items/style_evidence/${entry.id}`, { method: "PATCH", body: entry.body });
-    results[entry.position] = { id: row.id, source: row.source, target: row.target };
   }
   for (const [position, sourcePosition] of linkedTo.entries()) {
     results[position] = results[sourcePosition] ? { ...results[sourcePosition] } : { error: "同一批里的重复证据没有写成功" };

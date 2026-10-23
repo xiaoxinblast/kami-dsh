@@ -87,3 +87,50 @@ test("解析前有内存护栏：zip 解压后超量直接拒绝，不把工作�
     assert.match(materials, call);
   }
 });
+
+/**
+ * 真机事故：3 个大 PDF 同时预扫把事件循环占满，/api/health 都超时。
+ * 现在参考资料导入全局串行，预扫放进 worker 并带超时。
+ */
+test("参考资料导入串行执行，预扫放 worker 并限时", async () => {
+  const [server, worker] = await Promise.all([
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../src/reference-plan-worker.mjs", import.meta.url), "utf8")
+  ]);
+  assert.ok(server.includes("let referenceIngestQueue = Promise.resolve();"), "全局串行队列");
+  assert.ok(server.includes("let referenceIngestQueued = 0;"));
+  assert.equal(server.includes("referenceIngestQueues"), false, "不能再按文档各自排队（不同文档会并发）");
+  assert.ok(server.includes("排队中：前面还有 ${ahead} 份参考资料在导入"), "排队任务要有可见提示");
+  assert.ok(server.includes("const REFERENCE_PLAN_TIMEOUT_MS = 180_000;"));
+  assert.ok(server.includes("new Worker(new URL(\"./src/reference-plan-worker.mjs\", import.meta.url)"), "预扫走 worker");
+  assert.ok(server.includes("worker.terminate()"), "超时要能终止 worker");
+  assert.ok(server.includes("await planReferenceExtractionIsolated({ filename"), "预扫必须走 worker 版");
+  assert.ok(worker.includes("from \"./reference-materials.mjs\";"));
+  assert.ok(worker.includes("parentPort?.postMessage({ ok: true, plan });"));
+});
+
+/**
+ * 真机事故：上传被重启打断后资料一直停在 indexing，文件夹因此删不掉
+ * （"文件夹里有 15 份资料正在导入"）。失败/中断和启动时都要把状态收尾。
+ */
+test("参考资料导入中断后不会一直停在 indexing", async () => {
+  const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  assert.ok(server.includes("recoverInterruptedReferenceDocuments"));
+  assert.ok(server.includes("服务重启导致导入中断，请重新导入"));
+  assert.ok(server.includes('status: hasChunks ? "ready" : "failed"'), "有片段就恢复 ready，没有就标 failed");
+  assert.ok(server.includes('if (latest && latest.status === "indexing")'), "失败/中断时也要收尾资料状态");
+  assert.ok(server.includes("await recoverInterruptedReferenceDocuments();"), "启动时要扫一遍残留的 indexing 资料");
+});
+
+/**
+ * 真机事故：156 份参考资料在串行队列里排队，5 分钟没有进度被清扫误判为中断；
+ * 正在跑的批次翻译也被清扫误杀。清扫必须豁免本进程正在推进/排队中的任务。
+ */
+test("任务清扫不会误杀排队中的参考资料", async () => {
+  const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  assert.ok(server.includes("const queuedReferenceTasks = new Set();"));
+  assert.ok(server.includes("queuedReferenceTasks.add(String(taskId));"));
+  assert.ok(server.includes("!runningBackgroundTasks.has(task.id) && !queuedReferenceTasks.has(String(task.id))"));
+  assert.ok(server.includes("payload: { documentId: document.id, groupId:"), "上传任务要带 documentId 与上传组号，清扫收尾与任务中心折叠都要用");
+  assert.ok(server.includes("导入被服务中断，请重新导入"));
+});

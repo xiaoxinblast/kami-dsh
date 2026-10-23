@@ -209,6 +209,12 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.waitForSelector(".nav-item");
     await page.getByRole("button", { name: "任务中心" }).click();
     await page.waitForSelector("#taskList .task-row");
+    // 同一批资产导入会折叠成一组：先展开再逐条操作。
+    const bundleToggle = page.locator("#taskList [data-task-bundle-toggle]").first();
+    if (await bundleToggle.count()) {
+      await bundleToggle.click();
+      await page.waitForSelector("#taskList .task-bundle-body:not([hidden]) .task-row");
+    }
 
     // 正在跑的批次：暂停 + 中断
     const runningRow = page.locator('#taskList .task-row[data-task-id="batch-1"]');

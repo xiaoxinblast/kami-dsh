@@ -6,11 +6,11 @@ import { extname, join } from "node:path";
  *
  * 上传待译文件时把它按批次存到 data/uploads/<batchId><ext>，批次记录里只存相对路径。
  * 这样"导出写回"随时可用（刷新页面、换一台机器打开任务中心都不需要重新选原文件），
- * 也避免把 20MB 的 base64 塞进 Directus 的文本字段。
+ * 也避免把 32MB 的 base64 塞进 Directus 的文本字段。
  */
 export const ORIGINAL_UPLOAD_DIRECTORY = "uploads";
 const ALLOWED_EXTENSIONS = new Set([".docx", ".xlsx", ".csv", ".xliff", ".mqxliff", ".txt", ".md"]);
-const MAX_BYTES = 20 * 1024 * 1024;
+const MAX_BYTES = 32 * 1024 * 1024;
 const isArchivedPath = (path) => /^(?:uploads\/|runtime\/workspace-snapshots\/)/u.test(path) && !path.includes("..") && !path.includes("\\");
 
 function safeExtension(filename) {

@@ -97,12 +97,19 @@ test("语境分析是硬门禁：没就绪按钮置灰，并且不用刷新就�
 });
 
 test("任务中心按状态分三段渲染，原有动作一个不少", async () => {
-  const { script, styles } = await sources();
+  const { script, styles, html } = await sources();
   assert.match(script, /\{ id: "running", title: "进行中"/u);
   assert.match(script, /\{ id: "attention", title: "待处理"/u);
   assert.match(script, /\{ id: "done", title: "已完成"/u);
   assert.match(script, /class="task-group" data-task-group=/u);
   assert.match(script, /class="task-row task-card"/u);
+  // 2026-10-23 任务中心改版：状态数字是可点击筛选按钮，筛选收进图标面板，同批任务可折叠。
+  assert.match(html, /id="taskFilterToggle"/u);
+  assert.match(html, /id="taskFilterPanel" hidden/u);
+  assert.doesNotMatch(html, /id="taskStatus"/u, "旧的状态大下拉已被按钮替代");
+  assert.match(script, /data-task-filter=/u);
+  assert.match(script, /task-bundle-toggle/u);
+  assert.match(script, /groupTaskEntries/u);
   assert.match(styles, /\.task-card\[data-task-status="needs_attention"\]/u);
   // 动作清单：批次 / 质检 / 后台任务 / 学习评测全在。
   for (const action of [
@@ -112,4 +119,12 @@ test("任务中心按状态分三段渲染，原有动作一个不少", async ()
   ]) {
     assert.match(script, new RegExp(`data-action="${action}"`, "u"), `任务中心少了动作 ${action}`);
   }
+});
+
+test("导出预检复用批次里保存的术语匹配，避免逐段重算", async () => {
+  const { server, script } = await sources();
+  assert.match(script, /body: JSON\.stringify\(\{\s*\.\.\.projectPayload\(\),\s*batchId,/u, "前端预检要带上 batchId");
+  assert.match(server, /const savedRun = body\.batchId \? await getBatchRun/u);
+  assert.match(server, /Array\.isArray\(saved\.result\?\.matches\)/u, "原文没改就复用保存的 matches");
+  assert.match(server, /const matches = resolveSegmentMatches\(withMatches/u);
 });

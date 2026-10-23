@@ -36,7 +36,7 @@ export const REFERENCE_FORMATS = Object.freeze([".txt", ".md", ".docx", ".xlsx",
 /**
  * 参考资料的单文件上限。
  *
- * 只放宽这一个入口：待译文件、TM / 术语导入仍按 20MB（那些链路是"逐条入表"，
+ * 只放宽这一个入口：待译文件、TM / 术语导入仍按 32MB（那些链路是"逐条入表"，
  * 几百 MB 的表格本来也不该整份走一遍）。上传走原始字节流式落盘，浏览器不拼 base64。
  */
 export const MAX_REFERENCE_FILE_BYTES = 200 * 1024 * 1024;

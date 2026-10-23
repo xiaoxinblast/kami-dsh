@@ -10,7 +10,7 @@ const HEADER_SCAN_LIMIT = 12;
 // 而且不报错、不提示——静默丢 89% 的数据比慢更糟。真触发上限时必须由调用方
 // 通过 statistics.truncated / totalRows 明确告知用户。
 const MAX_ROWS = 200_000;
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const DOMAINS = new Set(["game", "marketing", "community", "general"]);
 const SHEET_MODES = new Set(["dialogue", "glossary", "mixed"]);
 const TERM_CATEGORIES = new Set([
@@ -456,7 +456,7 @@ export async function extractTermPairs({ filename, base64, buffer: bytes, locale
     throw error;
   }
   if (buffer.length > MAX_FILE_BYTES) {
-    const error = new Error("表格不能超过 20MB");
+    const error = new Error(`表格不能超过 ${Math.round(MAX_FILE_BYTES / (1024 * 1024))}MB`);
     error.statusCode = 413;
     throw error;
   }

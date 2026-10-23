@@ -17,7 +17,8 @@ export const REPAIR_EVIDENCE_LABELS = Object.freeze({
   tm_master: "主 TM 人工条",
   tm_reference: "参考 TM 人工条",
   file_majority: "文件内多数",
-  paired_scheme: "配对方案"
+  paired_scheme: "配对方案",
+  ai_judgement: "AI 终审"
 });
 
 export const REPAIR_SKIP_REASONS = Object.freeze({
