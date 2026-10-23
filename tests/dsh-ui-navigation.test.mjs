@@ -9,6 +9,19 @@ async function stateModule() {
   return modules.get("client.workbench-state.js")();
 }
 
+test("asset library links and priority changes remain scoped to their purpose", async () => {
+  const { linkedPaths, resourceSelection, libraryPriorityChanges } = await stateModule();
+  const libraries = [{ id: "main", priority: 1, enabled: true }, { id: "ref", priority: 3, enabled: false }, { id: "last", priority: 8, enabled: true }];
+  const config = { terms: ["shared.csv"], translationMemories: ["shared.csv", "other.csv"], references: ["story.pdf"], libraryFiles: [{ path: "shared.csv", purpose: "terms", libraryId: "main" }, { path: "shared.csv", purpose: "tm", libraryId: "ref" }, { path: "other.csv", purpose: "tm", libraryId: "last" }] };
+  assert.deepEqual(Array.from(linkedPaths(config, "terms", "main")), ["shared.csv"]);
+  assert.deepEqual(Array.from(linkedPaths(config, "tm", "ref")), ["shared.csv"]);
+  assert.deepEqual(Array.from(resourceSelection(config, libraries).translationMemories), ["other.csv"]);
+  const changes = libraryPriorityChanges(libraries, "last", -1);
+  assert.deepEqual(JSON.parse(JSON.stringify(changes)), [{ id: "main", priority: 1 }, { id: "last", priority: 2 }, { id: "ref", priority: 3 }]);
+  assert.equal(libraryPriorityChanges(libraries, "main", -1).length, 0);
+  assert.equal(libraries[2].priority, 8, "computing a move must not mutate the current catalog");
+});
+
 test("5000 review segments stay paged, searchable and selectable without opening every editor", async () => {
   const { reviewPage } = await stateModule();
   const segments = Array.from({ length: 5000 }, (_, index) => ({ id: `s${index}`, source: `原文${index}`, translation: index === 4201 ? "查找目标" : "译文", result: index === 4201 ? { issues: [{ message: "核对" }] } : {} }));

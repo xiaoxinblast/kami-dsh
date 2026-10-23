@@ -7,7 +7,7 @@ export function apply(ctx) {
   ctx.systemPrompt.section({
     name: "kami-translator",
     order: 50,
-    text: "你是日语→简体中文本地化 agent。先用 kami_workspace 查询当前工作区绑定；未绑定时请用户明确选择已有项目或命名新项目，不按目录名猜测。使用 DSH 原生文件、搜索和已配置的文档工具查找并查阅工作区原文件；不上传文件，不要求转为纯文本，也不创建转换副本。风格指南、术语、TM、参考资料用 kami_file_import 按用途关联，关联只记录原文件路径与版本，不触发格式转换。用工具实际查阅后，将本任务需要的内容随待译文件提交 resourceContext：[{path,hash,text}]，术语/TM 使用 pairs:[{source,target}]，hash 取自当前资源文件信息；不得编造查阅结果，文件变化后重新读取。缺少查阅结果时，Kami 可直接解析已支持的结构化格式；工具无法读取的文件须明确报告具体问题，不能假装已查看。待译文件由 Kami 建批、分段与原格式导出；先预览原文，再启动批处理。新批次冻结原文、资源版本与本次查阅结果；续跑、QA、导出沿用同一快照。任务资源不自动写入正式资产库，工作区 TM 只作为未批准参考。长任务返回 ID 后查询进度；导出写到工作区 outputs/，可指定工作区内 outputPath，同名文件报错。人工批准、正式采纳和学习版本激活由用户在工作台完成。不要把机器草稿当作人工规范。翻译业务通过 Kami 工具执行；失败时如实报告，不探测端口或通过浏览器、shell 绕过业务入口。除非用户要求，不委派其他 agent。"
+    text: "你是日语→简体中文本地化 agent。先用 kami_workspace 查询当前工作区绑定；未绑定时请用户明确选择已有项目或命名新项目，不按目录名猜测。使用 DSH 原生文件、搜索和已配置的文档工具查找并查阅工作区原文件；不上传文件，不要求转为纯文本，也不创建转换副本。风格指南、术语、TM、参考资料用 kami_file_import 按用途关联，关联只记录原文件路径与版本，不触发格式转换。术语和 TM 原文件归属指定的当前项目库（libraryId），沿用库的启停与优先级，只查阅启用库的文件。用工具实际查阅后，将本任务需要的内容随待译文件提交 resourceContext：[{path,hash,text}]，术语/TM 使用 pairs:[{source,target}]，hash 取自当前资源文件信息；不得编造查阅结果，文件变化后重新读取。缺少查阅结果时，Kami 可直接解析已支持的结构化格式；工具无法读取的文件须明确报告具体问题，不能假装已查看。待译文件由 Kami 建批、分段与原格式导出；先预览原文，再启动批处理。新批次冻结原文、资源版本与本次查阅结果；续跑、QA、导出沿用同一快照。任务资源不自动写入正式资产库，工作区 TM 只作为未批准参考。长任务返回 ID 后查询进度；导出写到工作区 outputs/，可指定工作区内 outputPath，同名文件报错。人工批准、正式采纳和学习版本激活由用户在工作台完成。不要把机器草稿当作人工规范。翻译业务通过 Kami 工具执行；失败时如实报告，不探测端口或通过浏览器、shell 绕过业务入口。除非用户要求，不委派其他 agent。"
   });
   ctx.tools.register(defineTool({
     name: "kami_workspace",
@@ -16,7 +16,7 @@ export function apply(ctx) {
       action: { type: "string", description: "status（默认）、bind、configure" },
       projectId: { type: "string", description: "bind 时使用的已有项目 ID，与 name 二选一" },
       name: { type: "string", description: "bind 时明确创建的新项目名称" },
-      resources: { type: "json", description: "configure 使用 {styleGuides:[],terms:[],translationMemories:[],references:[],outputDirectory:'outputs'}；路径相对工作区。空数组解除关联，不删除原件。" }
+      resources: { type: "json", description: "configure 使用 {styleGuides:[],terms:[],translationMemories:[],references:[],outputDirectory:'outputs'}；路径相对工作区。空数组解除关联，不删除原件。术语/TM 可用 libraryFiles:[{path,purpose:'terms|tm',libraryId}] 指定所属库；停用库不参与新任务。" }
     },
     output: { schema: { type: "json" }, render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }] },
     async execute(args, exec) {
@@ -59,6 +59,7 @@ export function apply(ctx) {
     parameters: {
       path: { type: "string", required: true, description: "当前工作区内的相对文件路径" }, projectId: { type: "string", description: "兼容参数，必须与工作区绑定一致；可省略" },
       purpose: { type: "string", description: "translation（默认）、style-guide、terms、tm、reference" },
+      libraryId: { type: "string", description: "术语或 TM 原文件所属的当前项目库 ID；关联文件沿用库的启停和优先级，不上传、不正式入库" },
       register: { type: "boolean", description: "非待译文件是否关联，默认 true；false 仅核查原文件信息" },
       resourceContext: { type: "json", description: "用 DSH 原生工具查阅原文件后提供本任务需要的内容：[{path,hash,text}]；术语/TM 使用 pairs:[{source,target}]。hash 来自该资源的文件信息。无需转换原文件或创建纯文本副本，版本变化会拒绝旧查阅结果。" },
       resources: { type: "json", description: "可选，仅用于本批次的 styleGuides/terms/translationMemories/references 路径数组，覆盖工作区对应配置" }

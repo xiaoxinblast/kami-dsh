@@ -23,7 +23,26 @@ function configValue(value) {
     if (value[field] !== undefined && !Array.isArray(value[field])) throw new Error(`${field} 必须是相对路径数组`);
     config[field] = [...new Set((value[field] || []).map(relativePath))];
   }
+  if (value.libraryFiles !== undefined && !Array.isArray(value.libraryFiles)) throw new Error("libraryFiles 必须是本地文件关联数组");
+  config.libraryFiles = (value.libraryFiles || []).map((item) => {
+    if (!["terms", "tm"].includes(item?.purpose) || typeof item.libraryId !== "string" || !item.libraryId.trim()) throw new Error("本地文件关联需要用途与资源库 ID");
+    return { path: relativePath(item.path), purpose: item.purpose, libraryId: item.libraryId };
+  }).filter((item) => config[fields[item.purpose]].includes(item.path));
   return config;
+}
+
+function fileLibrary(libraries, purpose, libraryId) {
+  const kind = purpose === "terms" ? "term_base" : "translation_memory";
+  const candidates = libraries.filter((item) => item.kind === kind).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.id.localeCompare(b.id));
+  const library = libraryId ? candidates.find((item) => item.id === libraryId)
+    : candidates.find((item) => item.role === "reference") || candidates.find((item) => item.role === "working") || candidates[0];
+  if (!library) throw new Error("资源库不存在，或库类型与文件用途不匹配");
+  return library;
+}
+
+function resolveFileLibraries(config, libraries) {
+  return ["terms", "tm"].flatMap((purpose) => config[fields[purpose]].map((path) => ({ path, purpose,
+    libraryId: fileLibrary(libraries, purpose, config.libraryFiles.find((item) => item.purpose === purpose && item.path === path)?.libraryId).id })));
 }
 
 // DSH owns file resolution and byte reads. Node realpath is an additional local containment check;
@@ -120,7 +139,8 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     const projects = (await invoke({ path: "/api/projects" }, context)).projects || [];
     const project = projects.find((item) => item.id === config?.projectId) || null;
     if (config && !project) throw new Error(`工作区绑定的 Kami 项目不存在：${config.projectId}`);
-    return { workspace: root, config, project, bound: Boolean(config), isKamiSession: context.isKamiSession === true, sessionId: context.sessionId || "" };
+    const libraries = config ? (await invoke({ path: `/api/projects/${encodeURIComponent(config.projectId)}/libraries` }, context)).libraries || [] : [];
+    return { workspace: root, config: config ? { ...config, libraryFiles: resolveFileLibraries(config, libraries) } : config, libraries, project, bound: Boolean(config), isKamiSession: context.isKamiSession === true, sessionId: context.sessionId || "" };
   }
   async function workspace(args = {}, context) {
     const action = args.action || "status";
@@ -132,13 +152,16 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
       const project = args.projectId ? (await invoke({ path: "/api/projects" }, context)).projects.find((item) => item.id === args.projectId)
         : (await invoke({ path: "/api/projects", method: "POST", body: { name: args.name } }, context)).project;
       if (!project) throw new Error("指定的 Kami 项目不存在");
-      await update(context, (current) => ({ ...current, version: 1, projectId: project.id }));
+      await update(context, (current) => ({ ...current, version: 1, projectId: project.id, libraryFiles: current?.projectId === project.id ? current.libraryFiles : [] }));
     } else if (action === "configure") {
-      await update(context, (current) => {
+      await update(context, async (current) => {
         if (!current) throw new Error("请先明确绑定或创建 Kami 项目");
-        const allowed = Object.keys(args.resources || {}).every((key) => [...Object.values(fields), "outputDirectory"].includes(key));
+        const allowed = Object.keys(args.resources || {}).every((key) => [...Object.values(fields), "outputDirectory", "libraryFiles"].includes(key));
         if (!allowed) throw new Error("未知的工作区资源字段");
-        return { ...current, ...args.resources };
+        const next = configValue({ ...current, ...args.resources });
+        const libraries = (await invoke({ path: `/api/projects/${encodeURIComponent(current.projectId)}/libraries` }, context)).libraries || [];
+        resolveFileLibraries(next, libraries);
+        return next;
       });
     } else throw new Error("未知的工作区操作");
     return status(context);
@@ -192,18 +215,21 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     const config = configValue({ ...state.config, ...resources });
     const result = { id: randomUUID(), workspace: state.workspace, projectId: config.projectId, createdAt: new Date().toISOString(), outputDirectory: config.outputDirectory, resources: [], terms: [], memories: [], referenceChunks: [], guide: null };
     const guides = [];
+    const libraries = (await invoke({ path: `/api/projects/${encodeURIComponent(config.projectId)}/libraries` }, context)).libraries || [];
     for (const [purpose, field] of Object.entries(fields)) {
       for (const path of config[field]) {
+        const library = ["terms", "tm"].includes(purpose) ? fileLibrary(libraries, purpose, config.libraryFiles.find((item) => item.purpose === purpose && item.path === path)?.libraryId) : null;
+        if (library?.enabled === false) continue;
         const resource = await parseResource(state.workspace, purpose, path, context, resourceContext);
         const { parsed, ...metadata } = resource;
-        result.resources.push(metadata);
+        result.resources.push({ ...metadata, ...(library ? { libraryId: library.id, libraryName: library.name, libraryPriority: library.priority } : {}) });
         if (purpose === "style-guide") guides.push(`【${path}】\n${parsed.text}`);
         else if (purpose === "reference") {
           const documentId = `workspace:${hash(`${path}\0${resource.hash}`)}`;
           result.referenceChunks.push(...parsed.chunks.map((chunk, ordinal) => ({ ...chunk, id: `${documentId}:${ordinal}`, documentId, documentName: path, documentStatus: "ready", ordinal, libraryEnabled: true, risk: scanReferenceRisk(chunk.text), allowed: !scanReferenceRisk(chunk.text) })));
         } else {
-          const libraryId = `workspace:${hash(path)}`;
-          const items = parsed.candidates.filter((item) => item.source && item.target && item.decision !== "excluded").map((item, index) => ({ ...item, id: `${libraryId}:${index}`, locale: "zh-CN", projectId: config.projectId, libraryId, libraryName: path, libraryRole: "reference", libraryPriority: 1, libraryEnabled: true, status: "approved", qualityStatus: purpose === "tm" ? "machine_verified" : "human_approved", assetTier: purpose === "tm" ? "working" : "formal", workspaceResource: true, taskId: result.id, sourceFile: path, contentType: "general", domain: "general" }));
+          const libraryId = `workspace:${hash(`${purpose}\0${path}`)}`;
+          const items = parsed.candidates.filter((item) => item.source && item.target && item.decision !== "excluded").map((item, index) => ({ ...item, id: `${libraryId}:${index}`, locale: "zh-CN", projectId: config.projectId, libraryId, linkedLibraryId: library?.id, libraryName: library?.name || path, libraryRole: "reference", libraryPriority: library?.priority || 1, libraryEnabled: true, status: "approved", qualityStatus: purpose === "tm" ? "machine_verified" : "human_approved", assetTier: purpose === "tm" ? "working" : "formal", workspaceResource: true, taskId: result.id, sourceFile: path, contentType: "general", domain: "general" }));
           result[purpose === "terms" ? "terms" : "memories"].push(...items);
         }
       }
@@ -218,9 +244,13 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     const path = isAbsolute(args.path || "") ? relative(state.workspace, await realpath(args.path)) : args.path;
     if (purpose !== "translation") {
       if (!fields[purpose]) throw new Error("未知的文件用途");
+      const savedLink = state.config.libraryFiles.find((item) => item.purpose === purpose && item.path === relativePath(path));
+      const library = ["terms", "tm"].includes(purpose) ? fileLibrary(state.libraries, purpose, args.libraryId || savedLink?.libraryId) : null;
+      if (args.libraryId && !library) throw new Error("此文件用途不使用术语或 TM 资源库");
       const source = await readSource(state.workspace, path, context, undefined, true);
-      const resource = { ...source, purpose };
-      if (args.register !== false) await update(context, (config) => ({ ...config, [fields[purpose]]: [...new Set([...config[fields[purpose]], resource.path])] }));
+      const resource = { ...source, purpose, ...(library ? { libraryId: library.id, libraryName: library.name } : {}) };
+      if (args.register !== false) await update(context, (config) => ({ ...config, [fields[purpose]]: [...new Set([...config[fields[purpose]], resource.path])],
+        libraryFiles: [...config.libraryFiles.filter((item) => item.purpose !== purpose || item.path !== resource.path), ...(library ? [{ path: resource.path, purpose, libraryId: library.id }] : [])] }));
       return { ...resource, registered: args.register !== false, readMode: "agent", taskScoped: true };
     }
     const source = await readSource(state.workspace, path, context);

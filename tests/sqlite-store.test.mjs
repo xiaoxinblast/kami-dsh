@@ -2,6 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SqliteStore } from "../src/sqlite-store.mjs";
 
+test("field projections preserve boolean library enablement and structured values", () => {
+  const store = new SqliteStore(":memory:");
+  try {
+    store.request("/items/project_resource_libraries", { method: "POST", body: { id: "off", enabled: false, name: "引用库", priority: 2, extra: { active: true } } });
+    assert.deepEqual(store.request("/items/project_resource_libraries?fields=id,enabled,name,priority,extra"), [{ id: "off", enabled: false, name: "引用库", priority: 2, extra: { active: true } }]);
+  } finally { store.close(); }
+});
+
 test("local assets preserve project scopes, pagination, aggregates and atomic writes", () => {
   const store = new SqliteStore(":memory:");
   try {

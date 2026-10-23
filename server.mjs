@@ -1478,7 +1478,7 @@ async function getProjectStyleProfile(locale, options = {}) {
 
 async function getMemoryCandidates(locale, options = {}) {
   const memories = await getStoredMemoryCandidates(locale, options);
-  if (options.libraryIds?.length) return memories;
+  if (options.libraryIds?.length && options.includeWorkspace !== true) return memories;
   return mergeWorkspaceMemories(memories, taskResources(options.projectId), options);
 }
 
@@ -8230,7 +8230,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
       scopeFallback: true,
       contentType: classification.contentType,
       domain,
-      libraryIds: projectLibraries.filter((library) => library.enabled).map((library) => library.id)
+      libraryIds: projectLibraries.filter((library) => library.enabled).map((library) => library.id),
+      includeWorkspace: true
     });
     const librariesById = new Map(projectLibraries.map((library) => [library.id, library]));
     const scopedMemories = localeMemories.map((memory) => {

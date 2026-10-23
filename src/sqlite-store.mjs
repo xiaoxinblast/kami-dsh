@@ -115,7 +115,7 @@ export class SqliteStore {
       const offset = Number(params.get("offset") || 0);
       if (!Number.isInteger(limit) || limit < -1 || !Number.isInteger(offset) || offset < 0) throw new Error("Invalid local pagination");
       const fields = params.get("fields")?.split(",");
-      const projection = fields && !fields.includes("*") ? `json_object(${fields.map((key) => { const expression = field(key); return `'${key}', ${expression}`; }).join(",")}) AS body` : "body";
+      const projection = fields && !fields.includes("*") ? `json_object(${fields.map((key) => { field(key); return `'${key}', json(body -> '$.${key}')`; }).join(",")}) AS body` : "body";
       const rows = this.db.prepare(`SELECT ${projection} FROM records WHERE ${predicate} ORDER BY ${orders.join(",")} LIMIT ? OFFSET ?`).all(...args, limit, offset).map((row) => JSON.parse(row.body));
       if (id && !rows.length) throw Object.assign(new Error("Record not found"), { statusCode: 404 });
       return id ? rows[0] : rows;

@@ -76,7 +76,9 @@ npm run migrate:local -- --source-env '<旧项目>\directus\.env' --source-data 
 
 路径均相对当前工作区，不要求移动文件。会话中切换工作目录后，使用 DSH `workingDirectory` 的当前值；目录缺失、越界路径、外部链接均报错，不回退到创建会话时的目录。页面和 agent 共用 Host 文件服务，文件字节不经浏览器或聊天 Base64。
 
-在“资源”页选择风格指南、术语、翻译记忆或参考资料，通过工作区相对路径关联原文件，并按目录浏览、搜索或查看文件版本。关联不按上传文件的大小或扩展名拦截，也不触发格式转换；“让 Agent 查看原文件”由当前会话使用 DSH 工具查阅。解除关联只修改配置，不删除原件。关联和 Agent 查阅结果的版本核对使用分块读取计算 SHA-256，不为登记资源整份缓存大文件。
+在“资产”页统一管理术语库、记忆库 TM、风格指南和参考资料。术语/TM 进入具体库后，通过“关联文件”填写工作区相对路径，按目录浏览、搜索或查看文件版本；“已有条目”保留库内历史记录。关联不按上传文件的大小或扩展名拦截，也不触发格式转换或正式条目导入；“让 Agent 查看原文件”由当前会话使用 DSH 工具查阅。解除关联只修改配置，不删除原件。关联和 Agent 查阅结果的版本核对使用分块读取计算 SHA-256，不为登记资源整份缓存大文件。
+
+术语/TM 的文件归属记录在 `.kami/project.json` 的 `libraryFiles:[{path,purpose,libraryId}]`，`purpose` 为 `terms` 或 `tm`。库列表用 ↑ / ↓ 调整优先级，数字越小越优先；新任务使用所属库当前的优先级和启停状态，已有批次保留冻结的文件库信息。旧版只有路径数组的关联继续可读，按已有相应用途库归属显示，不自动导入库内条目。人工正式术语与批准 TM 的保护规则继续生效。
 
 当前会话可将实际查阅得到的任务内容传入 `kami_file_import.resourceContext`：`[{path,hash,text}]`；术语/TM 使用 `pairs:[{source,target}]`。`hash` 来自同一文件的资源信息，原文件变化后会拒绝旧结果。无需创建纯文本副本；查阅结果随批次冻结，不自动写入正式资产库。未提供查阅结果时，Kami 保留对已有结构化资源格式的内部解析。有关联资源时，快捷建批和独立审校默认交给 Agent；待译文件的分段和原格式写回仍使用 Kami 的 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF 处理链路。
 
@@ -95,7 +97,7 @@ DSH 的本地文件及进程内操作不沿用服务器上传大小、请求体�
 > 用 `rules/style.md` 和 `glossary.xlsx` 翻译 `source/dialogue.docx`，结果放到 `outputs/`。
 
 - `kami_workspace`：`status` 查询；`bind` 指定已有 `projectId` 或明确新建的 `name`；`configure` 设置上述资源路径和输出目录。
-- `kami_file_import`：`{path,purpose}`，用途为 `translation`（默认）、`style-guide`、`terms`、`tm`、`reference`。原有 `{path,projectId}` 参数保留，项目必须与工作区绑定一致。`register:false` 只核查原文件信息；创建待译批次时可用 `resources` 覆盖本次资源路径数组，并以 `resourceContext` 提供 Agent 实际查阅结果。
+- `kami_file_import`：`{path,purpose}`，用途为 `translation`（默认）、`style-guide`、`terms`、`tm`、`reference`。术语/TM 可指定当前项目的 `libraryId` 关联到具体库。原有 `{path,projectId}` 参数保留，项目必须与工作区绑定一致。`register:false` 只核查原文件信息；创建待译批次时可用 `resources` 覆盖本次资源路径数组，并以 `resourceContext` 提供 Agent 实际查阅结果。
 - `kami_workbench`：按批次 ID 启动、暂停、QA、检查进度与导出。`POST /api/batch/export` 可带 `outputPath`，返回工作区文件路径。
 - `kami_help`：操作索引与当前工作区状态。
 
@@ -118,6 +120,18 @@ npm pack --dry-run
 `tests/dsh-workspace.test.mjs` 验证路径与链接隔离、任务快照、新文件版本、重启续跑、参考索引与防覆盖导出；SDK 启用时使用真实 DSH LocalFileSystem。`tests/dsh-ui-bridge.test.mjs` 使用真实 Client/Host SDK 检查严格 Remote 编解码、服务注入和页面不追加聊天 JSON。`tests/dsh-workbench.test.mjs` 在禁止 HTTP 的条件下用隔离数据库验证项目创建、批次翻译、原格式导出和数据库重开；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。DSH SDK 可用时，`tests/dsh-model-adapter.test.mjs` 验证消息协议，`tests/dsh-agent.test.mjs` 验证预设工具范围。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
 
 UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。
+
+### 0.9.5 统一资产与本地文件
+
+主导航合并为“任务 / 资产 / 学习 / 审校 / 设置”。资产页以库为入口，提供术语库、TM、风格指南、参考资料四类，不提供上传、导入或转换入口。术语/TM 库内可切换关联本地文件与已有条目；新增库后直接进入文件关联。
+
+库列表新增 ↑ / ↓ 调整按钮，保存连续优先级并刷新实际顺序；关联文件随所属库启停，快捷建批默认只选择启用库的文件。SQLite 字段投影保留原始 JSON 布尔值，避免停用库被误判为启用。
+
+翻译检索显式合并工作区文件 TM 与已启用项目库候选，修复原先带库筛选时提前返回而漏掉文件 TM 的问题；严格指定正式库的查询不混入工作区机器参考。文件 TM 继续保留机器参考身份，不能获得人工批准权限。回归用例验证了实际发给模型的内容包含文件 TM、优先级排序、停用、版本快照、跨库用途校验与原件保留。
+
+本轮在隔离的真实 DSH Web Host/Client 中操作并截图检查宽窄面板、明暗主题、新建库、关联/解除、优先级上移、停用及历史 TM 条目浏览。没有配置线上模型或改动用户业务数据；模型内容验证使用隔离适配器。桌面 Electron 窗口不在本轮截图范围内。
+
+最终回归共 1,065 项：999 项通过、0 项失败、66 项因环境条件跳过；插件检查通过，安装包 109 文件，排除本地数据库、原件和验收缓存。
 
 ### 0.9.4 UI 与本地文件
 
