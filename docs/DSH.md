@@ -14,6 +14,8 @@
 
 插件只通过 DSH 的管理入口安装，不修改 `app.asar`。更新已加载的 Host 模块后，按插件管理结果处理需要的重启；不要把“依赖已保存”当作已经生效。
 
+本次桌面验收发现，连续热卸载／安装后，表格解析曾报 `ExcelJS.Workbook is not a constructor`；正常退出并重启 DSH 后，同一文件解析成功。更新到 0.9.0 后请正常重启一次 DSH，再开始翻译任务。
+
 GitHub 安装不是自动更新。当前 DSH 对第三方插件要求先卸载旧程序包，再安装仓库地址；管理器会报告是否需要重启。本地资产位于独立的数据目录，卸载程序包不删除资产。也可安装明确的发布标签，把运行版本固定到已验收的提交。更新程序包不会把本地数据库或上传文件放进 GitHub。
 
 若插件页热卸载报告 `profile reload requires the root Include entry`，退出 DSH 后可通过它自带的 CLI 更新程序包。已注册 `dsh` 命令时运行以下命令，再启动桌面端；未注册时可调用安装目录下的 `resources/runtime/cli/bin/dsh.cmd`：
@@ -34,7 +36,7 @@ dsh plugin --profile desktop add 'github:xiaoxinblast/kami-dsh#main'
 - `exports/`：旧版导出和兼容接口的派生文件；新流程导出到工作区。
 - `backups/`：从工作台创建的数据库备份。
 
-数据库备份使用 SQLite 在线备份接口；迁移和完整人工备份还需保留 `uploads/`、`learning/` 与 `runtime/settings.json`。恢复应在插件停用时进行，使用备份数据库替换 `kami.sqlite`，同时恢复对应文件目录。
+数据库备份使用 SQLite 在线备份接口；迁移和完整人工备份还需保留 `uploads/`、`learning/` 与 `runtime/`（含任务原件快照和设置）。恢复应在插件停用时进行，使用备份数据库替换 `kami.sqlite`，同时恢复对应文件目录。
 
 正常工作不启动 Kami HTTP 服务，不连接 Directus，也不依赖 Docker。业务入口在 DSH Host 内执行，SQLite 是正式存储。旧仓库的 HTTP 路由被复用为进程内操作分发，以保留现有翻译、QA、学习与导出行为。
 
@@ -89,6 +91,8 @@ npm run migrate:local -- --source-env '<旧项目>\directus\.env' --source-data 
 - `kami_workspace`：`status` 查询；`bind` 指定已有 `projectId` 或明确新建的 `name`；`configure` 设置上述资源路径和输出目录。
 - `kami_file_import`：`{path,purpose}`，用途为 `translation`（默认）、`style-guide`、`terms`、`tm`、`reference`。原有 `{path,projectId}` 参数保留，项目必须与工作区绑定一致。`register:false` 只预览；创建待译批次时可用 `resources` 指定本次任务的资源数组覆盖。
 - `kami_workbench`：按批次 ID 启动、暂停、QA、检查进度与导出。`POST /api/batch/export` 可带 `outputPath`，返回工作区文件路径。
+
+批次模型审校调用 `POST /api/auto-qa` 时携带 `batchId`、`projectId`、`locale`、`source` 和 `translation`，使用该批次冻结的指南和术语等资源；不存在的批次报错，不回退到当前文件。省略 `batchId` 则是独立审校，读取当前工作区的最新资源。
 - `kami_help`：操作索引与当前工作区状态。
 
 模型优先使用关联会话待生效的模型选择，其次是最近一次请求的 provider/model，新会话使用 DSH 默认模型。所有调用经过 DSH 模型服务，不另存模型 Key。固定 seed 不可用会明确标记，截断、错误和取消会转为失败，不能算作成功译文。图片识别通过 DSH 附件协议保存和发送图片，需要关联会话所选模型支持图像输入；不支持时任务报告失败。

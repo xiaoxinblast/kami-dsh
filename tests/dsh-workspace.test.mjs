@@ -14,7 +14,7 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
   const data = join(directory, "data"), first = join(directory, "项目甲"), second = join(directory, "项目乙");
   const { fs, close } = await workspaceFs();
   const messages = [];
-  const modelAdapter = async (input, options) => { messages.push(JSON.stringify(input)); return { content: options.requestLabel === "工作术语学习" ? '{"terms":[]}' : "保存设置。" }; };
+  const modelAdapter = async (input, options) => { messages.push(JSON.stringify(input)); return { content: options.requestLabel === "工作术语学习" ? '{"terms":[]}' : options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "保存设置。" }; };
   let workbench = await createWorkbench({ dataDirectory: data, modelAdapter });
   const context = { cwd: first, fs, human: true, isKamiSession: true, signal: new AbortController().signal };
   const other = { ...context, cwd: second };
@@ -99,6 +99,10 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       assert.equal(current.segments[0].status, "done", current.segments[0].error);
       assert.equal(current.segments[0].source, "設定を保存します。");
       assert.ok(messages.some((text) => text.includes("指南版本甲")), "resumed translation consumes pinned guide");
+      const qa = await workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { batchId, projectId, locale: "zh-CN", source: current.segments[0].source, translation: current.segments[0].translation } }, context);
+      assert.match(qa.styleProfile.instruction, /指南版本甲/);
+      assert.doesNotMatch(qa.styleProfile.instruction, /指南版本乙/);
+      await assert.rejects(workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { batchId: "missing-batch", projectId, locale: "zh-CN", source: "設定", translation: "设置" } }, context), /未找到.*批次/);
       const exported = await workbench.perform({ action: "export", batchId, projectId, mode: "writeback" }, context);
       assert.match(relative((await workbench.workspace({}, context)).workspace, exported.path), /^outputs[\\/]/);
       assert.equal(await readFile(exported.path, "utf8"), "保存设置。");
@@ -110,6 +114,7 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       assert.equal((await workbench.workspace({}, other)).bound, false);
       await workbench.workspace({ action: "bind", projectId }, other);
       await assert.rejects(readRun(batchId, other), /另一个工作区/);
+      await assert.rejects(workbench.invoke({ path: `/api/qa/batch/${batchId}?projectId=${projectId}` }, other), /另一个工作区/);
       await assert.rejects(workbench.perform({ action: "file", path: "source/对白.txt", expectedWorkspace: first }, other), /已切换/);
       const files = await workbench.invoke({ path: `/api/batch/files?projectId=${projectId}` }, other);
       assert.equal(files.files.some((item) => item.batchId === batchId), false);

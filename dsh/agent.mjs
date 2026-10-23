@@ -32,7 +32,7 @@ export function apply(ctx) {
       path: { type: "string", required: true, description: "Kami 操作路径。先 GET /api/projects 选择项目；文件队列 GET /api/batch/files?projectId=…；任务 GET /api/tasks?projectId=…；完整操作索引见 kami_help。" },
       offset: { type: "integer", description: "返回数组的起始位置，默认 0" },
       limit: { type: "integer", description: "每个返回数组最多 1–30 项，默认 10；查询数据库分页还需在 path 中设置 limit/offset" },
-      body: { type: "json", description: "写操作所需字段；项目与文件操作必须指定 projectId。" }
+      body: { type: "json", description: "写操作所需字段；项目与文件操作必须指定 projectId。对已有批次调用 /api/auto-qa 时携带 batchId，沿用该批次资源快照。" }
     },
     output: { schema: { type: "json" }, render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }] },
     async execute(args, exec) {
@@ -87,7 +87,7 @@ export function apply(ctx) {
         start: "POST /api/batch/run/<batchId>/start {projectId}",
         pause: "POST /api/batch/run/<batchId>/pause {projectId}",
         assets: "GET /api/library-entries?projectId=…&locale=zh-CN&kind=term&limit=50&offset=0; kind=tm for translation memory",
-        qa: "POST /api/auto-qa {projectId,locale:'zh-CN',source,translation}",
+        qa: "GET /api/qa/batch/<batchId>?projectId=… 回放批次检查；POST /api/auto-qa {batchId,projectId,locale:'zh-CN',source,translation} 使用批次快照。独立审校省略 batchId，读取当前工作区资源。",
         tasks: "GET /api/tasks?projectId=…",
         learning: "GET /api/learning/overview?projectId=…&locale=zh-CN",
         export: "POST /api/batch/export {batchId,projectId,mode:'writeback',outputPath:'outputs/result.docx'}；使用已保存的分段与原件快照"

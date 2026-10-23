@@ -32,8 +32,9 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
     const url = assertOperation({ ...operation, method }, context.human);
     context.signal?.throwIfAborted();
     const body = { ...operation.body };
-    const batchId = body.batchId || /^\/api\/(?:batch\/run|tasks)\/([^/]+)/u.exec(url.pathname)?.[1];
+    const batchId = body.batchId || /^\/api\/(?:batch\/run|qa\/batch|tasks)\/([^/]+)/u.exec(url.pathname)?.[1];
     const savedRun = batchId ? await withRuntimeCall({ workspaceSnapshot: null }, () => application.getBatchRunForWorkspace(batchId)) : null;
+    if (batchId && !savedRun && url.pathname === "/api/auto-qa") throw Object.assign(new Error("未找到这条翻译批次"), { statusCode: 404 });
     if (savedRun?.runnerOptions?.workspaceSnapshot) {
       const snapshot = savedRun.runnerOptions.workspaceSnapshot;
       if (context.cwd && await workspaceRoot(context) !== snapshot.workspace) throw new Error("该任务属于另一个工作区，请切换回原工作区");
