@@ -3905,7 +3905,8 @@ async function loadBatchWorkflow(run, knownTasks = new Map()) {
       }
     }
   }
-  return { ...workflow, qaRetryBusy: batchQaWorkers.has(run.batchId) };
+  return { ...workflow, qaRetryBusy: batchQaWorkers.has(run.batchId), writeBusy: batchWorkers.has(run.batchId) || batchQaWorkers.has(run.batchId)
+    || batchQaStarts.has(run.batchId) || consistencyCheckTasks.has(run.batchId) || termSurveyTasks.has(run.batchId) };
 }
 
 async function finalizeBatchWorkflow(batchId) {
@@ -6393,6 +6394,9 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
     const body = await readJsonBody(req);
     const existing = body.batchId ? await getBatchRun(body.batchId) : null;
+    if (existing && Array.isArray(body.segments) && (await loadBatchWorkflow(existing)).writeBusy) {
+      return json(res, 409, { error: "当前翻译或 QA 尚未结束，请保留草稿并在阶段结束后保存" });
+    }
     const saved = await saveBatchRun({ ...existing, ...body, runnerOptions: { ...existing?.runnerOptions, ...body.runnerOptions }, locale: assertActiveLocale(body.locale || "zh-CN") });
     return json(res, 200, saved);
   }

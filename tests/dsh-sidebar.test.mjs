@@ -46,6 +46,7 @@ test("Kami opens one session-owned right tab only for the selected Kami preset",
   assert.equal(registrations.some((entry) => ["main", "sidebar.panellist"].includes(entry.name)), false);
   const body = registrations.find((entry) => entry.name === "sidebar.right.pane.tab");
   assert.equal(body.key, definitions[0].id);
+  assert.equal(registrations.find((entry) => entry.name === "sidebar.right.pane.tab.title").key, definitions[0].id);
   const observer = registrations.find((entry) => entry.name === "shell.overlay");
   const props = { ...observer.inject(), useKamiMounted: (select) => select(state.mounted), useSessions: (select) => select({ byId: state.byId }) };
   const render = () => { cursor = 0; assert.equal(observer.component(props), null); for (const callback of pending.splice(0)) callback(); };
