@@ -5,7 +5,7 @@ import { createWorkbench } from "./workbench.mjs";
 import { createModelAdapter, sessionModelRoute } from "./model-adapter.mjs";
 import { KamiUiService, TYPERT } from "./ui-bridge.mjs";
 
-export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert", "workingDirectory", "fs", "agentPresets"];
+export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert", "workingDirectory", "fs", "sandboxPolicy", "agentPresets"];
 
 export async function apply(ctx) {
   const profile = process.env.DSH_PROFILE || "desktop";
@@ -17,6 +17,7 @@ export async function apply(ctx) {
     human,
     cwd: agent?.session ? ctx.workingDirectory.get(agent.session) : undefined,
     fs: ctx.fs,
+    filePolicy: ctx.sandboxPolicy.resolve({ session: agent?.session }),
     sessionId: agent?.session?.header?.id,
     isKamiSession: Boolean(agent?.ctx && ctx.agentPresets.composedPreset(agent.ctx) === "kami-translator"),
     modelRoute: sessionModelRoute(ctx, agent),

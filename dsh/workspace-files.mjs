@@ -57,6 +57,14 @@ async function readSource(root, path, context, maxBytes = 20 * 1024 * 1024) {
   return { path: entry.name, filename: basename(entry.name), hash: hash(bytes), bytes, size: bytes.length };
 }
 
+async function writeTarget(root, path, context) {
+  let target = await context.fs.resolve(relativePath(path), { cwd: root, signal: context.signal });
+  if (typeof context.fs.checkedTarget === "function") target = await context.fs.checkedTarget(target, context.filePolicy);
+  else if (context.filePolicy?.mode === "read-only") throw new Error("当前 DSH 会话为 read-only，不能写入工作区文件");
+  if (!inside(root, resolve(context.fs.processPath(target)))) throw new Error("写入路径指向工作区外");
+  return target;
+}
+
 async function safeParent(root, path) {
   const destination = resolve(root, relativePath(path));
   if (!inside(root, destination)) throw new Error("输出路径超出工作区");
@@ -84,12 +92,13 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     const next = previous.catch(() => {}).then(async () => {
       const config = await readConfig(root, context);
       const updated = configValue(await edit(config));
+      await writeTarget(root, CONFIG, context);
       await safeParent(root, CONFIG);
       const target = await context.fs.resolve(CONFIG, { cwd: root, signal: context.signal });
       if (!inside(root, resolve(context.fs.processPath(target)))) throw new Error("工作区配置链接指向工作区外");
       const info = await context.fs.stat(target, context.signal);
       if (info) await checkedTarget(root, CONFIG, context);
-      await context.fs.writeText(target, `${JSON.stringify(updated, null, 2)}\n`, info ? { kind: "replaceIfVersion", version: info.version } : { kind: "createIfAbsent" }, context.signal);
+      await context.fs.writeText(target, `${JSON.stringify(updated, null, 2)}\n`, info ? { kind: "replaceIfVersion", version: info.version } : { kind: "createIfAbsent" }, context.signal, context.filePolicy);
       return updated;
     });
     writes.set(root, next);
@@ -108,7 +117,8 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     if (action === "status") return status(context);
     if (action === "bind") {
       if (Boolean(args.projectId) === Boolean(args.name)) throw new Error("请明确指定已有 projectId 或新项目 name，二者选一");
-      await workspaceRoot(context);
+      const root = await workspaceRoot(context);
+      await writeTarget(root, CONFIG, context);
       const project = args.projectId ? (await invoke({ path: "/api/projects" }, context)).projects.find((item) => item.id === args.projectId)
         : (await invoke({ path: "/api/projects", method: "POST", body: { name: args.name } }, context)).project;
       if (!project) throw new Error("指定的 Kami 项目不存在");
@@ -199,10 +209,10 @@ export function createWorkspaceFiles({ dataDirectory, invoke }) {
     const state = await bound(context);
     const path = relativePath(outputPath || join(state.config.outputDirectory, basename(filename || value.filename || "translation.bin")));
     context.signal?.throwIfAborted();
+    const target = await writeTarget(state.workspace, path, context);
     const destination = await safeParent(state.workspace, path);
     // The DSH FS currently exposes text-only writes; binary export uses exclusive creation
     // after resolving the destination through the same DSH service and checking containment.
-    const target = await context.fs.resolve(path, { cwd: state.workspace, signal: context.signal });
     if (resolve(context.fs.processPath(target)) !== destination) throw new Error("输出文件服务路径不匹配");
     const file = await open(destination, "wx");
     try { await file.writeFile(Buffer.from(value.base64, "base64")); } finally { await file.close(); }

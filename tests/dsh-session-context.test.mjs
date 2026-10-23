@@ -24,6 +24,7 @@ test("Host context follows workingDirectory and the composed preset rather than 
   const cleanups = [];
   const ctx = {
     fs, llm: {}, sessionProjections: { stateOf: () => null }, agentDefaultModel: { currentSelection: () => ({ provider: "test", model: "test" }) }, workingDirectory: { get: () => cwd }, agentPresets: { composedPreset: () => preset },
+    sandboxPolicy: { resolve: ({ session }) => ({ mode: "workspace-write", workspaceRoot: session.header.cwd }) },
     reflect: { provide(_name, value) { service = value; } }, commands: { register: () => () => {} },
     plugin() {}, typert: { register() {} }, effect(callback) { const cleanup = callback(); if (typeof cleanup === "function") cleanups.push(cleanup); }
   };
@@ -32,6 +33,7 @@ test("Host context follows workingDirectory and the composed preset rather than 
     const agent = { ctx: {}, session: { header: { id: "session", cwd: first }, requestHeader: () => null } };
     const initial = service.contextFor(agent);
     assert.equal(initial.cwd, first); assert.equal(initial.isKamiSession, false);
+    assert.equal(initial.filePolicy.workspaceRoot, first);
     const workbench = await service.ready;
     await workbench.workspace({ action: "bind", name: "first-only" }, initial);
     cwd = second; preset = "kami-translator";
