@@ -286,7 +286,7 @@ window.__ModuleLoader__.load({
       const operation = model.view.operations[name];
       if (!operation) return null;
       return h(React.Fragment, null,
-        operation.pending && h("div", { className: "feedback", role: "status" }, t("准备中…")),
+        operation.pending && (name !== "task-list" || !model.view.knownFiles) && h("div", { className: "feedback", role: "status" }, t("准备中…")),
         operation.error && h("div", { className: "feedback error", role: "alert" }, operation.error, retry && h(Button, { onClick: retry, small: true }, t("重试"))),
         operation.message && h("div", { className: "feedback", role: "status" }, t(operation.message)));
     }
