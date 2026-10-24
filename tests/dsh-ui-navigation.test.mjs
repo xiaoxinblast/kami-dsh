@@ -70,6 +70,17 @@ test("file reading and review requests use the current session with separate ope
   assert.equal(model.view.operations["agent-read"], undefined);
 });
 
+test("resource compilation requests let the current agent understand originals and save reusable results", async () => {
+  const { WorkbenchModel } = await stateModule(), calls = [];
+  const model = new WorkbenchModel({ sessionId: "current", call: async () => ({}), prompt: async (...args) => calls.push(args) });
+  model.view.workspace = "D:/fixture";
+  const result = await model.compileResource({ path: "rules/guide.docx", purpose: "style-guide", hash: "a".repeat(64) });
+  assert.equal(result.ok, true);
+  assert.equal(calls[0][0], "current"); assert.equal(calls[0][2], "D:/fixture");
+  for (const text of ["rules/guide.docx", "理解原文件", "固定模板", "compiledPath", "compilation.status=ready", "例外和正反例"]) assert.ok(calls[0][1].includes(text));
+  assert.equal(model.view.operations["agent-compile:style-guide:rules/guide.docx"].pending, false);
+});
+
 test("default learning labels show the project name while preserving user-named candidates", async () => {
   const { skillLabel } = await stateModule();
   assert.equal(skillLabel({ name: "zh-CN · general · project-id", locale: "zh-CN", version: 2 }, "项目甲", "project-id"), "项目甲 · v2");

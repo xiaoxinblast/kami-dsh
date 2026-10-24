@@ -273,6 +273,9 @@ window.__ModuleLoader__.load({
           return "已交给当前会话的 Agent";
         });
       }
+      compileResource(resource) {
+        return this.ask(`请立即编译刚关联的工作区资源 ${JSON.stringify({ path: resource.path, hash: resource.hash, purpose: resource.purpose, libraryId: resource.libraryId })}。先使用 DSH 原生工具理解原文件的内容和排版，再按 kami_file_import 的资源编译协议全量整理；不要求用户调整原件或套用固定模板。术语保留备注，TM 保留句对、上下文和来源，风格指南保留完整规则、例外和正反例。排除表头、空行、memoQ 保护行，不改写原件。将编译产物通过 compiledPath 或 resourceContext 保存；只有 compilation.status=ready 才报告完成，并汇报有效条数或字符数及跳过项。无法读取或理解的部分明确说明。`, `agent-compile:${resource.purpose}:${resource.path}`);
+      }
       loadSection(name, operation) {
         return this.perform(`section:${name}`, async (token) => {
           const current = token.view.operations[`section:${name}`];
@@ -312,6 +315,7 @@ window.__ModuleLoader__.load({
     const zh = Object.fromEntries(Object.keys(words).map((key) => [key, key]));
     const { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, batchLabel, skillLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore, reviewPage, resourcePage, promotionReady } = require("kami-dsh/client.workbench-state.js");
     Object.assign(words, {
+      "待 Agent 编译": "Awaiting agent compilation", "已编译，可用于翻译": "Compiled and ready for translation", "让 Agent 编译": "Ask agent to compile", "刷新编译状态": "Refresh compilation status", "已关联，已交给 Agent 编译": "Linked and sent to the agent for compilation", "已关联，自动编译未提交，请重试": "Linked, but compilation could not be submitted. Please retry.",
       "项目资产": "Project assets", "按库关联本地原文件，统一管理任务所用的术语、记忆、指南和资料。": "Link local originals by library to manage terms, memories, guides and references.", "关联本地文件": "Link local files", "关联文件": "Linked files", "已有条目": "Saved entries", "个关联文件": "linked files", "新增库并关联文件": "Create a library and link files", "上移": "Move up", "下移": "Move down", "提高优先级": "Raise priority", "降低优先级": "Lower priority", "已调整库优先级": "Library priority updated", "库内关联原文件，由 Agent 查阅；优先级数字越小越优先，使用 ↑ ↓ 调整。": "Link originals for the Agent to read. Lower numbers have higher priority; use ↑ ↓ to reorder.",
       "任务": "Tasks", "资源": "Resources", "当前工作区": "Workspace", "更换项目": "Change project", "已连接": "Connected", "连接中": "Connecting", "连接失败": "Connection failed",
       "尚未绑定项目": "No project bound", "选择已有项目": "Select an existing project", "绑定项目": "Bind project", "新建并绑定": "Create and bind", "项目绑定": "Project binding",
@@ -618,9 +622,12 @@ window.__ModuleLoader__.load({
     }
     function ResourcePreview({ model, preview, t, close }) {
       const key = `agent-read:${preview.purpose}:${preview.path}`;
-      const inspect = () => model.ask(`请使用 DSH 文件工具查阅工作区原文件 ${JSON.stringify(preview.path)}，用途为${resourceFields.find((item) => item.purpose === preview.purpose)?.label || preview.purpose}。直接查看原格式，不创建纯文本副本，不改动原件。请说明其中与翻译有关的内容；后续创建批次时以此文件的当前哈希 ${preview.hash} 提供 resourceContext。`, key);
+      const compileKey = `agent-compile:${preview.purpose}:${preview.path}`, ready = preview.compilation?.status === "ready";
+      const inspect = () => model.ask(`请使用 DSH 文件工具查阅工作区原文件 ${JSON.stringify(preview.path)}，用途为${resourceFields.find((item) => item.purpose === preview.purpose)?.label || preview.purpose}。直接查看原格式，不改动原件。请说明其中与翻译有关的内容。`, key);
+      const refresh = () => model.loadSection("preview", (token) => model.request({ action: "file", path: preview.path, purpose: preview.purpose, register: false, projectId: token.view.projectId }, token));
       return h("section", { className: "preview stack" }, h("div", { className: "section-heading" }, h("h3", null, preview.filename || preview.path), h(Button, { quiet: true, small: true, onClick: close }, t("关闭"))),
         h("code", null, preview.path), h("p", { className: "muted" }, t(resourceFields.find((item) => item.purpose === preview.purpose)?.label || "资源"), " · ", sizeText(preview.size)),
+        preview.compilation && h("div", { className: "stack" }, h("p", { className: "muted" }, t(ready ? "已编译，可用于翻译" : "待 Agent 编译"), ready && ` · ${preview.purpose === "style-guide" ? `${preview.compilation.characters} ${t("字符")}` : `${preview.compilation.itemCount} ${t("条")}`}`), !ready && h("div", { className: "button-row" }, h(Button, { onClick: () => model.compileResource(preview), busy: model.view.operations[compileKey]?.pending }, t("让 Agent 编译")), h(Button, { quiet: true, onClick: refresh }, t("刷新编译状态"))), h(Feedback, { model, name: compileKey, retry: () => model.compileResource(preview), t })),
         h(Button, { onClick: inspect, busy: model.view.operations[key]?.pending }, t("让 Agent 查看原文件")), h(Feedback, { model, name: key, retry: inspect, t }),
         h("details", null, h("summary", null, t("文件版本")), h("code", null, "SHA-256 ", preview.hash)));
     }
@@ -641,7 +648,13 @@ window.__ModuleLoader__.load({
       const files = linkedPaths(config, purpose, library?.id);
       const listing = resourcePage(files, { folder, query, offset });
       const inspect = (path) => model.loadSection("preview", (token) => model.request({ action: "file", path, purpose, libraryId: library?.id, register: false, projectId: token.view.projectId }, token));
-      const link = () => model.perform(key, async (token) => { const result = await model.request({ action: "file", path: paths[purpose]?.trim(), purpose, libraryId: library?.id, projectId: token.view.projectId }, token); token.view.sections.preview = result; delete token.view.operations[unlinkKey]; await model.refresh(); return "已关联工作区文件"; });
+      const link = () => model.perform(key, async (token) => {
+        const result = await model.request({ action: "file", path: paths[purpose]?.trim(), purpose, libraryId: library?.id, projectId: token.view.projectId }, token);
+        token.view.sections.preview = result; delete token.view.operations[unlinkKey]; await model.refresh();
+        if (!model.valid(token)) return;
+        if (result.compilation?.status === "pending") return (await model.compileResource(result)).ok ? "已关联，已交给 Agent 编译" : "已关联，自动编译未提交，请重试";
+        return "已关联工作区文件";
+      });
       const unlink = (path) => model.perform(unlinkKey, async (token) => {
         const latest = await model.request({ action: "workspace" }, token);
         await model.request({ action: "workspace", actionType: "configure", resources: { [resource.field]: (latest.config[resource.field] || []).filter((item) => item !== path) } }, token);
