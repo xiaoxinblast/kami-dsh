@@ -4,7 +4,7 @@
 
 ## 安装
 
-当前验证目标为 DSH `0.2.1-rc.2`（桌面 Electron `44.7.0` / Node `24.21.0`）。
+当前验证目标为 DSH `0.2.1-rc.3`，同时兼容 `0.2.1-rc.2`；运行环境使用 DSH 安装包自带的 Electron / Node.js。
 
 1. 在 DSH 的“插件”→“添加插件”中填写 `https://github.com/xiaoxinblast/kami-dsh#main`，安装仓库中的当前版本。依赖由插件管理器安装。
 2. 开发时也可在仓库运行 `npm ci`、`npm run dsh:check` 后安装绝对目录；Creator 模式的 `plugin_manager` 使用 `action: install_bundle` 与同一安装地址。
@@ -120,6 +120,14 @@ npm pack --dry-run
 `tests/dsh-workspace.test.mjs` 验证路径与链接隔离、任务快照、新文件版本、重启续跑、参考索引与防覆盖导出；SDK 启用时使用真实 DSH LocalFileSystem。`tests/dsh-ui-bridge.test.mjs` 使用真实 Client/Host SDK 检查严格 Remote 编解码、服务注入和页面不追加聊天 JSON。`tests/dsh-workbench.test.mjs` 在禁止 HTTP 的条件下用隔离数据库验证项目创建、批次翻译、原格式导出和数据库重开；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。DSH SDK 可用时，`tests/dsh-model-adapter.test.mjs` 验证消息协议，`tests/dsh-agent.test.mjs` 验证预设工具范围。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
 
 UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。
+
+### 0.9.7 DSH rc.3 兼容
+
+DSH `0.2.1-rc.3` 在安装和 profile 启动时检查插件声明的运行版本。Kami `0.9.6` 将 `engines.dsh` 固定为 `0.2.1-rc.2`，因此升级 DSH 后会被拒绝加载。`0.9.7` 将运行版本及可选 SDK peer 的兼容范围统一为 `0.2.1-rc.2 || 0.2.1-rc.3`，不需要授予版本豁免。
+
+`tests/dsh-runtime-compatibility.test.mjs` 使用真实 DSH 启动检查器，验证两个已支持版本都可正常准入、SDK peer 范围一致，未验证的其他版本仍被拒绝。通过 `DSH_TEST_LLM_MODULE` 指向 `rc.3` SDK 可运行该检查；旧 SDK 没有版本检查器时明确跳过。
+
+使用 DSH 自带 Node.js `24.21.0`、`rc.3` Host SDK 和客户端加载器运行完整回归：1,070 项，1,004 项通过、0 项失败、66 项因环境条件跳过。`rc.2` 的模型、工具、Remote、文件快照与终稿关键流程另行验证通过。真实隔离 DSH `rc.3` Web Host/Client 已截图验收：Kami 预设与右侧面板正常加载，本地双语终稿关联后生成 3 条 TM、2 条学习轨迹、1 条术语更新及 1 条待核对术语，资产和学习证据可读取。未执行线上模型质量或耗时评测。
 
 ### 0.9.6 memoQ 人工终稿闭环
 
