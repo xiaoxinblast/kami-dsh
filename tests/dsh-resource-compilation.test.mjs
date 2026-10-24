@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
@@ -25,7 +26,7 @@ async function fixture(run) {
       await writeFile(join(cwd, compiledPath), JSON.stringify({ source: { path: linked.path, hash: linked.hash }, ...content }));
       return workbench.importFile({ path, purpose, compiledPath }, context);
     };
-    await run({ cwd, context, state, messages, compile, get workbench() { return workbench; }, restart: async () => {
+    await run({ cwd, dataDirectory, context, state, messages, compile, get workbench() { return workbench; }, restart: async () => {
       await workbench.close();
       workbench = await createWorkbench({ dataDirectory, modelAdapter });
     } });
@@ -107,6 +108,8 @@ test("inline agent compilation is persisted and invalid compilation never report
   await assert.rejects(workbench.importFile({ path: "guide.custom", purpose: "style-guide", compiledPath: "../outside.json" }, context), /路径|越界/);
   await writeFile(join(cwd, "broken.json"), JSON.stringify({ source: { path: "other.custom", hash: linked.hash }, style_guide: "错误来源" }));
   await assert.rejects(workbench.importFile({ path: "guide.custom", purpose: "style-guide", compiledPath: "broken.json" }, context), /来源|路径/);
+  await writeFile(join(cwd, "empty.json"), JSON.stringify({ resources: [] }));
+  await assert.rejects(workbench.importFile({ path: "guide.custom", purpose: "style-guide", compiledPath: "empty.json" }, context), /非空/);
 }));
 
 test("bulk configuration reports compilation work without requiring fixed input formats", async () => fixture(async ({ cwd, workbench, context, compile }) => {
@@ -118,4 +121,77 @@ test("bulk configuration reports compilation work without requiring fixed input 
   await compile("guide.custom", "style-guide", { style_guide: "编译完成的规则" });
   const next = await workbench.workspace({ action: "configure", resources: { styleGuides: ["guide.custom"] } }, context);
   assert.equal(next.compilations[0].compilation.status, "ready");
+}));
+
+test("multi-file updates share one library file and snapshots merge only current source contributions", async () => fixture(async ({ cwd, dataDirectory, workbench, context }) => {
+  for (const path of ["a.custom", "b.custom"]) await writeFile(join(cwd, path), path);
+  await workbench.workspace({ action: "configure", resources: { translationMemories: ["a.custom", "b.custom"] } }, context);
+  const plan = await workbench.workspace({ action: "compilations" }, context);
+  assert.equal(plan.groups.length, 1); assert.equal(plan.groups[0].files.length, 2);
+  const group = plan.groups[0], compiledPath = ".kami/compiled/library.json";
+  await mkdir(join(cwd, ".kami/compiled"), { recursive: true });
+  await writeFile(join(cwd, compiledPath), JSON.stringify({ resources: group.files.map((source, index) => ({ path: source.path, hash: source.hash,
+    entries: [{ source: "設定を開きます。", target: "打开设置。", note: `来源${index}` }, { source: `別の文章${index}`, target: `其他句子${index}` }] })) }));
+  const merged = await workbench.importFile({ path: "a.custom", purpose: "tm", libraryId: group.libraryId, compiledPath }, context);
+  assert.equal(merged.compilation.libraryItemCount, 3); assert.equal(merged.compilation.duplicateCount, 1);
+  assert.equal(merged.compilation.compiledFile, group.compiledFile);
+  assert.equal((await readdir(join(dataDirectory, "runtime/compiled-resources"))).length, 1);
+  await writeFile(join(cwd, "source.txt"), "設定を開きます。");
+  const first = await workbench.importFile({ path: "source.txt" }, context);
+  const snapshot = (await workbench.store.request(`/items/batch_runs/${first.batchId}`)).runner_options.workspaceSnapshot;
+  assert.equal(snapshot.memories.length, 3);
+  assert.equal(snapshot.memories.find((item) => item.source === "設定を開きます。").note, "来源0\n来源1");
+  await writeFile(join(cwd, "a.custom"), "a 更新");
+  const pending = await workbench.workspace({ action: "compilations", selection: [{ path: "a.custom", purpose: "tm" }] }, context);
+  assert.equal(pending.groups[0].files.length, 1); assert.equal(pending.groups[0].files[0].status, "pending");
+  const source = pending.groups[0].files[0];
+  await workbench.importFile({ path: source.path, purpose: "tm", resourceContext: [{ path: source.path, hash: source.hash, pairs: [{ source: "更新", target: "新内容" }] }] }, context);
+  const ready = await workbench.workspace({ action: "compilations" }, context);
+  assert.ok(ready.groups[0].files.every((item) => item.status === "ready"));
+  const next = await workbench.importFile({ path: "source.txt" }, context);
+  const latest = (await workbench.store.request(`/items/batch_runs/${next.batchId}`)).runner_options.workspaceSnapshot;
+  assert.ok(latest.memories.some((item) => item.target === "新内容"));
+  assert.ok(latest.memories.some((item) => item.target === "其他句子1"));
+  assert.ok(!latest.memories.some((item) => item.target === "其他句子0"));
+  assert.equal(latest.memories.find((item) => item.source === "設定を開きます。").note, "来源1");
+  assert.equal(snapshot.memories.find((item) => item.source === "設定を開きます。").note, "来源0\n来源1");
+}));
+
+test("library deduplication preserves TM identities, term applicability and duplicate row origins", async () => fixture(async ({ cwd, workbench, context, compile }) => {
+  await writeFile(join(cwd, "tm.custom"), "相同句对的不同条目");
+  const pair = { source: "設定", target: "设置" };
+  const tm = await compile("tm.custom", "tm", { entries: [{ ...pair, entryId: "a", rowNumber: 1 }, { ...pair, entryId: "b", rowNumber: 2 }, { ...pair, entryId: "a", rowNumber: 3 }] });
+  assert.equal(tm.compilation.libraryItemCount, 2);
+  assert.equal(tm.compilation.duplicateCount, 1);
+  await writeFile(join(cwd, "terms.custom"), "适用范围与约束不同的术语");
+  const term = { ja: pair.source, zh: pair.target, domain: "game", contentType: "ui", enforcement: "preferred" };
+  const terms = await compile("terms.custom", "terms", { terms: [term, { ...term, domain: "marketing" }, { ...term, contentType: "dialogue" }, { ...term, enforcement: "mandatory" }, { ...term, preserveOriginal: true }] });
+  assert.equal(terms.compilation.libraryItemCount, 5);
+  await writeFile(join(cwd, "source.txt"), "設定");
+  const prepared = await workbench.importFile({ path: "source.txt" }, context);
+  const snapshot = (await workbench.store.request(`/items/batch_runs/${prepared.batchId}`)).runner_options.workspaceSnapshot;
+  assert.equal(snapshot.memories.length, 2);
+  assert.deepEqual(snapshot.memories.find((item) => item.entryId === "a").origins.map((origin) => origin.rowNumber), [1, 3]);
+  assert.equal(snapshot.terms.length, 5);
+  assert.ok(snapshot.terms.some((item) => item.domain === "marketing"));
+  assert.ok(snapshot.terms.some((item) => item.contentType === "dialogue"));
+}));
+
+test("first library update migrates unchanged per-file caches without recompiling unselected originals", async () => fixture(async ({ cwd, dataDirectory, workbench, context, compile }) => {
+  for (const path of ["a.custom", "b.custom"]) await writeFile(join(cwd, path), path);
+  await workbench.workspace({ action: "configure", resources: { translationMemories: ["a.custom", "b.custom"] } }, context);
+  const source = await workbench.importFile({ path: "b.custom", purpose: "tm", register: false }, context);
+  const root = (await workbench.workspace({}, context)).workspace;
+  const digest = createHash("sha256").update(`${root}\0tm\0b.custom`).digest("hex");
+  const folder = join(dataDirectory, "runtime/compiled-resources", digest);
+  await mkdir(folder, { recursive: true });
+  await writeFile(join(folder, `${source.hash}.json`), JSON.stringify({ version: 1, purpose: "tm", source: { path: source.path, hash: source.hash }, parsed: { candidates: [{ source: "旧资料", target: "保留旧编译" }] } }));
+  const plan = await workbench.workspace({ action: "compilations" }, context);
+  assert.equal(plan.groups[0].files.find((item) => item.path === "a.custom").status, "pending");
+  assert.equal(plan.groups[0].files.find((item) => item.path === "b.custom").status, "ready", "valid older compilation must not be sent to the agent again");
+  const result = await compile("a.custom", "tm", { entries: [{ source: "新资料", target: "新增编译" }] });
+  assert.equal(result.compilation.libraryItemCount, 2);
+  const record = JSON.parse(await readFile(result.compilation.compiledFile, "utf8"));
+  assert.equal(record.sources.length, 2);
+  assert.ok(record.candidates.some((item) => item.target === "保留旧编译"));
 }));

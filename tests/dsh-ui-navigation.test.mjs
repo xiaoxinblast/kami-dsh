@@ -72,13 +72,45 @@ test("file reading and review requests use the current session with separate ope
 
 test("resource compilation requests let the current agent understand originals and save reusable results", async () => {
   const { WorkbenchModel } = await stateModule(), calls = [];
-  const model = new WorkbenchModel({ sessionId: "current", call: async () => ({}), prompt: async (...args) => calls.push(args) });
+  const model = new WorkbenchModel({ sessionId: "current", call: async () => ({ groups: [{ purpose: "style-guide", updatePath: ".kami/compiled/style.json", files: [{ path: "rules/guide.docx", hash: "a".repeat(64), status: "pending" }] }], failures: [] }), prompt: async (...args) => calls.push(args) });
   model.view.workspace = "D:/fixture";
   const result = await model.compileResource({ path: "rules/guide.docx", purpose: "style-guide", hash: "a".repeat(64) });
   assert.equal(result.ok, true);
   assert.equal(calls[0][0], "current"); assert.equal(calls[0][2], "D:/fixture");
   for (const text of ["rules/guide.docx", "理解原文件", "固定模板", "compiledPath", "compilation.status=ready", "例外和正反例"]) assert.ok(calls[0][1].includes(text));
   assert.equal(model.view.operations["agent-compile:style-guide:rules/guide.docx"].pending, false);
+});
+
+test("batch compilation submits one agent task, skips unchanged files, and keeps library updates together", async () => {
+  const { WorkbenchModel } = await stateModule(), prompts = [], calls = [];
+  const model = new WorkbenchModel({ sessionId: "current", call: async (_session, operation) => {
+    calls.push(operation);
+    return { groups: [{ purpose: "tm", libraryId: "memory", libraryName: "项目 TM", updatePath: ".kami/compiled/memory.json", files: [
+      { path: "old.xlsx", hash: "a".repeat(64), status: "ready" }, { path: "new.xlsx", hash: "b".repeat(64), status: "pending" }
+    ] }, { purpose: "style-guide", libraryId: "", updatePath: ".kami/compiled/style.json", files: [{ path: "style.docx", hash: "c".repeat(64), status: "pending" }] }], failures: [] };
+  }, prompt: async (...args) => prompts.push(args) });
+  model.view.workspace = "D:/fixture";
+  const selection = [{ path: "new.xlsx", purpose: "tm", libraryId: "memory" }, { path: "style.docx", purpose: "style-guide" }];
+  assert.equal((await model.compileResources(selection, "compile-selected")).ok, true);
+  assert.equal(calls.length, 1); assert.equal(calls[0].actionType, "compilations");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].selection)), selection);
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0][1].includes("new.xlsx")); assert.ok(prompts[0][1].includes("style.docx"));
+  assert.ok(!prompts[0][1].includes("old.xlsx"));
+  assert.ok(prompts[0][1].includes("保留未选中")); assert.ok(prompts[0][1].includes("每个库"));
+  assert.equal(model.view.operations["compile-selected"].compilation.queued, 2);
+  assert.equal(model.view.operations["compile-selected"].compilation.skipped, 1);
+});
+
+test("batch compilation never queues work after its workspace changes", async () => {
+  const { WorkbenchModel } = await stateModule();
+  let release, prompts = 0;
+  const model = new WorkbenchModel({ sessionId: "current", call: () => new Promise((resolve) => { release = resolve; }), prompt: async () => { prompts++; } });
+  model.view.workspace = "D:/first";
+  const pending = model.compileResources(undefined, "compile-all");
+  model.epoch++;
+  release({ groups: [], failures: [] });
+  assert.equal((await pending).ok, false); assert.equal(prompts, 0);
 });
 
 test("default learning labels show the project name while preserving user-named candidates", async () => {

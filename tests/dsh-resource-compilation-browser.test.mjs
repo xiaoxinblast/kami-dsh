@@ -54,8 +54,12 @@ test("linked resources automatically queue compilation and show pending/ready re
         res.setHeader("content-type", "application/json"); return res.end(JSON.stringify({ ok: true, value }));
       }
       if (req.url === "/complete") {
-        const linked = await workbench.importFile({ path: body.path, purpose: body.purpose, register: false }, context);
-        await workbench.importFile({ path: body.path, purpose: body.purpose, resourceContext: [{ path: linked.path, hash: linked.hash, ...(body.purpose === "terms" ? { pairs: [{ source: "星の剣", target: "星刃", note: "装备名称" }] } : { text: "完整保留指南规则、例外和正反例。" }) }] }, context);
+        const paths = body.paths || [body.path], resourceContext = [];
+        for (const path of paths) {
+          const linked = await workbench.importFile({ path, purpose: body.purpose, register: false }, context);
+          resourceContext.push({ path: linked.path, hash: linked.hash, ...(body.purpose === "terms" ? { pairs: [{ source: "星の剣", target: "星刃", note: "装备名称" }] } : { text: "完整保留指南规则、例外和正反例。" }) });
+        }
+        await workbench.importFile({ path: paths[0], purpose: body.purpose, resourceContext }, context);
         return res.end("{}");
       }
       res.writeHead(404); res.end();
@@ -100,6 +104,55 @@ test("linked resources automatically queue compilation and show pending/ready re
     await page.setViewportSize({ width: 420, height: 1000 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await screenshot("compile-style-ready-narrow");
+    const batchPaths = Array.from({ length: 25 }, (_, index) => `bulk-${String(index + 1).padStart(2, "0")}.custom`);
+    const nested = ["已完成批次/EXP_Batch_8_ZH-HANS.xlsx_zho-CN.mqxliff", "已完成批次/另一个参考文件.custom"];
+    await mkdir(join(cwd, "已完成批次"));
+    for (const path of [...batchPaths, ...nested, "memory.custom", "disabled.custom", "style2.custom"]) await writeFile(join(cwd, path), `批量验收资料 ${path}`);
+    const endpoint = `/api/projects/${state.project.id}/libraries`;
+    const memory = (await workbench.invoke({ path: endpoint, method: "POST", body: { kind: "translation_memory", role: "reference", name: "批量记忆库" } }, context)).library;
+    const disabled = (await workbench.invoke({ path: endpoint, method: "POST", body: { kind: "translation_memory", role: "reference", name: "停用库", enabled: false } }, context)).library;
+    const configured = await workbench.workspace({}, context);
+    await workbench.workspace({ action: "configure", resources: { terms: ["terms.custom", ...batchPaths, ...nested], translationMemories: ["memory.custom", "disabled.custom"], styleGuides: ["style.custom", "style2.custom"], libraryFiles: [...configured.config.libraryFiles,
+      ...[...batchPaths, ...nested].map((path) => ({ path, purpose: "terms", libraryId: termLibrary.id })),
+      { path: "memory.custom", purpose: "tm", libraryId: memory.id }, { path: "disabled.custom", purpose: "tm", libraryId: disabled.id }] } }, context);
+    await page.setViewportSize({ width: 960, height: 1100 });
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await page.getByRole("button", { name: "术语库", exact: true }).click();
+    await page.locator(".library-row").filter({ hasText: termLibrary.name }).getByRole("button", { name: "打开", exact: true }).click();
+    const search = page.getByRole("searchbox", { name: "搜索资源文件", exact: true });
+    await search.fill("bulk-");
+    await page.getByRole("button", { name: "全选筛选结果", exact: true }).click();
+    await page.getByText("已选择 25 个文件", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "下一页", exact: true }).click();
+    assert.equal(await page.getByRole("checkbox", { name: "选择 bulk-25.custom", exact: true }).isChecked(), true);
+    const batchCard = page.locator("section.card").filter({ has: page.getByRole("button", { name: "编译选中", exact: true }) }).last();
+    if (process.env.KAMI_UI_SCREENSHOTS) await batchCard.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "compile-selected-wide.png"), animations: "disabled" });
+    await page.getByRole("button", { name: "编译选中", exact: true }).click();
+    await page.waitForFunction(() => window.prompts.length === 3);
+    const selectedPrompt = await page.evaluate(() => window.prompts[2].content[0].text);
+    assert.ok(selectedPrompt.includes("bulk-25.custom")); assert.ok(!selectedPrompt.includes("memory.custom"));
+    await page.evaluate((paths) => fetch("/complete", { method: "POST", body: JSON.stringify({ paths, purpose: "terms" }) }), batchPaths);
+    await page.getByRole("button", { name: "编译选中", exact: true }).click();
+    await page.getByText("所选资源均已编译，无需重复", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.prompts.length), 3);
+    const record = JSON.parse(await readFile((await workbench.importFile({ path: "terms.custom", purpose: "terms", register: false }, context)).compilation.compiledFile, "utf8"));
+    assert.equal(record.candidates.length, 1); assert.equal(record.sources.length, 26);
+    await page.getByRole("button", { name: "清空选择", exact: true }).click();
+    await search.fill("");
+    await page.getByRole("checkbox", { name: "选择 已完成批次", exact: true }).check();
+    await page.getByText("已选择 2 个文件", { exact: true }).waitFor();
+    assert.equal(await page.getByText("所选资源均已编译，无需重复", { exact: true }).count(), 0);
+    await search.fill("已完成批次");
+    await page.setViewportSize({ width: 420, height: 1100 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    if (process.env.KAMI_UI_SCREENSHOTS) await batchCard.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "compile-selected-narrow.png"), animations: "disabled" });
+    await page.getByRole("button", { name: "编译全部待编译", exact: true }).click();
+    await page.waitForFunction(() => window.prompts.length === 4);
+    const allPrompt = await page.evaluate(() => window.prompts[3].content[0].text);
+    for (const path of [...nested, "memory.custom", "style2.custom"]) assert.ok(allPrompt.includes(path));
+    assert.ok(!allPrompt.includes("disabled.custom")); assert.ok(!allPrompt.includes("bulk-25.custom"));
+    await page.locator(".kami").evaluate((element) => { element.scrollTop = 0; });
+    if (process.env.KAMI_UI_SCREENSHOTS) await page.locator("section.card").filter({ has: page.getByRole("button", { name: "编译全部待编译", exact: true }) }).screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "compile-all-narrow.png"), animations: "disabled" });
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

@@ -80,17 +80,18 @@ window.__ModuleLoader__.load({
       return { items, total: rows.length, offset: start, selected: items.find(({ segment }) => segment.id === selectedId) || items[0] };
     }
     function resourcePage(paths, { folder = "", query = "", offset = 0 } = {}) {
-      const search = query.trim().toLocaleLowerCase(), entries = new Map();
+      const search = query.trim().toLocaleLowerCase(), entries = new Map(), matching = [];
       for (const path of paths) {
         if (!path.startsWith(folder) || (search && !path.toLocaleLowerCase().includes(search))) continue;
+        matching.push(path);
         const rest = path.slice(folder.length), slash = rest.indexOf("/");
         const directory = !search && slash >= 0, key = directory ? folder + rest.slice(0, slash + 1) : path;
-        if (directory && entries.has(key)) entries.get(key).count++;
-        else entries.set(key, { path: key, name: directory ? rest.slice(0, slash) : search ? path : rest, folder: directory, count: 1 });
+        if (directory && entries.has(key)) { entries.get(key).count++; entries.get(key).paths.push(path); }
+        else entries.set(key, { path: key, name: directory ? rest.slice(0, slash) : search ? path : rest, folder: directory, count: 1, paths: [path] });
       }
       const rows = [...entries.values()].sort((a, b) => Number(b.folder) - Number(a.folder) || a.name.localeCompare(b.name));
       const start = Math.max(0, Math.min(offset, Math.max(0, Math.floor((rows.length - 1) / 20) * 20)));
-      return { items: rows.slice(start, start + 20), total: rows.length, offset: start };
+      return { items: rows.slice(start, start + 20), total: rows.length, offset: start, paths: matching };
     }
     function promotionReady(evaluation, gate, candidateId) {
       return Boolean(candidateId && evaluation?.challengerSkillId === candidateId && evaluation.decision === "promote" && evaluation.report?.promotable === true
@@ -274,7 +275,20 @@ window.__ModuleLoader__.load({
         });
       }
       compileResource(resource) {
-        return this.ask(`请立即编译刚关联的工作区资源 ${JSON.stringify({ path: resource.path, hash: resource.hash, purpose: resource.purpose, libraryId: resource.libraryId })}。先使用 DSH 原生工具理解原文件的内容和排版，再按 kami_file_import 的资源编译协议全量整理；不要求用户调整原件或套用固定模板。术语保留备注，TM 保留句对、上下文和来源，风格指南保留完整规则、例外和正反例。排除表头、空行、memoQ 保护行，不改写原件。将编译产物通过 compiledPath 或 resourceContext 保存；只有 compilation.status=ready 才报告完成，并汇报有效条数或字符数及跳过项。无法读取或理解的部分明确说明。`, `agent-compile:${resource.purpose}:${resource.path}`);
+        return this.compileResources([{ path: resource.path, purpose: resource.purpose, ...(resource.libraryId ? { libraryId: resource.libraryId } : {}) }], `agent-compile:${resource.purpose}:${resource.path}`);
+      }
+      compileResources(selection, key = "compile-all-resources") {
+        return this.perform(key, async (token) => {
+          if (selection?.length === 0) throw new Error("请先选择资源文件");
+          const plan = await this.request({ action: "workspace", actionType: "compilations", ...(selection === undefined ? {} : { selection }) }, token);
+          const groups = (plan.groups || []).map((group) => ({ ...group, files: group.files.filter((file) => file.status === "pending") })).filter((group) => group.files.length);
+          const queued = groups.reduce((sum, group) => sum + group.files.length, 0), skipped = (plan.groups || []).reduce((sum, group) => sum + group.files.filter((file) => file.status === "ready").length, 0);
+          token.view.operations[key].compilation = { queued, skipped, failures: plan.failures || [] }; this.emit();
+          if (!queued) return skipped ? "所选资源均已编译，无需重复" : "没有可提交的编译资源";
+          if (!this.prompt) throw new Error("当前会话的 Agent 入口不可用");
+          await this.prompt(this.sessionId, `请按每个库处理以下增量编译任务 ${JSON.stringify(groups)}。只编译列出的文件，保留未选中文件的已有编译内容。先使用 DSH 原生工具理解原文件的内容和排版，不要求用户调整原件或套用固定模板；再用脚本按识别结果全量提取，不得仅用样本代替全文。每个库只写一个更新 JSON 到该组 updatePath，格式为 {resources:[{path,hash,terms:[{ja,zh,note}]}]}；TM 的每个来源用 entries:[{source,target,context,file}]，风格指南用 style_guide 文本。术语保留备注，TM 保留上下文和来源，风格指南保留完整规则、例外和正反例。排除表头、空行、memoQ 保护行，不改写原件。同原文的不同译法保留，不只按原文覆盖。然后以该组第一个来源 path、purpose、libraryId 调用 kami_file_import，传 compiledPath:updatePath；Host 会增量合并、去重到该库唯一的编译文件，保留未选中内容。不要给每个来源另建编译文件，也不要重新提交未变化的来源。只有 compilation.status=ready 才报告完成，并汇报各库条数、重复合并和读取失败结果。`, token.view.workspace);
+          return "已交给当前会话的 Agent";
+        });
       }
       loadSection(name, operation) {
         return this.perform(`section:${name}`, async (token) => {
@@ -316,6 +330,8 @@ window.__ModuleLoader__.load({
     const { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, batchLabel, skillLabel, editingLocked, qaLabel, qaSummary, issuesOf, reportScore, reviewPage, resourcePage, promotionReady } = require("kami-dsh/client.workbench-state.js");
     Object.assign(words, {
       "待 Agent 编译": "Awaiting agent compilation", "已编译，可用于翻译": "Compiled and ready for translation", "让 Agent 编译": "Ask agent to compile", "刷新编译状态": "Refresh compilation status", "已关联，已交给 Agent 编译": "Linked and sent to the agent for compilation", "已关联，自动编译未提交，请重试": "Linked, but compilation could not be submitted. Please retry.",
+      "编译全部待编译": "Compile all pending resources", "编译选中": "Compile selected", "全选筛选结果": "Select all filtered files", "清空选择": "Clear selection", "已选择": "Selected", "已提交编译": "Submitted for compilation", "未变化，跳过": "Unchanged, skipped", "所选资源均已编译，无需重复": "Selected resources are already compiled", "没有可提交的编译资源": "No resources can be submitted", "只编译新增或变化的文件，按库合并并去重。": "Compile new or changed files and merge deduplicated results by library.", "同库文件共用一份编译结果，选中更新会保留其他文件内容。": "Files in one library share one compiled result. Updating selected files preserves the others.",
+      "选择": "Select",
       "项目资产": "Project assets", "按库关联本地原文件，统一管理任务所用的术语、记忆、指南和资料。": "Link local originals by library to manage terms, memories, guides and references.", "关联本地文件": "Link local files", "关联文件": "Linked files", "已有条目": "Saved entries", "个关联文件": "linked files", "新增库并关联文件": "Create a library and link files", "上移": "Move up", "下移": "Move down", "提高优先级": "Raise priority", "降低优先级": "Lower priority", "已调整库优先级": "Library priority updated", "库内关联原文件，由 Agent 查阅；优先级数字越小越优先，使用 ↑ ↓ 调整。": "Link originals for the Agent to read. Lower numbers have higher priority; use ↑ ↓ to reorder.",
       "任务": "Tasks", "资源": "Resources", "当前工作区": "Workspace", "更换项目": "Change project", "已连接": "Connected", "连接中": "Connecting", "连接失败": "Connection failed",
       "尚未绑定项目": "No project bound", "选择已有项目": "Select an existing project", "绑定项目": "Bind project", "新建并绑定": "Create and bind", "项目绑定": "Project binding",
@@ -364,6 +380,7 @@ window.__ModuleLoader__.load({
       .kami .pagination{flex-wrap:wrap;font-size:11px}.kami .page-jump{display:flex;align-items:center;gap:5px;font-size:11px}.kami .page-jump input{width:50px;min-height:28px;padding:4px}.kami .review-toolbar input{flex:1;min-width:120px}.kami .review-layout{display:grid;gap:16px;align-items:start;min-width:0}.kami .review-list{max-height:360px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:9px}.kami .segment-row{display:grid;grid-template-columns:32px minmax(0,1fr) auto;gap:9px;width:100%;border:0;border-bottom:1px solid var(--dsw-alias-border-l2);border-radius:0;text-align:left;padding:9px 10px;background:transparent;min-height:62px}.kami .segment-row:last-child{border-bottom:0}.kami .segment-row[aria-pressed=true]{background:var(--dsw-alias-bg-layer-3);box-shadow:inset 3px 0 var(--dsw-alias-brand-primary)}.kami .segment-number{font-size:10px;color:var(--dsw-alias-label-tertiary);align-self:start;padding-top:3px}.kami .segment-excerpts{min-width:0;display:grid;gap:4px;font-size:12px;line-height:1.5}.kami .segment-excerpts>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}.kami .segment-row .badge{font-size:10px;align-self:start}.kami .segment-editor{display:none;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:14px;background:var(--dsw-alias-bg-layer-2);min-width:0}.kami .segment-editor .pairs{grid-template-columns:minmax(0,1fr)}.kami .segment-editor .source-text{max-height:180px;overflow:auto}.kami .segment-editor textarea{min-height:130px}.kami .type-tabs{padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-2);margin:4px 0}.kami .type-tabs button{background:transparent;border:0}.kami .breadcrumbs{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;overflow-wrap:anywhere}.kami .file-list,.kami .library-list{min-width:0}.kami .file-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;border-bottom:1px solid var(--dsw-alias-border-l2);padding:7px 0}.kami .file-row>.feedback{grid-column:1/-1}.kami .file-title{display:flex;gap:8px;justify-content:flex-start;text-align:left;min-width:0;font-size:12px;border:0}.kami .file-title>span:not(.badge){overflow-wrap:anywhere;flex:1}.kami .library-row{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:13px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .library-row>div:not(.feedback){flex:1;min-width:0}.kami .library-row strong{font-size:12px;overflow-wrap:anywhere}.kami .library-row p{font-size:11px;margin:5px 0}.kami .library-toggle{display:flex;align-items:center;gap:7px}.kami .library-row>.feedback{flex-basis:100%}.kami .learning-steps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}.kami .learning-steps>button{display:grid;gap:6px;align-content:start;min-width:0;padding:10px 5px;text-align:left;font-size:11px;background:var(--dsw-alias-bg-layer-2)}.kami .learning-steps>button[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-3)}.kami .learning-steps strong{font-size:11px;font-weight:600;overflow-wrap:anywhere}.kami .step-hint{font-size:10px;color:var(--dsw-alias-label-tertiary);line-height:1.45}.kami .candidate-picker select{width:100%}.kami .candidate-row{padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}.kami .candidate-row[data-selected=true]{border-color:var(--dsw-alias-brand-primary)}.kami .candidate-row strong{font-size:12px}.kami .gate-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.kami .gate-metrics>div{display:grid;gap:7px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}.kami .gate-metrics strong{font-size:23px;font-weight:600}.kami .gate-metrics span{font-size:11px;color:var(--dsw-alias-label-secondary)}.kami .metric-table{width:100%;border-collapse:collapse;font-size:12px}.kami .metric-table th,.kami .metric-table td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .metric-table th{font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:500}
       .kami .review-layout[data-editing=true] .segment-editor{display:block}.kami .review-layout[data-editing=true] .review-index{display:none}.kami .review-back{margin-bottom:12px}
       .kami .library-row>.library-actions{flex:0 0 auto;display:flex;gap:4px;justify-content:flex-end}.kami .library-actions button{min-width:30px}
+      .kami .file-row[data-selectable=true]{grid-template-columns:20px minmax(0,1fr) auto}.kami .file-select{display:flex;align-items:center;justify-content:center;align-self:stretch;cursor:pointer}
       .kami .primary{background:#174d40;border-color:#174d40;color:#f5efdf}.kami .primary:not(:disabled):hover{background:#23654f}.kami .type-tabs button[aria-pressed=true]{box-shadow:inset 0 -2px #82ad98}.kami .learning-steps>button[aria-pressed=true]{border-color:#82ad98;box-shadow:inset 0 2px #82ad98}.kami .segment-row[aria-pressed=true]{box-shadow:inset 3px 0 #82ad98}
       .kami .learning-view .stack>button,.kami .preview>button{justify-self:start}
       .kami .final-review .card{gap:10px}.kami .final-review p,.kami .final-review .metrics{margin:0}.kami .final-review details.card:not([open]){display:block}
@@ -396,6 +413,8 @@ window.__ModuleLoader__.load({
       const operation = model.view.operations[name];
       if (!operation) return null;
       return h(React.Fragment, null,
+        operation.compilation && h("div", { className: "feedback" }, `${t("已提交编译")} ${operation.compilation.queued} · ${t("未变化，跳过")} ${operation.compilation.skipped}`),
+        ...(operation.compilation?.failures || []).map((failure, index) => h("div", { className: "feedback error", key: index, role: "alert" }, `${failure.path}: ${failure.error}`)),
         operation.pending && (name !== "task-list" || !model.view.knownFiles) && h("div", { className: "feedback", role: "status" }, t("准备中…")),
         operation.error && h("div", { className: "feedback error", role: "alert" }, operation.error, retry && h(Button, { onClick: retry, small: true }, t("重试"))),
         operation.message && h("div", { className: "feedback", role: "status" }, t(operation.message)));
@@ -628,6 +647,7 @@ window.__ModuleLoader__.load({
       return h("section", { className: "preview stack" }, h("div", { className: "section-heading" }, h("h3", null, preview.filename || preview.path), h(Button, { quiet: true, small: true, onClick: close }, t("关闭"))),
         h("code", null, preview.path), h("p", { className: "muted" }, t(resourceFields.find((item) => item.purpose === preview.purpose)?.label || "资源"), " · ", sizeText(preview.size)),
         preview.compilation && h("div", { className: "stack" }, h("p", { className: "muted" }, t(ready ? "已编译，可用于翻译" : "待 Agent 编译"), ready && ` · ${preview.purpose === "style-guide" ? `${preview.compilation.characters} ${t("字符")}` : `${preview.compilation.itemCount} ${t("条")}`}`), !ready && h("div", { className: "button-row" }, h(Button, { onClick: () => model.compileResource(preview), busy: model.view.operations[compileKey]?.pending }, t("让 Agent 编译")), h(Button, { quiet: true, onClick: refresh }, t("刷新编译状态"))), h(Feedback, { model, name: compileKey, retry: () => model.compileResource(preview), t })),
+        preview.compilation && h("p", { className: "muted" }, t("同库文件共用一份编译结果，选中更新会保留其他文件内容。")),
         h(Button, { onClick: inspect, busy: model.view.operations[key]?.pending }, t("让 Agent 查看原文件")), h(Feedback, { model, name: key, retry: inspect, t }),
         h("details", null, h("summary", null, t("文件版本")), h("code", null, "SHA-256 ", preview.hash)));
     }
@@ -644,9 +664,14 @@ window.__ModuleLoader__.load({
     }
     function LocalFiles({ model, purpose, library, t }) {
       const [paths, setPaths] = useState({}), [folder, setFolder] = useState(""), [query, setQuery] = useState(""), [offset, setOffset] = useState(0);
+      const [selected, setSelected] = useState(() => new Set());
       const resource = resourceFields.find((item) => item.purpose === purpose), key = `resource:${purpose}:${library?.id || ""}`, unlinkKey = `unlink-resource:${purpose}:${library?.id || ""}`, config = model.workspace?.config || {}, preview = model.view.sections.preview;
       const files = linkedPaths(config, purpose, library?.id);
       const listing = resourcePage(files, { folder, query, offset });
+      const selectable = purpose !== "reference", selectedPaths = files.filter((path) => selected.has(path)), batchKey = `compile-selected:${purpose}:${library?.id || ""}`, busy = model.view.operations[batchKey]?.pending;
+      const select = (values, checked) => { delete model.view.operations[batchKey]; setSelected((current) => { const next = new Set(current); for (const path of values) { if (checked) next.add(path); else next.delete(path); } return next; }); };
+      const clearSelection = () => { delete model.view.operations[batchKey]; setSelected(new Set()); };
+      const compileSelected = () => model.compileResources(selectedPaths.map((path) => ({ path, purpose, ...(library ? { libraryId: library.id } : {}) })), batchKey);
       const inspect = (path) => model.loadSection("preview", (token) => model.request({ action: "file", path, purpose, libraryId: library?.id, register: false, projectId: token.view.projectId }, token));
       const link = () => model.perform(key, async (token) => {
         const result = await model.request({ action: "file", path: paths[purpose]?.trim(), purpose, libraryId: library?.id, projectId: token.view.projectId }, token);
@@ -659,6 +684,7 @@ window.__ModuleLoader__.load({
         const latest = await model.request({ action: "workspace" }, token);
         await model.request({ action: "workspace", actionType: "configure", resources: { [resource.field]: (latest.config[resource.field] || []).filter((item) => item !== path) } }, token);
         if (token.view.sections.preview?.path === path) delete token.view.sections.preview;
+        delete token.view.operations[batchKey]; setSelected((current) => { const next = new Set(current); next.delete(path); return next; });
         delete token.view.operations[key];
         await model.refresh(); return "已解除关联，工作区原件保留";
       });
@@ -668,9 +694,11 @@ window.__ModuleLoader__.load({
           h(Button, { primary: true, disabled: !paths[purpose]?.trim(), busy: model.view.operations[key]?.pending, onClick: link }, t("关联文件")), h(Feedback, { model, name: key, retry: link, t }))),
         h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("关联本地文件")), h("span", { className: "muted" }, `${files.length} ${t("个文件")}`)),
           h("input", { type: "search", value: query, placeholder: t("搜索文件名或路径"), "aria-label": t("搜索资源文件"), onChange: (event) => { setQuery(event.target.value); setOffset(0); } }),
+          selectable && h("div", { className: "button-row" }, h(Button, { small: true, disabled: busy || !listing.paths.length, onClick: () => select(listing.paths, true) }, t("全选筛选结果")), h(Button, { small: true, disabled: busy || !selectedPaths.length, onClick: clearSelection }, t("清空选择")), h("span", { className: "muted" }, `${t("已选择")} ${selectedPaths.length} ${t("个文件")}`), h(Button, { primary: true, small: true, disabled: !selectedPaths.length, busy, onClick: compileSelected }, t("编译选中"))),
+          selectable && h(Feedback, { model, name: batchKey, retry: compileSelected, t }),
           h("div", { className: "breadcrumbs" }, h(Button, { small: true, quiet: true, onClick: () => changeFolder("") }, t("全部文件")), folder && h(React.Fragment, null, h("span", { className: "muted" }, folder), h(Button, { small: true, quiet: true, onClick: () => changeFolder(folder.replace(/[^/]+\/$/u, "")) }, t("上一级")))),
-          h("div", { className: "file-list" }, ...listing.items.map((entry) => h("div", { className: "file-row", key: entry.path }, h("button", { type: "button", className: "file-title quiet", onClick: () => entry.folder ? changeFolder(entry.path) : inspect(entry.path) }, h(Glyph, { name: entry.folder ? "folder" : "tasks" }), h("span", null, entry.name), entry.folder && h("span", { className: "badge" }, entry.count)),
-            !entry.folder && h(Button, { small: true, quiet: true, onClick: () => unlink(entry.path), busy: model.view.operations[unlinkKey]?.pending }, t("解除关联")))), !listing.total && h(Empty, { title: "尚未关联文件", t })),
+          h("div", { className: "file-list" }, ...listing.items.map((entry) => h("div", { className: "file-row", key: entry.path, "data-selectable": selectable || undefined }, selectable && h("label", { className: "file-select" }, h("input", { type: "checkbox", "aria-label": `${t("选择")} ${entry.name}`, checked: entry.paths.every((path) => selected.has(path)), disabled: busy, ref: (input) => { if (input) input.indeterminate = entry.paths.some((path) => selected.has(path)) && !entry.paths.every((path) => selected.has(path)); }, onChange: (event) => select(entry.paths, event.target.checked) })), h("button", { type: "button", className: "file-title quiet", onClick: () => entry.folder ? changeFolder(entry.path) : inspect(entry.path) }, h(Glyph, { name: entry.folder ? "folder" : "tasks" }), h("span", null, entry.name), entry.folder && h("span", { className: "badge" }, entry.count)),
+            !entry.folder && h(Button, { small: true, quiet: true, disabled: busy, onClick: () => unlink(entry.path), busy: model.view.operations[unlinkKey]?.pending }, t("解除关联")))), !listing.total && h(Empty, { title: "尚未关联文件", t })),
           h(Pager, { offset: listing.offset, total: listing.total, onChange: setOffset, t })),
         h(Feedback, { model, name: "section:preview", t }), h(Feedback, { model, name: unlinkKey, t }), preview?.purpose === purpose && files.includes(preview.path) && h(ResourcePreview, { model, preview, t, close: () => { delete model.view.sections.preview; model.emit(); } }));
     }
@@ -721,7 +749,9 @@ window.__ModuleLoader__.load({
     }
     function AssetsView({ model, t }) {
       const [purpose, setPurpose] = useState("terms");
+      const resources = resourceSelection(model.workspace?.config, model.workspace?.libraries), hasResources = ["terms", "translationMemories", "styleGuides"].some((field) => resources[field]?.length);
       return h("div", { className: "stack" }, h("div", null, h("h2", null, t("项目资产")), h("p", null, t("按库关联本地原文件，统一管理任务所用的术语、记忆、指南和资料。"))),
+        h("section", { className: "card" }, h(Button, { primary: true, disabled: !hasResources, busy: model.view.operations["compile-all-resources"]?.pending, onClick: () => model.compileResources() }, t("编译全部待编译")), h("p", { className: "muted" }, t("只编译新增或变化的文件，按库合并并去重。")), h(Feedback, { model, name: "compile-all-resources", retry: () => model.compileResources(), t })),
         h("div", { className: "type-tabs" }, ...[["terms", "术语库"], ["tm", "记忆库 TM"], ["style-guide", "风格指南"], ["reference", "参考资料"]].map(([value, label]) => h("button", { type: "button", key: value, "aria-pressed": purpose === value, onClick: () => setPurpose(value) }, t(label)))),
         ["terms", "tm"].includes(purpose) ? h(LibraryAssets, { model, purpose, t, key: purpose }) : h(React.Fragment, null, h(LocalFiles, { model, purpose, t, key: purpose }), h(LegacyResources, { model, t })));
     }
