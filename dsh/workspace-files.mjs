@@ -109,11 +109,13 @@ async function checkedTarget(root, path, context) {
   return { name, target, actual };
 }
 
-async function readSource(root, path, context, maxBytes, metadataOnly = false) {
+async function readSource(root, path, context, maxBytes, metadataOnly = false, cache) {
   const entry = await checkedTarget(root, path, context);
   const info = await context.fs.stat(entry.target, context.signal);
   if (info?.type !== "file") throw new Error(`不是普通文件：${entry.name}`);
   if (maxBytes !== undefined && info.size > maxBytes) throw new Error(`文件超过 ${maxBytes / 1024 / 1024} MB：${entry.name}`);
+  const cached = metadataOnly && cache?.get(entry.actual);
+  if (info.version !== undefined && cached?.version === info.version && cached.source.size === info.size) return { ...cached.source, path: entry.name, filename: basename(entry.name) };
   let bytes, digest;
   if (metadataOnly && typeof context.fs.readByteRange === "function") {
     const hasher = createHash("sha256");
@@ -127,7 +129,9 @@ async function readSource(root, path, context, maxBytes, metadataOnly = false) {
   } else bytes = Buffer.from(await context.fs.readBytes(entry.target, context.signal, maxBytes ?? info.size));
   const after = await context.fs.stat(entry.target, context.signal);
   if ((maxBytes !== undefined && bytes?.length > maxBytes) || after?.version !== info.version || await realpath(context.fs.processPath(entry.target)) !== entry.actual) throw new Error(`读取期间文件发生变化，请重试：${entry.name}`);
-  return { path: entry.name, filename: basename(entry.name), hash: digest || hash(bytes), ...(metadataOnly ? {} : { bytes }), size: info.size };
+  const source = { path: entry.name, filename: basename(entry.name), hash: digest || hash(bytes), ...(metadataOnly ? {} : { bytes }), size: info.size };
+  if (metadataOnly && info.version !== undefined) cache?.set(entry.actual, { version: info.version, source });
+  return source;
 }
 
 async function writeTarget(root, path, context) {
@@ -155,6 +159,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
   const writes = new Map();
   const compiler = createResourceLibraryCompiler(dataDirectory);
   const catalogs = new WeakMap();
+  const statusSources = new Map(), statusCoverage = new Map();
   function compilationCatalog(state) {
     if (catalogs.has(state)) return catalogs.get(state);
     const groups = new Map(), files = new Map(), libraries = new Map(state.libraries.map((library) => [library.id, library]));
@@ -239,6 +244,26 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       compiledFile: compiler.path(group), librarySourceCount: group.paths.length, libraryItemCount: record?.candidates?.length || 0,
       duplicateCount: record?.duplicateCount || 0, ...(parsed ? { itemCount: parsed.candidateCount || 0, characters: parsed.characters || 0, skippedCount: parsed.skippedCount || 0 } : {}) };
   }
+  async function compilationVersion(file) {
+    try {
+      const info = await stat(file, { bigint: true });
+      return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+    } catch (error) { if (error.code === "ENOENT") return ""; throw error; }
+  }
+  async function compilationCoverage(group, context, memo) {
+    const file = compiler.path(group);
+    if (memo.has(file)) return memo.get(file);
+    const pending = (async () => {
+      const version = await compilationVersion(file), cached = statusCoverage.get(file);
+      if (cached?.version === version) return cached.sources;
+      const record = await libraryRecord(group, context);
+      const sources = new Map((record?.sources || []).map((source) => [source.path, source.hash]));
+      if (version === await compilationVersion(file)) statusCoverage.set(file, { version, sources });
+      return sources;
+    })();
+    memo.set(file, pending);
+    return pending;
+  }
   async function compilationRequests(state, selection, context) {
     const catalog = compilationCatalog(state), enabled = new Set(state.libraries.filter((library) => library.enabled !== false).map((library) => library.id));
     if (selection === undefined) selection = Object.entries(fields).filter(([purpose]) => purpose !== "reference").flatMap(([purpose, field]) => state.config[field].filter((path) => {
@@ -259,8 +284,8 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       if (!groups.has(id)) groups.set(id, { purpose, libraryId: group.libraryId, libraryName: group.libraryName, compiledFile: compiler.path(group),
         updatePath: `.kami/compiled/${purpose}-${hash(`${state.config.projectId}\0${id}`).slice(0, 16)}.json`, files: [] });
       try {
-        const source = await readSource(state.workspace, path, context, undefined, true), record = await libraryRecord(group, context, memo);
-        groups.get(id).files.push({ path, hash: source.hash, status: librarySource(record, source) ? "ready" : "pending" });
+        const source = await readSource(state.workspace, path, context, undefined, true, statusSources), coverage = await compilationCoverage(group, context, memo);
+        groups.get(id).files.push({ path, hash: source.hash, status: coverage.get(path) === source.hash ? "ready" : "pending" });
       } catch (error) { failures.push({ path, purpose, error: error.message }); }
     }
     return { projectId: state.config.projectId, groups: [...groups.values()], failures };

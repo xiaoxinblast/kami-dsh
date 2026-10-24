@@ -177,6 +177,28 @@ test("library deduplication preserves TM identities, term applicability and dupl
   assert.ok(snapshot.terms.some((item) => item.contentType === "dialogue"));
 }));
 
+test("badge status refresh reuses unchanged source hashes and observes compiled updates and source changes", async () => fixture(async ({ cwd, workbench, context, compile }) => {
+  await writeFile(join(cwd, "tm.custom"), "源文件第一版");
+  await workbench.importFile({ path: "tm.custom", purpose: "tm" }, context);
+  const original = context.fs.readByteRange.bind(context.fs);
+  let reads = 0;
+  context.fs.readByteRange = async (...args) => { if (context.fs.processPath(args[0]).endsWith("tm.custom")) reads++; return original(...args); };
+  const status = async () => (await workbench.workspace({ action: "compilations" }, context)).groups[0].files[0].status;
+  assert.equal(await status(), "pending");
+  const initial = reads;
+  assert.ok(initial > 0);
+  assert.equal(await status(), "pending"); assert.equal(reads, initial, "unchanged large files must not be rehashed on every badge refresh");
+  await compile("tm.custom", "tm", { entries: [{ source: "設定", target: "设置" }] });
+  const compiled = reads;
+  assert.equal(await status(), "ready"); assert.equal(reads, compiled, "saving the library invalidates coverage without rereading the unchanged original");
+  await writeFile(join(cwd, "tm.custom"), "源文件第二版，内容发生变化");
+  assert.equal(await status(), "pending"); assert.ok(reads > compiled);
+  await rm(join(cwd, "tm.custom"));
+  const missing = await workbench.workspace({ action: "compilations" }, context);
+  assert.equal(missing.groups[0].files.length, 0);
+  assert.equal(missing.failures[0].path, "tm.custom");
+}));
+
 test("first library update migrates unchanged per-file caches without recompiling unselected originals", async () => fixture(async ({ cwd, dataDirectory, workbench, context, compile }) => {
   for (const path of ["a.custom", "b.custom"]) await writeFile(join(cwd, path), path);
   await workbench.workspace({ action: "configure", resources: { translationMemories: ["a.custom", "b.custom"] } }, context);

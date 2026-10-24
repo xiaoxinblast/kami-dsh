@@ -47,6 +47,27 @@ test("linked local resources browse directories and search across nested files",
   assert.equal(searched.items[0].path, "rules/nested/game.pdf");
 });
 
+test("compilation badges count every descendant and require every file to be ready", async () => {
+  const { resourcePage } = await stateModule();
+  const paths = ["root.xlsx", "rules/a.xlsx", "rules/nested/b.xlsx", "rules/nested/c.xlsx"];
+  const compilations = new Map(paths.map((path) => [path, { status: "ready" }]));
+  const page = () => resourcePage(paths, { compilations });
+  assert.equal(page().items.find((item) => item.path === "root.xlsx").compilation.status, "ready");
+  assert.equal(page().items.find((item) => item.folder).compilation.ready, 3);
+  assert.equal(page().items.find((item) => item.folder).compilation.total, 3);
+  compilations.set(paths[2], { status: "pending" });
+  assert.equal(page().items.find((item) => item.folder).compilation.status, "pending");
+  assert.equal(page().items.find((item) => item.folder).compilation.ready, 2);
+  const nested = resourcePage(paths, { compilations, folder: "rules/" }).items.find((item) => item.folder);
+  assert.equal(nested.compilation.ready, 1); assert.equal(nested.compilation.total, 2);
+  compilations.set(paths[3], { status: "error", error: "文件无法读取" });
+  assert.equal(page().items.find((item) => item.folder).compilation.status, "error");
+  assert.match(page().items.find((item) => item.folder).compilation.error, /文件无法读取/);
+  compilations.delete(paths[0]);
+  assert.equal(page().items.find((item) => !item.folder).compilation.status, "checking");
+  assert.equal(resourcePage(paths).items[0].compilation, undefined, "reference lists do not claim compilation status");
+});
+
 test("promotion requires a matching evaluation and a current gate for the selected candidate", async () => {
   const { promotionReady } = await stateModule();
   const evaluation = { challengerSkillId: "chosen", decision: "promote", report: { promotable: true } };
