@@ -3,9 +3,10 @@ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import * as llm from "@deepseek-ai/dsh-llm";
 import { createWorkbench } from "./workbench.mjs";
 import { createModelAdapter, sessionModelRoute } from "./model-adapter.mjs";
+import { createWorkspaceReferenceTools } from "./reference-tools.mjs";
 import { KamiUiService, TYPERT } from "./ui-bridge.mjs";
 
-export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert", "workingDirectory", "fs", "sandboxPolicy", "agentPresets"];
+export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert", "workingDirectory", "fs", "sandboxPolicy", "agentPresets", "tools"];
 
 export async function apply(ctx) {
   const profile = process.env.DSH_PROFILE || "desktop";
@@ -21,6 +22,7 @@ export async function apply(ctx) {
     sessionId: agent?.session?.header?.id,
     isKamiSession: Boolean(agent?.ctx && ctx.agentPresets.composedPreset(agent.ctx) === "kami-translator"),
     modelRoute: sessionModelRoute(ctx, agent),
+    referenceTools: (options) => createWorkspaceReferenceTools(ctx, agent, options, AbortSignal.any([abort.signal, signal || new AbortController().signal])),
     signal: AbortSignal.any([abort.signal, signal || new AbortController().signal])
   });
   ctx.effect(() => ctx.reflect.provide("kamiWorkbench", { ready, contextFor }));

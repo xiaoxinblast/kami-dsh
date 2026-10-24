@@ -8,6 +8,7 @@ import { createWorkbench } from "../dsh/workbench.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 import { mergeWorkspaceMemories, mergeWorkspaceTerms } from "../src/workspace-resources.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
+import { createWorkspaceReferenceTools } from "../dsh/reference-tools.mjs";
 
 test("workspace files are explicit, contained, snapshotted, restartable and never auto-imported as canonical assets", { timeout: 30000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "kami-workspace-"));
@@ -17,6 +18,7 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
   const modelAdapter = async (input, options) => { messages.push(JSON.stringify(input)); return { content: options.requestLabel === "工作术语学习" ? '{"terms":[]}' : options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "保存设置。" }; };
   let workbench = await createWorkbench({ dataDirectory: data, modelAdapter });
   const context = { cwd: first, fs, human: true, isKamiSession: true, signal: new AbortController().signal };
+  context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => context.cwd }, tools: { schemas: () => [] } }, { session: {} }, options, context.signal);
   const other = { ...context, cwd: second };
   let projectId, batchId, snapshot;
   const readRun = async (id = batchId, ctx = context) => { const value = await workbench.invoke({ path: `/api/batch/run/${id}?projectId=${projectId}` }, ctx); return value.run || value; };
@@ -40,7 +42,8 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       await assert.rejects(workbench.workspace({ action: "bind", projectId, name: "双重指定" }, context), /二者选一/);
       for (const [purpose, path] of [["style-guide", "rules/指南.md"], ["terms", "glossary.csv"], ["tm", "tm.csv"], ["reference", "reference.md"]]) {
         const value = await workbench.importFile({ purpose, path }, context);
-        assert.equal(value.registered, true); assert.match(value.hash, /^[a-f\d]{64}$/);
+        assert.equal(value.registered, true);
+        if (purpose === "reference") assert.ok(value.version); else assert.match(value.hash, /^[a-f\d]{64}$/);
       }
       const config = JSON.parse(await readFile(join(first, ".kami/project.json"), "utf8"));
       assert.deepEqual(config.styleGuides, ["rules/指南.md"]);
@@ -69,7 +72,9 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       assert.match(snapshot.guide.instruction, /指南版本甲/);
       assert.equal(snapshot.terms[0].target, "设置");
       assert.equal(snapshot.memories[0].qualityStatus, "machine_verified");
-      assert.equal(snapshot.referenceChunks[0].documentName, "reference.md");
+      assert.equal(snapshot.referenceChunks.length, 0);
+      assert.equal(snapshot.referenceMode, "agent-native");
+      assert.equal(snapshot.resources.find((item) => item.purpose === "reference").path, "reference.md");
       const run = await readRun();
       assert.match(run.runnerOptions.originalFile, /^runtime\/workspace-snapshots\//);
       assert.equal(run.runnerOptions.workspaceSnapshot.terms, undefined, "parsed resources stay on Host");
@@ -86,7 +91,7 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       const nextSnapshot = await rawSnapshot(next.batchId);
       assert.notEqual(snapshot.source.hash, nextSnapshot.source.hash);
       assert.match(nextSnapshot.guide.instruction, /指南版本乙/);
-      assert.equal(snapshot.resources.find((item) => item.purpose === "reference").hash, nextSnapshot.resources.find((item) => item.purpose === "reference").hash);
+      assert.equal(snapshot.resources.find((item) => item.purpose === "reference").version, nextSnapshot.resources.find((item) => item.purpose === "reference").version);
       const run = await readRun();
       await workbench.invoke({ path: "/api/batch/run", method: "POST", body: { ...run, runState: "paused" } }, context);
       await workbench.close();
@@ -121,16 +126,16 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       assert.equal((await workbench.workspace({}, context)).config.styleGuides.length, 1);
       assert.equal((await workbench.workspace({}, other)).config.styleGuides.length, 0);
     });
-    await t.test("reference index keys follow reference hashes, keeping other snapshots isolated", async () => {
+    await t.test("reference links retain provenance without parsing originals into the reference index", async () => {
       const { createProjectReferenceIndex } = await import("../src/reference-context.mjs");
       const index = createProjectReferenceIndex();
-      assert.equal((await withRuntimeCall({ workspaceSnapshot: snapshot }, () => index.documents({ projectId })))[0].name, "reference.md");
+      assert.equal((await withRuntimeCall({ workspaceSnapshot: snapshot }, () => index.documents({ projectId }))).length, 0);
       await writeFile(join(first, "reference.md"), "# 世界设定\n\n女王名为艾玛。");
       const next = await workbench.importFile({ path: "source/对白.txt" }, context);
       const nextSnapshot = await rawSnapshot(next.batchId);
-      const oldChunks = await withRuntimeCall({ workspaceSnapshot: snapshot }, () => index.chunksOf({ projectId, documentId: snapshot.referenceChunks[0].documentId }));
-      const newChunks = await withRuntimeCall({ workspaceSnapshot: nextSnapshot }, () => index.chunksOf({ projectId, documentId: nextSnapshot.referenceChunks[0].documentId }));
-      assert.match(oldChunks[0].text, /莉娜/); assert.match(newChunks[0].text, /艾玛/);
+      assert.notEqual(snapshot.resources.find((item) => item.purpose === "reference").version, nextSnapshot.resources.find((item) => item.purpose === "reference").version);
+      assert.equal(nextSnapshot.referenceChunks.length, 0);
+      assert.equal((await withRuntimeCall({ workspaceSnapshot: nextSnapshot }, () => index.documents({ projectId }))).length, 0);
       await workbench.workspace({ action: "configure", resources: { references: [] } }, context);
       assert.match(await readFile(join(first, "reference.md"), "utf8"), /艾玛/);
     });

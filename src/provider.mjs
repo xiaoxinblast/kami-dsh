@@ -908,7 +908,7 @@ export async function chatWithTools(messages, config = runtimeConfig, {
     for (const call of calls) {
       const result = await executeTool({ name: call.function.name, arguments: call.function.arguments });
       toolResults.push(result);
-      conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || "") });
+      conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || ""), ...(result?.nativeContent ? { nativeContent: result.nativeContent, nativeIsError: result.nativeIsError } : {}) });
       onActivity?.({ tool: call.function.name, refs: result?.refs?.length ?? 0 });
     }
     content = message.content || content;
@@ -916,7 +916,7 @@ export async function chatWithTools(messages, config = runtimeConfig, {
     // 以前这种情况只会返回空 content，调用方分不清"模型给了空译文"和"根本没答"。
     if (round === lastRound) exhausted = true;
   }
-  return { content, toolResults, exhausted };
+  return { content, toolResults, exhausted, ...(conversation.some((message) => message.nativeContent) ? { nativeMessages: conversation } : {}) };
 }
 
 export function isEmbeddingConfigured() {
@@ -2325,6 +2325,7 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
     })
     : { content: await chat(initialMessages, callConfig, initialOptions), exhausted: false };
   let initial = String(firstPass.content || "").trim();
+  const nativeMessages = firstPass.nativeMessages || [];
   if (!initial) {
     // 模型把轮次全花在查参考资料上（或直接吐了空白）时，以前这个空串会被当成译文：
     // 评测把它记成"候选漏译、质量 30 分"，生产批次把它记成"这一段翻好了"。
@@ -2332,7 +2333,8 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
     const reason = firstPass.exhausted ? "上一轮把工具轮次用完了还没给译文" : "上一轮返回了空白";
     initial = String(await chat([
       { role: "system", content: "你是日语到简体中文的本地化译者。不要再调用任何工具、不要输出解释或推理过程，直接给出一行最终译文。" },
-      { role: "user", content: `${packPrompt(contextPack)}\n\n补充要求（${reason}）：请只输出这一条的简体中文译文本身。` }
+      ...nativeMessages,
+      { role: "user", content: `${nativeMessages.length ? "" : packPrompt(contextPack)}\n\n补充要求（${reason}）：请只输出这一条的简体中文译文本身。` }
     ], callConfig, { ...initialOptions, requestLabel: "翻译（空译文重试）", tools: undefined })).trim();
   }
   if (!initial) {
@@ -2352,11 +2354,13 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
   }
   const reflection = await chat([
     { role: "system", content: "你是严格的双语本地化审校。只指出漏译、误译、术语、事实、语体、翻译腔和韵律/重复结构丢失问题（原文押韵、对仗或口号式重复时，译文须自然重现节奏与语气）；若上下文带有同批已定稿译文，还要检查句式与风格是否保持一致；没有问题则回答 PASS。" },
+    ...nativeMessages,
     { role: "user", content: `${contextPackText(contextPack, "reflect")}\n\n初译：\n${initial}` }
   ], callConfig, { temperature: 0.35, timeoutMs: 60_000, requestLabel: "翻译自检", onUsage });
   if (/^PASS[。.!]?$/i.test(reflection)) return { initial, translation: initial, reflection };
   const revised = await chat([
     { role: "system", content: "你是最终修订译者。根据审校意见做最小必要修改，严格保留事实、格式、术语的语境判断结果和明确硬约束。只输出最终译文。" },
+    ...nativeMessages,
     { role: "user", content: `${contextPackText(contextPack, "reflect")}\n\n初译：${initial}\n\n审校意见：${reflection}` }
   ], callConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "翻译修订", onUsage });
   return { initial, translation: requireNonEmptyTranslation(revised, initial, "翻译修订"), reflection };

@@ -6,7 +6,6 @@ import { extractTermPairs } from "../src/table-term-extractor.mjs";
 import { extractXliffPairs } from "../src/xliff-document.mjs";
 import { readBatchOriginal } from "../src/batch-originals.mjs";
 import { matchReviewPairsToSegments } from "../src/external-review.mjs";
-import { chunkReferencePages, extractReferenceFile, scanReferenceRisk } from "../src/reference-materials.mjs";
 import { createResourceLibraryCompiler, libraryResource, librarySource, mergeLibraryEntries } from "../src/resource-library-compilation.mjs";
 
 const CONFIG = ".kami/project.json";
@@ -107,6 +106,12 @@ async function checkedTarget(root, path, context) {
   const actual = await realpath(context.fs.processPath(target));
   if (!inside(root, actual)) throw new Error(`文件链接指向工作区外：${name}`);
   return { name, target, actual };
+}
+
+async function referenceSource(root, path, context) {
+  const entry = await checkedTarget(root, path, context), info = await context.fs.stat(entry.target, context.signal);
+  if (info?.type !== "file") throw new Error(`不是普通文件：${entry.name}`);
+  return { path: entry.name, filename: basename(entry.name), size: info.size, version: info.version };
 }
 
 async function readSource(root, path, context, maxBytes, metadataOnly = false, cache) {
@@ -369,14 +374,14 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     if (!fields[purpose]) throw new Error("未知的文件用途");
     const root = state.workspace;
     const observation = resourceContext.find((item) => relativePath(item.path) === relativePath(path));
-    let source = await readSource(root, path, context, undefined, Boolean(observation) || purpose !== "reference");
+    let source = await readSource(root, path, context, undefined, true);
     if (observation) {
       if (observation.hash !== source.hash) throw new Error(`Agent 查阅后原文件版本发生变化，请重新查看：${source.path}`);
       const text = String(observation.text || "").trim();
       const candidates = ["terms", "tm"].includes(purpose) ? compiledResource(purpose, observation).candidates : [];
       if (["terms", "tm"].includes(purpose) ? !candidates.length : !text) throw new Error(`Agent 尚未提供此资源的查阅结果：${source.path}`);
       return { path: source.path, filename: source.filename, purpose, hash: source.hash, size: source.size, reader: "agent",
-        parsed: { text, candidates, chunks: chunkReferencePages([{ text }]), characters: text.length } };
+        parsed: { text, candidates, characters: text.length } };
     }
     if (purpose !== "reference") {
       const parsed = libraryResource(await libraryRecord(compilationGroup(state, purpose, path, libraryId), context, memo), source);
@@ -393,11 +398,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     catch (error) { if (error.code !== "ENOENT") throw error; }
     if (!parsed) {
       if (purpose === "style-guide") parsed = await extractStyleGuideFile({ filename: source.filename, buffer: source.bytes });
-      else if (purpose === "reference") {
-        const extracted = await extractReferenceFile({ filename: source.filename, buffer: source.bytes, vision: true });
-        if (extracted.pendingPages) throw new Error(`参考资料有 ${extracted.pendingPages} 页未完成识别：${source.path}`);
-        parsed = { chunks: chunkReferencePages(extracted.pages), characters: extracted.characters };
-      } else if (/\.(?:mqxliff|xliff)$/iu.test(source.filename)) parsed = { candidates: extractXliffPairs(source.bytes, source.filename) };
+      else if (/\.(?:mqxliff|xliff)$/iu.test(source.filename)) parsed = { candidates: extractXliffPairs(source.bytes, source.filename) };
       else {
         parsed = await extractTermPairs({ filename: source.filename, buffer: source.bytes, locale: "zh-CN" });
         if (parsed.statistics.truncated) throw new Error(`表格超出解析行数上限：${source.path}`);
@@ -411,7 +412,8 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     if (!resources || Array.isArray(resources) || typeof resources !== "object" || !Object.keys(resources).every((key) => [...Object.values(fields), "outputDirectory"].includes(key))) throw new Error("未知的任务资源字段");
     resourceObservations(resourceContext);
     const config = configValue({ ...state.config, ...resources });
-    const result = { id: randomUUID(), workspace: state.workspace, projectId: config.projectId, createdAt: new Date().toISOString(), outputDirectory: config.outputDirectory, resources: [], terms: [], memories: [], referenceChunks: [], guide: null };
+    const result = { id: randomUUID(), workspace: state.workspace, projectId: config.projectId, createdAt: new Date().toISOString(), outputDirectory: config.outputDirectory, resources: [], terms: [], memories: [], referenceChunks: [], guide: null,
+      ...(config.references.length ? { referenceMode: "agent-native" } : {}) };
     const guides = [];
     const guideTexts = new Set();
     const compiled = new Map();
@@ -420,6 +422,11 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     const libraryById = new Map(libraries.map((library) => [library.id, library]));
     for (const [purpose, field] of Object.entries(fields)) {
       for (const path of config[field]) {
+        if (purpose === "reference") {
+          const source = await referenceSource(state.workspace, path, context);
+          result.resources.push({ ...source, purpose, reader: "agent-native" });
+          continue;
+        }
         const library = ["terms", "tm"].includes(purpose) ? libraryById.get(compilationGroup(compilationState, purpose, path).libraryId) : null;
         if (library?.enabled === false) continue;
         const resource = await parseResource(compilationState, purpose, path, context, resourceContext, library?.id, compiled);
@@ -428,10 +435,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
         if (purpose === "style-guide") {
           if (!guideTexts.has(parsed.text)) { guideTexts.add(parsed.text); guides.push(`【${path}】\n${parsed.text}`); }
         }
-        else if (purpose === "reference") {
-          const documentId = `workspace:${hash(`${path}\0${resource.hash}`)}`;
-          result.referenceChunks.push(...parsed.chunks.map((chunk, ordinal) => ({ ...chunk, id: `${documentId}:${ordinal}`, documentId, documentName: path, documentStatus: "ready", ordinal, libraryEnabled: true, risk: scanReferenceRisk(chunk.text), allowed: !scanReferenceRisk(chunk.text) })));
-        } else {
+        else {
           const libraryId = `workspace:${hash(`${purpose}\0${path}`)}`;
           const items = parsed.candidates.filter((item) => item.source && item.target && item.decision !== "excluded" && !resourceMetadataPair(item.source, item.target)).map((item, index) => ({ ...item, origins: item.origins || [{ path, hash: resource.hash, note: item.note || "", aliases: item.aliases || [], ...(item.rowNumber ? { rowNumber: item.rowNumber } : {}) }], id: `${libraryId}:${index}`, locale: "zh-CN", projectId: config.projectId, libraryId, linkedLibraryId: library?.id, libraryName: library?.name || path, libraryRole: "reference", libraryPriority: library?.priority || 1, libraryEnabled: true, status: "approved", qualityStatus: purpose === "tm" ? "machine_verified" : "human_approved", assetTier: purpose === "tm" ? "working" : "formal", workspaceResource: true, taskId: result.id, sourceFile: path, contentType: item.contentType || "general", domain: item.domain || "general" }));
           for (const item of items) result[purpose === "terms" ? "terms" : "memories"].push(item);
@@ -454,7 +458,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       const savedLink = state.config.libraryFiles.find((item) => item.purpose === purpose && item.path === relativePath(path));
       const library = ["terms", "tm"].includes(purpose) ? fileLibrary(state.libraries, purpose, args.libraryId || savedLink?.libraryId) : null;
       if (args.libraryId && !library) throw new Error("此文件用途不使用术语或 TM 资源库");
-      const source = await readSource(state.workspace, path, context, undefined, true);
+      const source = purpose === "reference" ? await referenceSource(state.workspace, path, context) : await readSource(state.workspace, path, context, undefined, true);
       const resource = { ...source, purpose, ...(library ? { libraryId: library.id, libraryName: library.name } : {}) };
       if (purpose !== "reference") resource.compilation = await compilation(state, purpose, source, args, context);
       if (args.register !== false) await update(context, (config) => ({ ...config, [fields[purpose]]: [...new Set([...config[fields[purpose]], resource.path])],

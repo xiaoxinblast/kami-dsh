@@ -340,6 +340,8 @@ window.__ModuleLoader__.load({
       "编译全部待编译": "Compile all pending resources", "编译选中": "Compile selected", "全选筛选结果": "Select all filtered files", "清空选择": "Clear selection", "已选择": "Selected", "已提交编译": "Submitted for compilation", "未变化，跳过": "Unchanged, skipped", "所选资源均已编译，无需重复": "Selected resources are already compiled", "没有可提交的编译资源": "No resources can be submitted", "只编译新增或变化的文件，按库合并并去重。": "Compile new or changed files and merge deduplicated results by library.", "同库文件共用一份编译结果，选中更新会保留其他文件内容。": "Files in one library share one compiled result. Updating selected files preserves the others.",
       "选择": "Select",
       "已完成编译": "Compiled", "待编译": "Awaiting compilation", "有文件待编译": "Files awaiting compilation", "状态检查失败": "Status check failed", "检查中…": "Checking…",
+      "参考资料只关联原件，翻译时由 Agent 按需直接查阅，不预解析或编译。": "References link to originals only. The agent reads them as needed during translation, without preprocessing or compilation.",
+      "原文、术语、TM 和风格指南沿用此版本；参考资料按需读取当前原件。": "Source text, terms, TM and style guides keep this version. References are read from current originals as needed.",
       "项目资产": "Project assets", "按库关联本地原文件，统一管理任务所用的术语、记忆、指南和资料。": "Link local originals by library to manage terms, memories, guides and references.", "关联本地文件": "Link local files", "关联文件": "Linked files", "已有条目": "Saved entries", "个关联文件": "linked files", "新增库并关联文件": "Create a library and link files", "上移": "Move up", "下移": "Move down", "提高优先级": "Raise priority", "降低优先级": "Lower priority", "已调整库优先级": "Library priority updated", "库内关联原文件，由 Agent 查阅；优先级数字越小越优先，使用 ↑ ↓ 调整。": "Link originals for the Agent to read. Lower numbers have higher priority; use ↑ ↓ to reorder.",
       "任务": "Tasks", "资源": "Resources", "当前工作区": "Workspace", "更换项目": "Change project", "已连接": "Connected", "连接中": "Connecting", "连接失败": "Connection failed",
       "尚未绑定项目": "No project bound", "选择已有项目": "Select an existing project", "绑定项目": "Bind project", "新建并绑定": "Create and bind", "项目绑定": "Project binding",
@@ -490,7 +492,7 @@ window.__ModuleLoader__.load({
       const enabledResources = resourceSelection(config, model.workspace?.libraries);
       const selectedResources = () => Object.fromEntries(resourceFields.map(({ field }) => [field, enabledResources[field].filter((item) => !excluded.includes(`${field}:${item}`))]));
       const withResources = Object.values(selectedResources()).some((items) => items.length);
-      const agentCreate = () => model.ask(`请为工作区原文件 ${JSON.stringify(path.trim())} 创建 Kami 翻译批次，供我预览，先不要启动翻译。本批次资源为 ${JSON.stringify(selectedResources())}。请先用 DSH 工具直接查阅原格式资源，以当前哈希和实际查阅结果提供 resourceContext；不创建纯文本转换副本，不正式入库。`, "agent-create");
+      const agentCreate = () => model.ask(`请为工作区原文件 ${JSON.stringify(path.trim())} 创建 Kami 翻译批次，供我预览，先不要启动翻译。本批次资源为 ${JSON.stringify(selectedResources())}。术语、TM 和风格指南使用已编译结果；待编译时由 Agent 理解原件后编译。参考资料只关联路径，建批时不预解析、不提前读取全文，也不向 resourceContext 填充参考正文；翻译时按需使用当前会话的原生工具直接查阅原件。不创建纯文本转换副本，不正式入库。`, "agent-create");
       const create = () => model.perform("create", async (token) => {
         const resources = selectedResources();
         const value = await model.request({ action: "file", purpose: "translation", path: path.trim(), resources, projectId: token.view.projectId }, token);
@@ -508,10 +510,10 @@ window.__ModuleLoader__.load({
     function Snapshot({ run, t }) {
       const snapshot = run.runnerOptions?.workspaceSnapshot;
       return h("details", { className: "snapshot" }, h("summary", null, t("已冻结的任务资源")), !snapshot ? h("p", { className: "muted" }, t("旧版任务 · 沿用原有资源")) : h(React.Fragment, null,
-        h("p", { className: "muted" }, t("任务启动后保持此版本；资源页预览的是工作区最新版。")),
+        h("p", { className: "muted" }, t("原文、术语、TM 和风格指南沿用此版本；参考资料按需读取当前原件。")),
         h("p", { className: "muted" }, t("创建时间"), " · ", timeText(snapshot.createdAt)),
         ...[snapshot.source && { ...snapshot.source, purpose: "translation" }, ...(snapshot.resources || [])].filter(Boolean).map((resource, index) => h("div", { className: "snapshot-row", key: `${resource.purpose}:${resource.path}:${index}` },
-          h("strong", null, resource.path), h("span", { className: "muted" }, t(resourceFields.find((item) => item.purpose === resource.purpose)?.label || "原文文件"), " · ", sizeText(resource.size)), h("code", null, "SHA-256 ", resource.hash))),
+          h("strong", null, resource.path), h("span", { className: "muted" }, t(resourceFields.find((item) => item.purpose === resource.purpose)?.label || "原文文件"), " · ", sizeText(resource.size)), h("code", null, resource.hash ? `SHA-256 ${resource.hash}` : resource.version))),
         h("code", null, snapshot.id)));
     }
     function TaskSummary({ model, run, t, review, exportFile }) {
@@ -659,7 +661,7 @@ window.__ModuleLoader__.load({
         preview.compilation && h("div", { className: "stack" }, h("p", { className: "muted" }, t(ready ? "已编译，可用于翻译" : "待 Agent 编译"), ready && ` · ${preview.purpose === "style-guide" ? `${preview.compilation.characters} ${t("字符")}` : `${preview.compilation.itemCount} ${t("条")}`}`), !ready && h("div", { className: "button-row" }, h(Button, { onClick: () => model.compileResource(preview), busy: model.view.operations[compileKey]?.pending }, t("让 Agent 编译")), h(Button, { quiet: true, onClick: refresh }, t("刷新编译状态"))), h(Feedback, { model, name: compileKey, retry: () => model.compileResource(preview), t })),
         preview.compilation && h("p", { className: "muted" }, t("同库文件共用一份编译结果，选中更新会保留其他文件内容。")),
         h(Button, { onClick: inspect, busy: model.view.operations[key]?.pending }, t("让 Agent 查看原文件")), h(Feedback, { model, name: key, retry: inspect, t }),
-        h("details", null, h("summary", null, t("文件版本")), h("code", null, "SHA-256 ", preview.hash)));
+        h("details", null, h("summary", null, t("文件版本")), h("code", null, preview.hash ? `SHA-256 ${preview.hash}` : preview.version)));
     }
     function LegacyResources({ model, t }) {
       const [open, setOpen] = useState(false);
@@ -709,6 +711,7 @@ window.__ModuleLoader__.load({
         h("details", { className: "card", open: !files.length || undefined }, h("summary", null, t("关联工作区文件")), h("div", { className: "quick-form" }, h("label", null, t("工作区相对路径"), h("input", { value: paths[purpose] || "", placeholder: resource.placeholder, onChange: (event) => setPaths({ ...paths, [purpose]: event.target.value }) })),
           h(Button, { primary: true, disabled: !paths[purpose]?.trim(), busy: model.view.operations[key]?.pending, onClick: link }, t("关联文件")), h(Feedback, { model, name: key, retry: link, t }))),
         h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("关联本地文件")), h("span", { className: "muted" }, `${files.length} ${t("个文件")}`)),
+          !selectable && h("p", { className: "muted" }, t("参考资料只关联原件，翻译时由 Agent 按需直接查阅，不预解析或编译。")),
           h("input", { type: "search", value: query, placeholder: t("搜索文件名或路径"), "aria-label": t("搜索资源文件"), onChange: (event) => { setQuery(event.target.value); setOffset(0); } }),
           selectable && h("div", { className: "button-row" }, h(Button, { small: true, disabled: busy || !listing.paths.length, onClick: () => select(listing.paths, true) }, t("全选筛选结果")), h(Button, { small: true, disabled: busy || !selectedPaths.length, onClick: clearSelection }, t("清空选择")), h("span", { className: "muted" }, `${t("已选择")} ${selectedPaths.length} ${t("个文件")}`), h(Button, { primary: true, small: true, disabled: !selectedPaths.length, busy, onClick: compileSelected }, t("编译选中"))),
           selectable && h(Feedback, { model, name: batchKey, retry: compileSelected, t }),
@@ -775,7 +778,7 @@ window.__ModuleLoader__.load({
     function StandaloneQa({ model, t }) {
       const [source, setSource] = useState(""), [target, setTarget] = useState("");
       const withResources = Object.values(resourceSelection(model.workspace?.config, model.workspace?.libraries)).some((paths) => paths.length);
-      const agentInspect = () => model.ask(`请用当前工作区已关联的资源审校下面的日中译文。先用 DSH 工具查阅原格式资源，不创建转换副本，然后执行 Kami 独立审校，并在主会话中说明问题。原文：${JSON.stringify(source)}；译文：${JSON.stringify(target)}。`, "agent-qa");
+      const agentInspect = () => model.ask(`请用当前工作区已关联的资源执行 Kami 独立审校，并在主会话中说明问题。术语、TM 和风格指南使用已编译结果；参考资料只关联，审校时按需用当前会话的原生工具直接查阅原件，不预解析或生成转换副本。原文：${JSON.stringify(source)}；译文：${JSON.stringify(target)}。`, "agent-qa");
       const inspect = () => model.perform("standalone-qa", async (token) => { token.view.sections.standaloneQa = await model.invoke("/api/auto-qa", "POST", scopeArgs(model, token, { source, translation: target }), token); });
       return h("div", { className: "stack" }, h("div", null, h("h2", null, t("独立审校")), h("p", { className: "muted" }, t("当前工作区最新资源"))),
         h("div", { className: "pairs" }, h("label", null, t("原文"), h("textarea", { value: source, onChange: (event) => setSource(event.target.value) })), h("label", null, t("译文"), h("textarea", { value: target, onChange: (event) => setTarget(event.target.value) }))),

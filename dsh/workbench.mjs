@@ -72,7 +72,7 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
     response.end = (chunk) => { if (chunk) chunks.push(Buffer.from(chunk)); response.writableEnded = true; response.emit("finish"); };
     response.destroy = () => response.emit("close");
     const currentWorkspace = context.cwd && context.fs ? await workspaceRoot(context) : undefined;
-    return withRuntimeCall({ modelRoute: context.modelRoute, signal: context.signal, workspaceSnapshot: context.workspaceSnapshot, fileInput: context.fileInput, originalFile: context.originalFile, workspaceRoot: currentWorkspace }, async () => {
+    return withRuntimeCall({ modelRoute: context.modelRoute, signal: context.signal, workspaceSnapshot: context.workspaceSnapshot, fileInput: context.fileInput, originalFile: context.originalFile, workspaceRoot: currentWorkspace, referenceTools: context.referenceTools }, async () => {
       try {
         const handled = await application.apiHandler(request, response, url);
         if (handled === false) throw Object.assign(new Error("Workbench operation not found"), { statusCode: 404 });

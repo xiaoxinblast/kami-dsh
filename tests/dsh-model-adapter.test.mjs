@@ -55,6 +55,9 @@ test("installed DSH protocol preserves prepared routes, tools and usage and repo
   await adapter([{ role: "user", content: [{ type: "text", text: "OCR" }, { type: "image_url", image_url: { url: "data:image/png;base64,aW1hZ2U=" } }] }], { route });
   assert.deepEqual(admitted.at(-1)[1], { type: "image", mediaType: "image/png", data: "aW1hZ2U=" });
   assert.equal(requests.at(-1).messages[0].content[1].attachment.attachmentId, "sha256:test-image");
+  const nativeContent = [{ type: "text", text: "原生读取结果" }, { type: "image", attachment: { attachmentId: "sha256:native-image" } }];
+  await adapter([{ role: "tool", tool_call_id: "native-read", content: "fallback text", nativeContent }], { route });
+  assert.deepEqual(requests.at(-1).messages[0].content, nativeContent, "already admitted native image blocks must not be discarded or readmitted");
   chunks = [{ type: "finish", reason: { kind: "error", failure: { message: "model unavailable" } } }];
   await assert.rejects(adapter([{ role: "user", content: "x" }], { route }), /model unavailable/);
   chunks = [{ type: "text-delta", index: 0, text: "partial" }, { type: "finish", reason: { kind: "max-tokens" } }];

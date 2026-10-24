@@ -13,9 +13,10 @@ test("local resources use original files and agent observations without upload l
   const { fs, close } = await workspaceFs();
   await mkdir(cwd);
   const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async () => ({ content: "译文" }) });
-  let fullResourceReads = 0;
+  let fullResourceReads = 0, referenceRanges = 0;
   const observedFs = new Proxy(fs, { get(target, key) {
     if (key === "readBytes") return (...args) => { if (target.processPath(args[0]).endsWith("原始资料.bin")) fullResourceReads++; return target.readBytes(...args); };
+    if (key === "readByteRange") return (...args) => { if (target.processPath(args[0]).endsWith("原始资料.bin")) referenceRanges++; return target.readByteRange(...args); };
     const value = Reflect.get(target, key, target); return typeof value === "function" ? value.bind(target) : value;
   } });
   const context = { cwd, fs: observedFs, human: true, signal: new AbortController().signal };
@@ -25,10 +26,23 @@ test("local resources use original files and agent observations without upload l
     try { await large.truncate(33 * 1024 * 1024); } finally { await large.close(); }
     fullResourceReads = 0;
     const linked = await workbench.importFile({ path: "原始资料.bin", purpose: "reference" }, context);
-    assert.equal(fullResourceReads, 0, "association must stream the original instead of buffering it");
+    assert.equal(fullResourceReads, 0, "association must not buffer the original");
+    assert.equal(referenceRanges, 0, "reference association must not scan bytes for a content hash");
     assert.equal(linked.size, 33 * 1024 * 1024);
     assert.equal(linked.readMode, "agent");
     assert.equal(linked.registered, true);
+    await writeFile(join(cwd, "source.txt"), "設定を保存します。");
+    const linkedOnly = await workbench.importFile({ path: "source.txt", resourceContext: [{ path: linked.path, hash: "a".repeat(64), text: "不得预置到参考正文" }] }, context);
+    const linkedSnapshot = (await workbench.store.request(`/items/batch_runs/${linkedOnly.batchId}`)).runner_options.workspaceSnapshot;
+    assert.equal(linkedSnapshot.referenceMode, "agent-native");
+    assert.equal(linkedSnapshot.referenceChunks.length, 0);
+    assert.equal(linkedSnapshot.resources[0].path, linked.path);
+    assert.equal(linkedSnapshot.resources[0].reader, "agent-native");
+    assert.equal(fullResourceReads, 0, "batch creation must not buffer or parse linked reference originals");
+    await workbench.importFile({ path: "source.txt" }, context);
+    assert.equal(fullResourceReads, 0, "reference parsing must not return when agent observations are omitted");
+    assert.equal(referenceRanges, 0, "batch creation must keep reference originals unread");
+    await assert.rejects(readFile(join(directory, "data/runtime/workspace-resources")), /ENOENT/);
     await writeFile(join(cwd, "风格.pdf"), "native file tool reads this original");
     const guide = await workbench.importFile({ path: "风格.pdf", purpose: "style-guide" }, context);
     assert.equal(guide.readMode, "agent");

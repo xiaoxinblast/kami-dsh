@@ -16,7 +16,7 @@ export function createModelAdapter(ctx, llm) {
     }));
     const converted = await Promise.all(messages.map(async (message) => {
       if (message.role === "system") return llm.createSystemMessage(String(message.content || ""));
-      if (message.role === "tool") return llm.createToolResultMessage({ callId: message.tool_call_id, content: await blocks(message.content) });
+      if (message.role === "tool") return llm.createToolResultMessage({ callId: message.tool_call_id, content: message.nativeContent || await blocks(message.content), ...(message.nativeIsError ? { isError: true } : {}) });
       if (message.role === "assistant") return llm.createAssistantMessage({ content: [...await blocks(message.content), ...(message.tool_calls || []).map((call) => ({ type: "tool-call", id: call.id, name: call.function.name, arguments: call.function.arguments || "{}" }))], source: route });
       return { role: "user", content: await blocks(message.content) };
     }));
