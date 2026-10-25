@@ -60,6 +60,14 @@ test("删除一条意见后重算评分，其他意见保持不变", () => {
   assert.equal(before.segments[0].issues.length, 2, "原报告对象不被修改");
 });
 
+test("删除意见不能把未完成的模型检查变成有分数的报告", () => {
+  const before = { ...report(), fallbackReason: "语法专项失败" };
+  const next = deleteQaIssue({ report: before, fingerprint: collectQaIssues(before)[0].fingerprint });
+  assert.equal(next.scores.overall, null);
+  assert.equal(next.task.overallScore, null);
+  assert.equal(next.report.fallbackReason, before.fallbackReason);
+});
+
 test("前端 WebCrypto 指纹与后端指纹算法一致——否则界面上的删除按钮会 404", async () => {
   // 这段逻辑与 public/app.js 的 autoQaIssueFingerprint 逐字对应：
   // 字段顺序、空白折叠、\u0000 分隔、hex 后截断 32 位。

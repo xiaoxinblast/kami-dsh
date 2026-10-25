@@ -916,7 +916,7 @@ export async function chatWithTools(messages, config = runtimeConfig, {
     // 以前这种情况只会返回空 content，调用方分不清"模型给了空译文"和"根本没答"。
     if (round === lastRound) exhausted = true;
   }
-  return { content, toolResults, exhausted, ...(conversation.some((message) => message.nativeContent) ? { nativeMessages: conversation } : {}) };
+  return { content, toolResults, exhausted, messages: conversation, ...(conversation.some((message) => message.nativeContent) ? { nativeMessages: conversation } : {}) };
 }
 
 export function isEmbeddingConfigured() {
@@ -1404,10 +1404,11 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
  * Auto QA 三层模型审校：basic 基本检查、fidelity 语义忠实性（着重）、nuance 细微一致性。
  * 单次调用返回带 dimension 的问题列表；解析失败走行式降级，最终失败抛错由调用方记录。
  */
-export async function evaluateAutoQaWithModel({ source, translation, locale, contentType = "general", domain = "general", styleProfile = null, references = [], machineDrafts = [], qaCases = [], evidence = [], onUsage = null, toolRunner = null }) {
+export async function evaluateAutoQaWithModel({ source, translation, locale, contentType = "general", domain = "general", styleProfile = null, matches = [], references = [], machineDrafts = [], qaCases = [], evidence = [], onUsage = null, toolRunner = null }) {
   const evidencePayload = {
     source, translation, locale, contentType, domain,
     multiSentence: String(source).includes("\n"),
+    terminology: matches,
     styleProfile: styleProfile ? { name: styleProfile.name, version: styleProfile.version, instruction: styleProfile.instruction, reviewRubric: styleProfile.reviewRubric || null, examples: styleProfile.examples } : null,
     // approvedReferences 是唯一可以充当"标准"的一档；machineDrafts 只是本系统
     // 自己此前的输出，拿它当依据会让一次错误在下一次评审里变成规范。
@@ -1434,6 +1435,7 @@ severity：critical 只用于事实层面的丢失或捏造——整句未译、
 特别重要：若原文包含多个句子（用换行分隔），必须逐句核对译文是否覆盖每一句的信息，任何一句未译出都要记 critical omission，不得因为其他句子译出了就认为完整。
 3) nuance 细微一致性：敬语级别、语气词、正式度、句式节奏是否与提供的风格规范、approvedReferences（人工批准的译例）、历史风格证据一致。有证据时优先对照证据判断；没有证据时按目标语言自然习惯判断。细微差异记 minor，明显违反记 major。
 输入中的 machineDrafts 是本系统此前自己产出的机器译文，**只能用于判断同一文档内前后是否自相矛盾，绝不能当作正确与否的依据**；不得以"与 machineDrafts 不一致"为由报告任何问题，也不得把 machineDrafts 里的用词、术语或标点当成规范。
+输入中的 terminology 是当前原文命中的术语及其来源、状态、备注和匹配方式。核对专名时先检查这些证据，不要仅凭字面直译否定登记译法。保留其权威边界：工作区参考术语不等于人工批准，模糊命中仅作提示；有冲突时说明具体证据，不得把参考条目自行升级为正式规范。
 
 输出语言要求：category 使用简短英文代码；message、suggestion 和所有解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 只用于逐字引用原文或译文证据，可以保留对应语言。
 
@@ -1442,16 +1444,23 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
     { role: "user", content: JSON.stringify(evidencePayload) }
   ];
   const qaOptions = { temperature: 0.1, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "Auto QA", responseFormat: { type: "json_object" }, onUsage };
-  // 质检也可以按需查资料（核对角色名、设定、剧情一致性），但只给一轮工具调用。
-  let content = toolRunner?.tools?.length
-    ? (await chatWithTools(messages, runtimeConfig, {
+  // 质检按需查阅原件；列目录、加载文档技能和读取正文可能需要多轮。
+  let reviewMessages = messages;
+  let content;
+  if (toolRunner?.tools?.length) {
+    const result = await chatWithTools(messages, runtimeConfig, {
       ...qaOptions,
       tools: toolRunner.tools,
-      maxRounds: 1,
+      maxRounds: toolRunner.maxRounds ?? 4,
       executeTool: toolRunner.execute,
       onActivity: toolRunner.onActivity
-    })).content
-    : await chat(messages, runtimeConfig, qaOptions);
+    });
+    reviewMessages = result.messages || messages;
+    content = result.exhausted ? await chat([
+      ...reviewMessages,
+      { role: "user", content: "工具轮次已用完。请根据已返回的原件证据完成审校，只输出要求的 JSON，不要再调用工具。" }
+    ], runtimeConfig, qaOptions) : result.content;
+  } else content = await chat(messages, runtimeConfig, qaOptions);
   let payload;
   let lastFormatError = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1462,7 +1471,7 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
       lastFormatError = error.message;
       if (attempt === 1) break;
       content = await chat([
-        ...messages,
+        ...reviewMessages,
         { role: "assistant", content: content.slice(0, 4_000) || "(空白)" },
         { role: "user", content: "上一个回答不是可解析的严格 JSON。请只重新输出一个紧凑 JSON 对象，根字段必须是 issues 数组；若没有问题输出 {\"issues\":[]}。不要输出空白、Markdown、解释或代码围栏。" }
       ], runtimeConfig, { temperature: 0, timeoutMs: 45_000, maxTokens: 1800, requestLabel: "Auto QA 格式重试", responseFormat: { type: "json_object" }, onUsage });
@@ -1471,19 +1480,14 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
   if (!payload) {
     // 针对“返回空白”的抢救：明确要求必须产出 JSON
     content = await chat([
-      ...messages,
+      ...reviewMessages,
       { role: "assistant", content: content.slice(0, 200) || "(空白)" },
       { role: "user", content: "你上一次的回复是空白。必须输出一个 JSON 对象；若没有问题，输出 {\"issues\":[]}。禁止输出空白。" }
     ], runtimeConfig, { temperature: 0, timeoutMs: 45_000, maxTokens: 1200, requestLabel: "Auto QA 空白抢救", responseFormat: { type: "json_object" }, onUsage });
-    if (!String(content).trim()) {
-      // 推理模型在“无问题”场景下可能只返回空白：空白按无问题处理
-      payload = { issues: [] };
-    } else {
-      try {
-        payload = parseAiQaResponse(content);
-      } catch (error) {
-        lastFormatError = error.message;
-      }
+    try {
+      payload = parseAiQaResponse(content);
+    } catch (error) {
+      lastFormatError = error.message;
     }
   }
   if (!payload) {
@@ -1492,16 +1496,12 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
         role: "system",
         content: "你是本地化 Auto QA。不要输出 JSON。若没有问题必须只输出 PASS 这一行；若有问题，每个问题单独一行，严格使用：ISSUE|dimension|critical/major/minor|英文类别代码|原文片段|译文片段|简体中文问题原因|简体中文修订建议。dimension 只能是 basic、fidelity、nuance；问题原因和修订建议禁止使用目标语言。禁止输出空白或任何其他内容。"
       },
-      { role: "user", content: JSON.stringify({ source, translation, locale, contentType, domain, references: references.slice(0, 3), qaCases: qaCases.slice(0, 2), evidence: evidence.slice(0, 4) }) }
+      ...reviewMessages.slice(1)
     ], runtimeConfig, { temperature: 0, timeoutMs: 60_000, maxTokens: 1600, requestLabel: "Auto QA 行式降级", onUsage });
-    if (!String(lineContent).trim()) {
-      payload = { issues: [] };
-    } else {
-      try {
-        payload = { issues: parseAutoQaLineResponse(lineContent) };
-      } catch (error) {
-        throw new Error(`Auto QA 返回无法解析（JSON：${lastFormatError || "未知"}；行式：${error.message}）`);
-      }
+    try {
+      payload = { issues: parseAutoQaLineResponse(lineContent) };
+    } catch (error) {
+      throw new Error(`Auto QA 返回无法解析（JSON：${lastFormatError || "未知"}；行式：${error.message}）`);
     }
   }
   return payload.issues.slice(0, 40).map((issue) => ({
@@ -1670,14 +1670,10 @@ export async function evaluateGrammarWithModel({ translation, locale, contentTyp
       },
       { role: "user", content: JSON.stringify({ translation, locale, contentType }) }
     ], runtimeConfig, { temperature: 0, timeoutMs: 45_000, maxTokens: 1200, requestLabel: "Auto QA 语法行式降级", onUsage });
-    if (!String(lineContent).trim()) {
-      payload = { issues: [] };
-    } else {
-      try {
-        payload = { issues: parseGrammarLineResponse(lineContent) };
-      } catch (error) {
-        throw new Error(`语法专项返回无法解析（JSON：${lastFormatError || "未知"}；行式：${error.message}）`);
-      }
+    try {
+      payload = { issues: parseGrammarLineResponse(lineContent) };
+    } catch (error) {
+      throw new Error(`语法专项返回无法解析（JSON：${lastFormatError || "未知"}；行式：${error.message}）`);
     }
   }
   return payload.issues.slice(0, 20).map((issue) => ({

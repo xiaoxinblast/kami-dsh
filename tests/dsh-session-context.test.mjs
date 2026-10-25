@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
@@ -23,6 +23,7 @@ test("Host context follows workingDirectory and the composed preset rather than 
   let cwd = first, preset = "standard", service;
   const cleanups = [];
   const ctx = {
+    get: (key) => key === "profileContext" ? { name: "web" } : undefined,
     fs, llm: {}, sessionProjections: { stateOf: () => null }, agentDefaultModel: { currentSelection: () => ({ provider: "test", model: "test" }) }, workingDirectory: { get: () => cwd }, agentPresets: { composedPreset: () => preset },
     sandboxPolicy: { resolve: ({ session }) => ({ mode: "workspace-write", workspaceRoot: session.header.cwd }) },
     reflect: { provide(_name, value) { service = value; } }, commands: { register: () => () => {} },
@@ -35,6 +36,7 @@ test("Host context follows workingDirectory and the composed preset rather than 
     assert.equal(initial.cwd, first); assert.equal(initial.isKamiSession, false);
     assert.equal(initial.filePolicy.workspaceRoot, first);
     const workbench = await service.ready;
+    assert.ok((await stat(join(directory, "kami-dsh", "web", "kami.sqlite"))).isFile(), "Host profile selects its own data directory without DSH_PROFILE");
     await workbench.workspace({ action: "bind", name: "first-only" }, initial);
     cwd = second; preset = "kami-translator";
     const next = service.contextFor(agent);

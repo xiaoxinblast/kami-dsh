@@ -13,6 +13,8 @@
  * candidates.
  */
 
+import { createHash } from "node:crypto";
+
 export const AUTO_PROPOSE_THRESHOLD = 10;
 export const AUTO_PROPOSE_GROWTH_WINDOW = 10;
 
@@ -57,22 +59,27 @@ export function createAutoProposer({ deps, threshold = AUTO_PROPOSE_THRESHOLD, g
       deps.countAcceptedTrajectories(scope),
       deps.listTrajectories(scope)
     ]);
+    const selected = deps.selectTrajectories(trajectories);
+    const fingerprint = createHash("sha256").update(JSON.stringify(selected.map((item) => [item.id, item.source, item.humanDecision?.finalTranslation || item.finalTranslation]))).digest("hex");
+    if (champion.metadata?.autoPropose?.lastError && champion.metadata.autoPropose.lastAttemptFingerprint === fingerprint) {
+      return { proposed: false, lastError: champion.metadata.autoPropose.lastError, reason: `同一批终稿的候选生成已失败：${champion.metadata.autoPropose.lastError}；等待新证据或手动重试` };
+    }
     const decision = evaluateAutoProposeDecision({
       champion,
       activeCandidateCount: activeCandidates.length,
       acceptedCount,
-      threshold,
-      growthWindow
+      threshold: typeof threshold === "function" ? threshold() : threshold,
+      growthWindow: typeof growthWindow === "function" ? growthWindow() : growthWindow
     });
     if (!decision.propose) return { proposed: false, reason: decision.reason };
-    const selected = deps.selectTrajectories(trajectories);
     if (!selected.length) return { proposed: false, reason: "没有可复盘的完成轨迹" };
     try {
-      const candidate = await deps.propose({ scope, champion, trajectories: selected });
+      const candidate = await deps.propose({ scope, champion, trajectories });
       await deps.recordMetadata(champion.id, champion.metadata || {}, {
         lastAcceptedCount: acceptedCount,
         lastProposedAt: now(),
         lastError: "",
+        lastAttemptFingerprint: fingerprint,
         candidateId: String(candidate?.id || ""),
         lastSource: "auto"
       });
@@ -83,10 +90,11 @@ export function createAutoProposer({ deps, threshold = AUTO_PROPOSE_THRESHOLD, g
         lastAcceptedCount: Number(previous.lastAcceptedCount) || 0,
         lastProposedAt: String(previous.lastProposedAt || ""),
         lastError: String(error.message || error),
+        lastAttemptFingerprint: fingerprint,
         candidateId: String(previous.candidateId || ""),
         lastSource: String(previous.lastSource || "")
       });
-      return { proposed: false, reason: String(error.message || error) };
+      return { proposed: false, lastError: String(error.message || error), reason: String(error.message || error) };
     }
   }
 

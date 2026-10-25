@@ -111,8 +111,8 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       const exported = await workbench.perform({ action: "export", batchId, projectId, mode: "writeback" }, context);
       assert.match(relative((await workbench.workspace({}, context)).workspace, exported.path), /^outputs[\\/]/);
       assert.equal(await readFile(exported.path, "utf8"), "保存设置。");
-      await assert.rejects(workbench.perform({ action: "export", batchId, projectId, mode: "writeback" }, context), /EEXIST/);
-      await assert.rejects(workbench.perform({ action: "export", batchId, projectId, mode: "writeback", outputPath: "source/对白.txt" }, context), /EEXIST/);
+      await assert.rejects(workbench.perform({ action: "export", batchId, projectId, mode: "writeback" }, context), (error) => error.code === "EEXIST" && /已存在.*更换导出路径/.test(error.message));
+      await assert.rejects(workbench.perform({ action: "export", batchId, projectId, mode: "writeback", outputPath: "source/对白.txt" }, context), (error) => error.code === "EEXIST" && /已存在/.test(error.message));
       assert.equal(await readFile(join(first, "source/对白.txt"), "utf8"), "変更を保存します。");
     });
     await t.test("sessions switching directories are isolated even when bound to the same project", async () => {

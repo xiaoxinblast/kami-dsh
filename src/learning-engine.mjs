@@ -154,11 +154,17 @@ export function collectTrainingEvidenceIds(trajectories) {
   return [...new Set(trajectories.map((item) => String(item?.id || "")).filter(Boolean))];
 }
 
+export function learningSourceKey(source) {
+  return String(source || "").normalize("NFKC").trim().replace(/\s+/gu, " ");
+}
+
 /** Build a human-approved holdout that strictly excludes every training trajectory. */
-export function selectSkillHoldout(trajectories, { scope, trainingEvidenceIds = [], limit = 60 } = {}) {
+export function selectSkillHoldout(trajectories, { scope, trainingEvidenceIds = [], trainingSources = [], limit = 60 } = {}) {
   if (!Array.isArray(trajectories)) throw new TypeError("候选留出轨迹必须是数组");
   const normalizedScope = normalizeLearningScope(scope);
   const training = new Set((Array.isArray(trainingEvidenceIds) ? trainingEvidenceIds : []).map(String));
+  const excludedSources = new Set([...trainingSources, ...trajectories.filter((item) => training.has(String(item?.id))).map((item) => item.source)].map(learningSourceKey).filter(Boolean));
+  const seen = new Set();
   const maximum = Math.max(1, Math.trunc(finiteNumber(limit) ?? 60));
   return trajectories.filter((item) => item
     && !training.has(String(item.id || ""))
@@ -166,6 +172,12 @@ export function selectSkillHoldout(trajectories, { scope, trainingEvidenceIds = 
     && item.status === "completed"
     && item.humanDecision?.accepted === true
     && String(item.humanDecision?.finalTranslation || item.finalTranslation || "").trim())
+    .filter((item) => {
+      const key = learningSourceKey(item.source) || `id:${item.id}`;
+      if (excludedSources.has(key) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .slice(0, maximum);
 }
 

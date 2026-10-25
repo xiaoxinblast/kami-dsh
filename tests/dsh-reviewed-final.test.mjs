@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
-import { saveAsset } from "../src/store.mjs";
+import { saveAsset, saveLearningTrajectory } from "../src/store.mjs";
 
 const xml = (targets = ["", "", "保存。"]) => `<?xml version="1.0" encoding="UTF-8"?><xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:mq="MQXliff" version="1.2"><file original="story"><body>${["星屑結晶を使います。", "帰還します。", "保存します。"].map((source, index) => `<trans-unit id="${index + 1}"><source>${source}</source><target>${targets[index]}</target><context-group><context context-type="x-mmq-context">STORY_${index + 1}</context></context-group></trans-unit>`).join("")}</body></file></xliff>`;
 
@@ -19,6 +19,10 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
   const alignmentGate = new Promise((resolve) => { release = resolve; });
   const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
     calls.push(options.requestLabel);
+    if (options.requestLabel === "翻译技能复盘") {
+      const input = JSON.parse(messages.at(-1).content);
+      return { content: JSON.stringify({ name: "终稿学习候选", reason: "依据人工修改", strategyPatch: { prompting: { additionalRules: ["保持动词简洁"] } }, evidenceIds: input.trajectories.map((item) => item.id) }) };
+    }
     if (options.requestLabel === "术语对齐") {
       entered(); await alignmentGate;
       return { content: JSON.stringify({ matches: [{ source: "星屑結晶", found: true, target: "星屑晶石", confidence: 0.99 }, { source: "帰還", found: true, target: "返回", confidence: 0.99 }] }) };
@@ -34,7 +38,7 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
     const prepared = await workbench.importFile({ path: "source.mqxliff" }, context);
     const segments = [];
     for (const segment of prepared.segments) {
-      const result = await workbench.invoke({ path: "/api/translate", method: "POST", body: { projectId, batchId: prepared.batchId, segmentId: segment.id, locale: "zh-CN", source: segment.source, entryId: segment.locator.unitId, entryKey: segment.entryKey, qualityTier: "fast", segmentPurpose: "general", useModelClassification: false } }, context);
+      const result = await workbench.invoke({ path: "/api/translate", method: "POST", body: { projectId, batchId: prepared.batchId, segmentId: segment.id, locale: "zh-CN", contentType: "ui", domain: "game", source: segment.source, entryId: segment.locator.unitId, entryKey: segment.entryKey, qualityTier: "fast", segmentPurpose: "general", useModelClassification: false } }, context);
       segments.push({ ...segment, translation: result.translation, result, status: "done" });
     }
     await saveAsset("zh-CN", { source: "帰還", target: "返航", status: "approved", projectId, libraryId: term.id });
@@ -96,5 +100,47 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
     await writeFile(join(cwd, "large-reviewed.mqxliff"), xml(["请使用星屑晶石。", "返回。", "保存。"]) + " ".repeat(33 * 1024 * 1024));
     const large = await workbench.perform({ ...operation, path: "large-reviewed.mqxliff" }, context);
     assert.ok(large.file.size > 32 * 1024 * 1024, "本地终稿不继承服务器上传大小限制");
+    const scope = { projectId, locale: "zh-CN", contentType: "general", domain: "general" };
+    const overview = await workbench.invoke({ path: `/api/learning?${new URLSearchParams(scope)}` }, context);
+    assert.ok(overview.champion, "the project champion remains visible when historical labels differ");
+    assert.equal(overview.champions.length, 1);
+    const evidence = await workbench.invoke({ path: `/api/learning/evidence?${new URLSearchParams({ ...scope, batchId: prepared.batchId, search: "星尘结晶" })}` }, context);
+    assert.equal(evidence.total, 1, "machine wording remains searchable after human edits");
+    assert.equal(evidence.items[0].humanDecision.machineTranslation, "使用星尘结晶。");
+    assert.equal(evidence.items[0].finalTranslation, "请使用星屑晶石。");
+    const foreignBatch = await workbench.invoke({ path: `/api/learning/evidence?${new URLSearchParams({ ...scope, batchId: "other-batch" })}` }, context);
+    assert.equal(foreignBatch.total, 0);
+    const { skill } = await workbench.invoke({ path: "/api/learning/skills/generate", method: "POST", body: scope }, context);
+    assert.equal(skill.parentId, overview.champion.id);
+    assert.equal(skill.status, "challenger");
+    assert.equal(skill.evidenceIds.length, 2);
+    const { evaluation } = await workbench.invoke({ path: `/api/learning/skills/${encodeURIComponent(skill.id)}/evaluate`, method: "POST", body: scope }, context);
+    assert.equal(evaluation.sampleCount, 0, "training evidence cannot leak into the holdout");
+    assert.equal(evaluation.decision, "needs_review");
+    assert.match(evaluation.report.conclusion, /至少需要 20 条/);
+    await assert.rejects(workbench.invoke({ path: `/api/learning/skills/${encodeURIComponent(skill.id)}/activate`, method: "POST", body: scope }, context), /评测|通过|晋升/);
+    const after = await workbench.invoke({ path: `/api/learning?${new URLSearchParams(scope)}` }, context);
+    assert.equal(after.champion.id, overview.champion.id);
+    assert.equal(after.evaluations[0].challengerSkillId, skill.id);
+    const holdoutIds = [];
+    for (const label of ["赤", "青", "白", "黒", "黄", "緑", "紫", "銀", "金", "橙", "春", "夏", "秋", "冬", "東", "西", "南", "北", "空", "海"]) {
+      const row = await saveLearningTrajectory({ locale: "zh-CN", project: projectId, contentType: "ui", domain: "game", batchId: "independent-review", source: `${label}の場所から帰還します。`, initialTranslation: "返航。", finalTranslation: "返航。", status: "completed", humanDecision: { accepted: true, finalTranslation: "返航。", machineTranslation: "返航。" } });
+      holdoutIds.push(row.id);
+    }
+    const job = await workbench.invoke({ path: `/api/learning/skills/${encodeURIComponent(skill.id)}/evaluate`, method: "POST", body: scope }, context);
+    assert.ok(job.jobId, "20 independent human finals start a real background evaluation job");
+    let finished;
+    const deadline = Date.now() + 15000;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      finished = (await workbench.invoke({ path: `/api/learning/evaluation-jobs/${job.jobId}` }, context)).job;
+    } while (!["completed", "failed"].includes(finished.status) && Date.now() < deadline);
+    assert.equal(finished.status, "completed");
+    const evaluated = await workbench.invoke({ path: `/api/learning?${new URLSearchParams(scope)}` }, context);
+    assert.equal(evaluated.evaluations[0].sampleCount, 20);
+    assert.equal(evaluated.evaluations[0].report.benchmark.completedPairs, 20);
+    assert.equal(evaluated.evaluations[0].report.benchmark.failedPairs, 0);
+    assert.ok(skill.evidenceIds.every((id) => !holdoutIds.includes(id)));
+    assert.equal(evaluated.champion.id, overview.champion.id, "evaluation never activates a candidate automatically");
   } finally { release(); await pendingReview?.catch(() => {}); await workbench.close(); await close(); await rm(directory, { recursive: true, force: true }); }
 });

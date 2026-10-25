@@ -74,7 +74,7 @@ export function deleteQaIssue({ report = {}, task = {}, fingerprint = "", at = n
     ...segments.flatMap((segment) => (Array.isArray(segment?.issues) ? segment.issues : [])),
     ...alignmentIssues
   ];
-  const scores = calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length) });
+  const scores = calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length), incomplete: Boolean(report.fallbackReason || segments.some((segment) => segment.fallbackReason || segment.aiQaFallbackReason)) });
   const summary = summarizeIssues(allIssues);
   const deletedIssues = Array.isArray(report.deletedIssues) ? [...report.deletedIssues] : [];
   deletedIssues.push({ fingerprint: target, at, actor });

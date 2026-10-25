@@ -4,7 +4,7 @@
  * selection, model proposal, patch merge and persistence.
  */
 
-import { collectTrainingEvidenceIds, mergeTranslationSkillPatch } from "./learning-engine.mjs";
+import { collectTrainingEvidenceIds, learningSourceKey, mergeTranslationSkillPatch } from "./learning-engine.mjs";
 import { getProviderConfig, proposeSkillPatchFromGateReview, proposeTranslationSkillWithModel } from "./provider.mjs";
 import { saveTranslationSkill } from "./store.mjs";
 import { sanitizeStrategyPatch } from "./strategy-patch.mjs";
@@ -18,11 +18,19 @@ import { sanitizeStrategyPatch } from "./strategy-patch.mjs";
  * 所以回填过的轨迹天然排在前面。
  */
 export function selectProposalTrajectories(trajectories = [], limit = 40) {
-  return trajectories
+  const seen = new Set();
+  const usable = trajectories
     .filter((item) => ["completed", "review"].includes(item.status)
       && item.humanDecision?.accepted === true
       && String(item.humanDecision?.finalTranslation || item.finalTranslation || "").trim())
-    .slice(0, limit);
+    .filter((item) => {
+      const key = learningSourceKey(item.source) || `id:${item.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  // 优先留下 20 条独立评测材料；少量人工终稿仍可手动生成候选，后续补齐评测。
+  return usable.slice(0, Math.min(limit, Math.max(Math.min(10, usable.length), usable.length - 20)));
 }
 
 /**
@@ -63,7 +71,7 @@ export async function proposeChallengerSkill({ scope, champion, trajectories = [
     description: proposed.reason,
     changeReason: proposed.reason,
     strategy: sanitized.patch,
-    metadata: { generatedBy: getProviderConfig().model, ...sanitizationMetadata }
+    metadata: { generatedBy: getProviderConfig().model, trainingSources: usable.map((item) => item.source).filter(Boolean), ...sanitizationMetadata }
   });
   return saveTranslationSkill({
     ...scope,

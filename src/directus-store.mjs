@@ -2238,7 +2238,7 @@ export async function listDirectusQaTasks({ locale = "", projectId = "", status 
   const summaries = items.map((item) => ({
     id: item.id, projectId: item.project_id || "", type: "autoqa", title: item.title || "未命名质检", locale: item.target_locale || "",
     contentType: item.content_type || "general", domain: item.domain || "general",
-    status: Number.isFinite(item.overall_score) ? (item.overall_score >= 90 ? "completed" : "review") : "completed",
+    status: Number.isFinite(item.overall_score) ? (item.overall_score >= 90 ? "completed" : "review") : "needs_attention",
     overallScore: Number.isFinite(item.overall_score) ? item.overall_score : null,
     totalSegments: Number(item.source_count) || 0, completedSegments: 0, failedSegments: 0,
     qaPending: Object.values(item.summary || {}).reduce((sum, entry) => sum + (Number(entry?.total) || 0), 0),
@@ -2501,8 +2501,6 @@ function directusLearningScope(input, fallback = {}) {
 
 function sameDirectusLearningScope(left, right) {
   return left.locale === right.locale
-    && left.contentType === right.contentType
-    && left.domain === right.domain
     && left.project === right.project;
 }
 

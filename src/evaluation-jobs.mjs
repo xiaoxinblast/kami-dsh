@@ -94,6 +94,7 @@ function publicJob(job) {
     // 任务中心那条镜像记录的 id：重启后照它继续更新，不再新建一条。
     backgroundTaskId: String(job.backgroundTaskId || ""),
     completionHookWarning: String(job.completionHookWarning || ""),
+    automaticRetryCount: Number(job.automaticRetryCount) || 0,
     result: job.result || null,
     reproducibility: {
       policyVersion: job.evaluationProfile?.policyVersion || "legacy",
@@ -115,7 +116,7 @@ function publicJob(job) {
  * @param onChanged  每次状态或进度变化后回调（收到的是 publicJob）。用于把评测
  *   同步给任务中心 / 通知中心：评测以前只在学习中心自己那一栏可见，跑完也没人通知。
  */
-export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jobsDirectory, deps, concurrency = 5, kind = "skill-evaluation", guardrails = {}, onCompleted = null, onChanged = null, now = () => new Date().toISOString() } = {}) {
+export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jobsDirectory, deps, concurrency = 5, kind = "skill-evaluation", guardrails = {}, automaticRetryLimit = 0, onCompleted = null, onChanged = null, now = () => new Date().toISOString() } = {}) {
   if (typeof benchmark !== "function") throw new TypeError("benchmark 必须是函数");
   for (const name of ["getSkill", "getCurrentChampion", "validatePromotionState", "saveEvaluation", "updateSkillMetrics", "buildUiReport"]) {
     if (typeof deps?.[name] !== "function") throw new TypeError(`evaluation job deps 缺少 ${name}`);
@@ -238,7 +239,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         if (!next) break;
         // 收尾阶段的意外异常（例如检查点正好被别的句柄挡住）只记日志：
         // 已经有终态的评测不能被降级成失败，队列也不能因此停摆。
-        await withRuntimeCall(callContexts.get(next.jobId) || {}, () => execute(next)).catch((error) => {
+        await withRuntimeCall(callContexts.get(next.jobId) || { modelRoute: next.modelRoute }, () => execute(next)).catch((error) => {
           if ([COMPLETED, FAILED].includes(next.status)) {
             console.error("评测收尾异常（评测结论已落盘，保持原状态）", error);
             return undefined;
@@ -274,8 +275,8 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     const [liveChampion, liveCandidate] = await Promise.all([deps.getSkill(job.championId, job.scope), deps.getSkill(job.challengerId, job.scope)]);
     const currentChampion = await deps.getCurrentChampion(job.scope);
     const initialValidation = deps.validatePromotionState({ candidate: liveCandidate, currentChampion });
-    if (!initialValidation.valid) {
-      await markFailed(job, initialValidation.reasons.join("；"));
+    if (!initialValidation.valid || currentChampion?.id !== job.championId) {
+      await markFailed(job, initialValidation.reasons.join("；") || "评测对应的生效版本已过期");
       return;
     }
 
@@ -363,6 +364,19 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         }
       });
       await job._persistChain;
+    }
+
+    // 仅补跑执行失败的配对，成功样本和冻结快照保留；次数写入检查点，重启不重置。
+    if (!stopping && Object.keys(job.caseFailures).length && (Number(job.automaticRetryCount) || 0) < automaticRetryLimit) {
+      job.automaticRetryCount = (Number(job.automaticRetryCount) || 0) + 1;
+      job.lastAutomaticFailures = { ...job.caseFailures };
+      job.caseFailures = {};
+      job.caseFailureCodes = {};
+      job.status = QUEUED;
+      job.updatedAt = now();
+      await persist(job);
+      notifyChanged(job);
+      return;
     }
 
     const championSamples = flattenVariantSamples(job, "champion");
@@ -536,6 +550,18 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     async initialize() {
       await restoreFromDisk();
     },
+    async recover() {
+      if (stopping) return;
+      for (const job of jobs.values()) {
+        if (job.status !== INTERRUPTED) continue;
+        job.status = QUEUED;
+        job.error = "";
+        job.updatedAt = now();
+        await persist(job);
+        notifyChanged(job);
+      }
+      pumpQueue();
+    },
     async stop() {
       stopping = true;
       await runningPromise;
@@ -568,6 +594,8 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         championVariant: frozenChampion,
         challengerVariant: frozenChallenger,
         requireCost: requireCost === true,
+        modelRoute: runtimeOptions().modelRoute ? { provider: runtimeOptions().modelRoute.provider, model: runtimeOptions().modelRoute.model } : undefined,
+        automaticRetryCount: 0,
         requestedCaseIds: trajectories.map((item) => String(item.id || "")).filter(Boolean),
         caseTrajectories,
         caseSamples: {},
@@ -587,7 +615,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         finishedAt: ""
       };
       jobs.set(job.jobId, job);
-      callContexts.set(job.jobId, runtimeOptions());
+      callContexts.set(job.jobId, { ...runtimeOptions(), modelRoute: runtimeOptions().modelRoute || job.modelRoute });
       await persist(job);
       notifyChanged(job);
       pumpQueue();
@@ -598,7 +626,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       return job ? publicJob(job) : null;
     },
     list(scope = null) {
-      const matchesScope = (job) => !scope || ["locale", "contentType", "domain", "project"].every((field) => job.scope?.[field] === scope[field]);
+      const matchesScope = (job) => !scope || ["locale", "project"].every((field) => job.scope?.[field] === scope[field]);
       return [...jobs.values()].filter(matchesScope).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).map(publicJob);
     },
     findActiveForChallenger(challengerId) {
@@ -612,7 +640,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       if (!RESUMABLE_STATUSES.has(job.status)) return publicJob(job);
       if (Object.keys(job.caseSamples).length >= job.requestedCaseIds.length) return publicJob(job);
       job.status = QUEUED;
-      callContexts.set(job.jobId, runtimeOptions());
+      callContexts.set(job.jobId, { ...runtimeOptions(), modelRoute: runtimeOptions().modelRoute || job.modelRoute });
       job.error = "";
       job.updatedAt = now();
       await persist(job);
@@ -650,7 +678,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       job.caseFailures = {};
       job.caseFailureCodes = {};
       job.status = QUEUED;
-      callContexts.set(job.jobId, runtimeOptions());
+      callContexts.set(job.jobId, { ...runtimeOptions(), modelRoute: runtimeOptions().modelRoute || job.modelRoute });
       job.error = "";
       job.finishedAt = "";
       job.updatedAt = now();

@@ -1289,7 +1289,7 @@ async function listJsonQaTasks({ locale = "", projectId = "", status = "", searc
     locale: task.locale,
     contentType: task.contentType || "general",
     domain: task.domain || "general",
-    status: Number.isFinite(task.overallScore) ? (task.overallScore >= 90 ? "completed" : "review") : "completed",
+    status: Number.isFinite(task.overallScore) ? (task.overallScore >= 90 ? "completed" : "review") : "needs_attention",
     overallScore: Number.isFinite(task.overallScore) ? task.overallScore : null,
     totalSegments: Number(task.segmentCounts?.source) || 0,
     completedSegments: 0,
@@ -1519,8 +1519,6 @@ function jsonObject(value, fallback = {}) {
 
 function sameLearningScope(left, right) {
   return left.locale === right.locale
-    && left.contentType === right.contentType
-    && left.domain === right.domain
     && left.project === right.project;
 }
 

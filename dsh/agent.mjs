@@ -91,7 +91,7 @@ export function apply(ctx) {
         start: "POST /api/batch/run/<batchId>/start {projectId}",
         pause: "POST /api/batch/run/<batchId>/pause {projectId}",
         assets: "GET /api/library-entries?projectId=…&locale=zh-CN&kind=term&limit=50&offset=0; kind=tm for translation memory",
-        qa: "GET /api/qa/batch/<batchId>?projectId=… 回放批次检查；POST /api/auto-qa {batchId,projectId,locale:'zh-CN',source,translation} 使用批次快照。独立审校省略 batchId，读取当前工作区资源；原生工具查阅的资源通过 body.resourceContext 提供。",
+        qa: "GET /api/qa/batch/<batchId>?projectId=… 回放批次检查；POST /api/auto-qa {batchId,projectId,locale:'zh-CN',source,translation} 使用批次快照。独立审校省略 batchId，读取当前工作区资源。body.resourceContext 仅用于术语、TM、风格指南的编译结果；参考资料只关联路径，由 QA 在当前会话内按需使用原生工具读取原件，不提交参考正文，不把文件 version 当成 hash。fallbackReason 非空或 scores.overall=null 表示检查未完成，不能报告通过。",
         tasks: "GET /api/tasks?projectId=…",
         learning: "GET /api/learning/overview?projectId=…&locale=zh-CN",
         export: "POST /api/batch/export {batchId,projectId,mode:'writeback',outputPath:'outputs/result.docx'}；使用已保存的分段与原件快照"

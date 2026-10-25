@@ -139,3 +139,13 @@ test("default learning labels show the project name while preserving user-named 
   assert.equal(skillLabel({ name: "zh-CN · general · project-id", locale: "zh-CN", version: 2 }, "项目甲", "project-id"), "项目甲 · v2");
   assert.equal(skillLabel({ name: "人名与称呼修订", locale: "zh-CN", version: 3 }, "项目甲", "project-id"), "人名与称呼修订");
 });
+
+test("candidate details expose real strategy rules and parameter changes", async () => {
+  const { skillStrategyText } = await stateModule();
+  const champion = { strategy: { prompting: {}, context: { includePreviousSegments: 2 }, retrieval: { translationMemory: { limit: 5 } } } };
+  const candidate = { strategy: { prompting: { additionalRules: ["保持动词简洁"] }, context: { includePreviousSegments: 2 }, retrieval: { translationMemory: { limit: 8 } } } };
+  const text = skillStrategyText(candidate, champion);
+  assert.match(text, /保持动词简洁/);
+  assert.match(text, /翻译记忆条数：5 → 8/);
+  assert.ok(!text.includes("前文句段"), "unchanged parameters do not obscure the changes");
+});

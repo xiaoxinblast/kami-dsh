@@ -29,6 +29,15 @@ const {
 
 await initializeStore();
 
+test("project learning versions and evaluations accept historical labels but reject another project", async () => {
+  const scope = { locale: "zh-CN", project: "project-scope-regression", contentType: "ui", domain: "game" };
+  const champion = await saveTranslationSkill({ ...scope, status: "champion", strategy: {} });
+  const candidate = await saveTranslationSkill({ ...scope, contentType: "general", domain: "general", parentId: champion.id, status: "challenger", strategy: {} });
+  const evaluation = await saveSkillEvaluation({ ...scope, contentType: "dialogue", domain: "general", championSkillId: champion.id, challengerSkillId: candidate.id, decision: "needs_review", sampleCount: 0 });
+  assert.equal(evaluation.championSkillId, champion.id);
+  await assert.rejects(saveTranslationSkill({ ...scope, project: "another-project", parentId: champion.id, status: "challenger", strategy: {} }), /same scope/);
+});
+
 test("JSON learning trajectories preserve the complete translation decision trail", async () => {
   const created = await saveLearningTrajectory({
     locale: "ja-JP",

@@ -40,6 +40,24 @@ test("上次失败后只要新增人工终稿就允许重试", () => {
   assert.match(decision.reason, /重试/);
 });
 
+test("同一批终稿提议失败后不因重复触发而无限重试", async () => {
+  const champion = { id: "v1", metadata: {} }; let calls = 0;
+  const proposer = createAutoProposer({ threshold: 3, deps: {
+    getCurrentChampion: async () => champion,
+    countAcceptedTrajectories: async () => 3,
+    listActiveCandidates: async () => [],
+    listTrajectories: async () => [{ id: "t", source: "原文", finalTranslation: "终稿" }],
+    selectTrajectories: (rows) => rows,
+    propose: async () => { calls += 1; throw new Error("暂时不可用"); },
+    recordMetadata: async (_id, _metadata, value) => { champion.metadata.autoPropose = value; }
+  } });
+  await proposer.maybePropose(scopeForTest());
+  await proposer.maybePropose(scopeForTest());
+  assert.equal(calls, 1);
+});
+
+function scopeForTest() { return { locale: "zh-CN", project: "auto-test" }; }
+
 test("工厂串行执行并去重：并发检查只产生一次提议", async () => {
   const calls = [];
   let activeCandidates = 0;

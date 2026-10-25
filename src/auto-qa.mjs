@@ -439,7 +439,7 @@ function isBlocking(issue) {
  * 65 分。因此 overall 在"有阻断问题"之后会饱和——区分"坏一段"和"全坏"要看
  * summary 里的 blockedSegments，单一分数无法同时承载这两件事。
  */
-export function calculateAutoQaScores(issues = [], { segmentCount = 1, penalties = DEFAULT_PENALTIES, weights = DEFAULT_WEIGHTS } = {}) {
+export function calculateAutoQaScores(issues = [], { segmentCount = 1, penalties = DEFAULT_PENALTIES, weights = DEFAULT_WEIGHTS, incomplete = false } = {}) {
   const total = Math.max(1, Math.trunc(Number(segmentCount)) || 1);
   const dimensions = {};
   let blockedSegments = 0;
@@ -470,7 +470,7 @@ export function calculateAutoQaScores(issues = [], { segmentCount = 1, penalties
   }
   blockedSegments = blocked.size;
   const overall = Math.round((dimensions.basic * weights.basic + dimensions.fidelity * weights.fidelity + dimensions.nuance * weights.nuance) / 100);
-  return { overall, dimensions, blockedSegments, segmentCount: total };
+  return { overall: incomplete ? null : overall, dimensions: incomplete ? Object.fromEntries(AUTO_QA_DIMENSIONS.map((key) => [key, null])) : dimensions, blockedSegments, segmentCount: total };
 }
 
 export function groupIssuesByDimension(issues = []) {

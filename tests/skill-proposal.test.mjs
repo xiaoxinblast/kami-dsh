@@ -39,8 +39,16 @@ test("selectProposalTrajectories 只保留人工采纳的终稿并截断", () =>
   assert.deepEqual(proposal.selectProposalTrajectories(trajectories).map((item) => item.id), ["a", "b", "f"]);
   assert.equal(
     proposal.selectProposalTrajectories(Array.from({ length: 50 }, (_, index) => accepted(`t${index}`))).length,
-    40
+    30
   );
+});
+
+test("候选提前预留二十条独立终稿，三十条证据足以学习并评测", () => {
+  const rows = Array.from({ length: 30 }, (_, i) => ({ id: String(i), source: `原文${i}`, finalTranslation: `终稿${i}`, status: "completed", humanDecision: { accepted: true } }));
+  const selected = proposal.selectProposalTrajectories(rows);
+  assert.equal(selected.length, 10);
+  const training = new Set(selected.map((item) => item.id));
+  assert.equal(rows.filter((item) => !training.has(item.id)).length, 20);
 });
 
 test("proposeChallengerSkill 走完模型提议、补丁合并与隔离保存的完整闭环", async () => {

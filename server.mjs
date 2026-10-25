@@ -49,6 +49,7 @@ import { createEvaluationJobRunner } from "./src/evaluation-jobs.mjs";
 import { createLearningJobTaskBridge } from "./src/learning-task-bridge.mjs";
 import { detectBatchVerse } from "./src/batch-verse.mjs";
 import { createAutoProposer } from "./src/auto-proposal.mjs";
+import { createLearningAutomation } from "./src/learning-automation.mjs";
 import { createConflictScanner } from "./src/conflict-scan.mjs";
 import { renderInstruction, retireRule } from "./src/style-rules.mjs";
 import { SETTING_SPECS, TITLE_BRACKET_CHOICES, settingGroups } from "./src/settings.mjs";
@@ -547,6 +548,7 @@ async function startQualityGateRun({ scope, skill, triggeredBy = "manual", reaso
       // 任务行可能已被删除（那时上面的进度更新会失败）：hold 必须在这里兜底释放，
       // 否则会话收尾判定会一直被这条不存在的任务挂住。
       workbenchSessionMonitor?.release(backgroundTaskHoldId(task.id));
+      triggerAutoProposal(scope);
     }
   })();
   logInfo("质量门禁已进入任务中心", { skillId: skill.id, total, reason });
@@ -569,6 +571,9 @@ function triggerQualityGateRefresh(scope, { reason = "auto" } = {}) {
       const skills = await listTranslationSkills({ ...scope, limit: 100 });
       const assets = await loadGateAssets(scope);
       const target = selectGateTargetSkill(skills);
+      const [evaluation] = target ? await listSkillEvaluations({ challengerSkillId: target.id, limit: 1 }) : [];
+      // 自动链路先确认配对评测通过；未通过时不提前消耗固定样本门禁额度。
+      if (!evaluation || evaluation.decision !== "promote" || evaluation.report?.promotable !== true) return;
       const [latest] = target ? await listQualityRuns({ ...scope, skillId: target.id, limit: 10 }) : [];
       const decision = gateRefreshDecision({
         enabled: getSettings().learning.autoGateEnabled,
@@ -2989,6 +2994,78 @@ async function persistTermCandidateInputs({ locale, projectId, contentType = "ge
   return stats;
 }
 
+const skillEvaluationStarts = new Map();
+
+async function startSkillEvaluation(id, body = {}) {
+  if (skillEvaluationStarts.has(id)) return skillEvaluationStarts.get(id);
+  const task = prepareSkillEvaluation(id, body);
+  skillEvaluationStarts.set(id, task);
+  try { return await task; }
+  finally { if (skillEvaluationStarts.get(id) === task) skillEvaluationStarts.delete(id); }
+}
+
+async function prepareSkillEvaluation(id, body) {
+  const challenger = await getTranslationSkill(id);
+  if (!challenger || !["challenger", "draft"].includes(challenger.status)) {
+    const error = new Error("未找到可评测的候选技能");
+    error.statusCode = 404;
+    throw error;
+  }
+  const scope = learningScope(challenger);
+  const champion = await ensureChampionTranslationSkill(scope);
+  assertCurrentCandidate(challenger, champion);
+  const trajectories = await listLearningTrajectories({ ...scope, limit: 500 });
+  const evaluationPool = selectSkillHoldout(trajectories, { scope, trainingEvidenceIds: challenger.evidenceIds || [], trainingSources: challenger.metadata?.trainingSources || [], limit: 60 });
+  if (evaluationPool.length < 20) {
+    // 证据不足：不发起任何模型调用，直接生成可审计的 insufficient 结论。
+    const championSamples = evaluationPool.map((item) => trajectoryToEvaluationSample(item, { variant: "champion" }));
+    const challengerSamples = evaluationPool.map((item) => trajectoryToEvaluationSample(item, { variant: "champion" }));
+    const result = evaluateSkillPromotion({
+      scope,
+      champion: { id: champion.id, scope, samples: championSamples },
+      challenger: { id: challenger.id, scope, samples: challengerSamples },
+      minSamples: 20,
+      minimumCoverage: 0.8,
+      guardrails: { requireCost: false }
+    });
+    const report = learningEvaluationUiReport(result);
+    report.conclusion = `证据不足：当前只有 ${evaluationPool.length} 条未参与本候选学习的人工批准终稿，至少需要 20 条才会真正重跑「生效版本 / 候选版本」并开放晋升。`;
+    report.benchmark = {
+      requestedPairs: evaluationPool.length,
+      completedPairs: 0,
+      failedPairs: 0,
+      failures: [],
+      isolation: { excludedMemories: 0, excludedQaCases: 0, excludedStyleExamples: 0, excludedUserProfileExamples: 0, totalExcluded: 0 }
+    };
+    const evaluation = await saveSkillEvaluation({
+      ...scope,
+      championSkillId: champion.id,
+      challengerSkillId: challenger.id,
+      sampleCount: championSamples.length,
+      championMetrics: result.championMetrics,
+      challengerMetrics: result.challengerMetrics,
+      metricDeltas: result.deltas,
+      decision: "needs_review",
+      report,
+      evaluator: "kami-learning-engine-v1"
+    });
+    return { statusCode: 200, value: { evaluation: { ...evaluation, result: report }, result: report } };
+  }
+  // 评测转入后台任务：同一候选已有排队/运行中的任务时直接复用，避免重复烧钱。
+  const active = evaluationJobs.findActiveForChallenger(challenger.id);
+  if (active) return { statusCode: 200, value: { jobId: active.jobId, job: active, alreadyRunning: true } };
+  const job = await evaluationJobs.create({
+    scope,
+    champion,
+    challenger,
+    trajectories: evaluationPool,
+    // 定价配置完整时启用真实成本门禁；否则保持跳过，避免空数据锁死晋升。
+    requireCost: costPricingConfigured(),
+    forceRegenerate: body.forceRegenerate === true
+  });
+  return { statusCode: 202, value: { jobId: job.jobId, job } };
+}
+
 async function importBatchReview(args) {
   const run = await getBatchRun(args.run.batchId) || args.run;
   if (run.projectId !== args.projectId) throw new Error("人工终稿与原批次项目不匹配");
@@ -3184,6 +3261,7 @@ async function applyBatchReview({ run, pairs, projectId, filename, libraryId = "
     await saveBatchRun({ ...latest, runnerOptions: { ...latest.runnerOptions, reviewFinal: { ...reviewFile, at: appliedAt,
       version: (latest.runnerOptions?.reviewFinal?.version || 0) + 1, complete: !failures.length, report } } });
   }
+  if (trajectoriesLinked || trajectoriesUpdated) triggerAutoProposal(regressionScope);
   return report;
 }
 
@@ -5611,15 +5689,11 @@ async function apiHandler(req, res, url) {
     const batchFiles = Object.fromEntries((await listBatchRuns({ projectId: requestedScope.project, limit: 500 }).catch(() => []))
       .map((run) => [String(run.batchId), String(run.filename || "")])
       .filter(([, filename]) => filename));
-    // 一个范围一份生效版本：具体范围取那一份，全部视图把范围内的都带上（界面逐张标范围）。
-    // 每个被用过的范围都有一份默认策略，全部视图会长出来一长串；有轨迹的范围排前面，
-    // 让人先看到真正在用的那些（0 条轨迹的默认策略排在后面）。
+    // 一个项目一份生效版本；历史语体/领域仅用于展示排序，不过滤项目冠军。
     const trajectoryCountOfScope = new Map(scopeCounts.map((item) => [`${item.contentType}\u0000${item.domain}`, item.count]));
     const champions = skills
       .filter((item) => item.status === "champion"
-        && item.project === requestedScope.project
-        && (!queriedScope.contentType || item.contentType === queriedScope.contentType)
-        && (!queriedScope.domain || item.domain === queriedScope.domain))
+        && item.project === requestedScope.project)
       .sort((left, right) => (trajectoryCountOfScope.get(`${right.contentType}\u0000${right.domain}`) || 0)
         - (trajectoryCountOfScope.get(`${left.contentType}\u0000${left.domain}`) || 0)
         || String(left.contentType).localeCompare(String(right.contentType))
@@ -5650,6 +5724,8 @@ async function apiHandler(req, res, url) {
       overview: { trajectoryCount: trajectories.length, skillCount: skills.length, pendingCount: candidates.filter((item) => !evaluations.some((evaluation) => evaluation.challengerSkillId === item.id)).length },
       champion,
       champions,
+      automation: champion?.metadata?.learningAutomation || null,
+      evaluationJobs: evaluationJobs.list().filter((job) => sameEvaluationScope(job.scope, requestedScope)),
       skills,
       candidates,
       scopeCounts,
@@ -5757,9 +5833,13 @@ async function apiHandler(req, res, url) {
     else if (kind === "review") rows = rows.filter((item) => item.status === "review");
     else if (kind === "completed") rows = rows.filter((item) => item.status === "completed");
     if (file) rows = rows.filter((item) => fileOf(item) === file);
+    const batchId = String(url.searchParams.get("batchId") || "");
+    if (batchId) rows = rows.filter((item) => item.batchId === batchId);
     if (search) {
       rows = rows.filter((item) => String(item.source || "").toLowerCase().includes(search)
-        || String(item.finalTranslation || "").toLowerCase().includes(search));
+        || String(item.finalTranslation || "").toLowerCase().includes(search)
+        || String(item.humanDecision?.machineTranslation || item.initialTranslation || "").toLowerCase().includes(search)
+        || fileOf(item).toLowerCase().includes(search));
     }
     const total = rows.length;
     const page = rows.slice(offset, offset + limit);
@@ -5816,70 +5896,14 @@ async function apiHandler(req, res, url) {
     }).catch((error) => console.error("刷新自动提议记账失败（候选已生成，不影响结果）", error));
     // 新候选生成后就让门禁跟上：否则候选会一直挂着"尚未跑过门禁"，等人去点。
     triggerQualityGateRefresh(scope, { reason: "candidate-created" });
+    triggerAutoProposal(scope);
     return json(res, 201, { skill, candidate: skill });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/evaluate")) {
     const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length, -"/evaluate".length));
     const body = await readJsonBody(req).catch(() => ({}));
-    const challenger = await getTranslationSkill(id);
-    if (!challenger || !["challenger", "draft"].includes(challenger.status)) {
-      const error = new Error("未找到可评测的候选技能");
-      error.statusCode = 404;
-      throw error;
-    }
-    const scope = learningScope(challenger);
-    const champion = await ensureChampionTranslationSkill(scope);
-    assertCurrentCandidate(challenger, champion);
-    const trajectories = await listLearningTrajectories({ ...scope, limit: 500 });
-    const evaluationPool = selectSkillHoldout(trajectories, { scope, trainingEvidenceIds: challenger.evidenceIds || [], limit: 60 });
-    if (evaluationPool.length < 20) {
-      // 证据不足：不发起任何模型调用，直接生成可审计的 insufficient 结论。
-      const championSamples = evaluationPool.map((item) => trajectoryToEvaluationSample(item, { variant: "champion" }));
-      const challengerSamples = evaluationPool.map((item) => trajectoryToEvaluationSample(item, { variant: "champion" }));
-      const result = evaluateSkillPromotion({
-        scope,
-        champion: { id: champion.id, scope, samples: championSamples },
-        challenger: { id: challenger.id, scope, samples: challengerSamples },
-        minSamples: 20,
-        minimumCoverage: 0.8,
-        guardrails: { requireCost: false }
-      });
-      const report = learningEvaluationUiReport(result);
-      report.conclusion = `证据不足：当前只有 ${evaluationPool.length} 条未参与本候选学习的人工批准终稿，至少需要 20 条才会真正重跑「生效版本 / 候选版本」并开放晋升。`;
-      report.benchmark = {
-        requestedPairs: evaluationPool.length,
-        completedPairs: 0,
-        failedPairs: 0,
-        failures: [],
-        isolation: { excludedMemories: 0, excludedQaCases: 0, excludedStyleExamples: 0, excludedUserProfileExamples: 0, totalExcluded: 0 }
-      };
-      const evaluation = await saveSkillEvaluation({
-        ...scope,
-        championSkillId: champion.id,
-        challengerSkillId: challenger.id,
-        sampleCount: championSamples.length,
-        championMetrics: result.championMetrics,
-        challengerMetrics: result.challengerMetrics,
-        metricDeltas: result.deltas,
-        decision: "needs_review",
-        report,
-        evaluator: "kami-learning-engine-v1"
-      });
-      return json(res, 200, { evaluation: { ...evaluation, result: report }, result: report });
-    }
-    // 评测转入后台任务：同一候选已有排队/运行中的任务时直接复用，避免重复烧钱。
-    const active = evaluationJobs.findActiveForChallenger(challenger.id);
-    if (active) return json(res, 200, { jobId: active.jobId, job: active, alreadyRunning: true });
-    const job = await evaluationJobs.create({
-      scope,
-      champion,
-      challenger,
-      trajectories: evaluationPool,
-      // 定价配置完整时启用真实成本门禁；否则保持跳过，避免空数据锁死晋升。
-      requireCost: costPricingConfigured(),
-      forceRegenerate: body.forceRegenerate === true
-    });
-    return json(res, 202, { jobId: job.jobId, job });
+    const result = await startSkillEvaluation(id, body);
+    return json(res, result.statusCode, result.value);
   }
   if (req.method === "GET" && url.pathname === "/api/learning/evaluation-jobs") {
     const scope = url.searchParams.get("locale")
@@ -5987,6 +6011,13 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     const activated = await activateTranslationSkill(id);
+    const accepted = (await listLearningTrajectories({ ...scope, limit: 500 })).filter((item) => item.status === "completed" && item.humanDecision?.accepted === true);
+    const metadata = { ...activated.metadata,
+      autoPropose: { ...currentChampion.metadata?.autoPropose, lastAcceptedCount: accepted.length, lastError: "", candidateId: "" },
+      learningAutomation: { scope, ...(currentChampion.metadata?.learningAutomation?.modelRoute ? { modelRoute: currentChampion.metadata.learningAutomation.modelRoute } : {}), status: "waiting", message: "已启用新版本，等待新增人工终稿", candidateId: "", jobId: "", updatedAt: new Date().toISOString() }
+    };
+    await updateTranslationSkill(id, { metadata });
+    activated.metadata = metadata;
     // 生效版本换人：同作用域里针对旧生效版本的评测都作废，停掉它们别让客户端去续跑。
     await failEvaluationJobs(evaluationJobs,
       (job) => sameEvaluationScope(job.scope, scope) && String(job.championId) !== String(id),
@@ -7474,6 +7505,7 @@ async function apiHandler(req, res, url) {
           status: aiQa.status === "passed" ? "completed" : "review",
           events: [...(Array.isArray(linkedTrajectory.events) ? linkedTrajectory.events : []), { type: `human_${reviewAction}`, at: decidedAt, receiptId: receipt.id }]
         });
+        if (reviewAction === "accept") triggerAutoProposal({ locale, contentType, domain, project });
       }
       return json(res, 200, { matches, translation: aiQa.translation, issues: aiQa.issues, qaScore: aiQa.score, aiQa, reviewReceipt: receipt, styleProfile: contextPack.styleProfile, trajectoryId: body.trajectoryId || "" });
     }
@@ -7550,14 +7582,17 @@ async function evaluateQaPairList({ pairs, assets, locale, contentType, domain, 
     const translation = String(pair.target || pair.translation || "");
     const matches = matchTerms(source, assets, { contentType, domain, ...deliveryContext({}, source) });
     let issues = runBasicQa({ source, translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings });
+    const failures = [];
     if (deepCheck) {
       const [grammarResult, aiResult] = await Promise.allSettled([
         evaluateGrammarWithModel({ translation, locale, contentType }),
-        evaluateAutoQaWithModel({ source, translation, locale, contentType, domain, styleProfile, references, machineDrafts, qaCases, evidence })
+        evaluateAutoQaWithModel({ source, translation, locale, contentType, domain, matches, styleProfile, references, machineDrafts, qaCases, evidence })
       ]);
       const extra = [];
       if (grammarResult.status === "fulfilled") extra.push(...grammarResult.value);
+      else failures.push(`语法专项失败：${String(grammarResult.reason?.message || grammarResult.reason)}`);
       if (aiResult.status === "fulfilled") extra.push(...aiResult.value);
+      else failures.push(`三层检查失败：${String(aiResult.reason?.message || aiResult.reason)}`);
       issues = dedupeIssues([...issues, ...extra]);
     }
     return {
@@ -7569,16 +7604,18 @@ async function evaluateQaPairList({ pairs, assets, locale, contentType, domain, 
       sourceRow: pair.sourceRow || null,
       sheet: pair.sheet || "",
       issues,
-      qaScore: calculateAutoQaScores(issues, { segmentCount: 1 }).overall
+      fallbackReason: failures.join("；"),
+      qaScore: calculateAutoQaScores(issues, { segmentCount: 1, incomplete: failures.length > 0 }).overall
     };
   });
   const settled = await runTaskPool(tasks, (task) => task(), { concurrency: deepCheck ? 2 : 8 });
   const failed = settled.filter((result) => result.status === "rejected").map((result) => String(result.reason?.message || result.reason));
   const evaluated = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  failed.push(...evaluated.filter((segment) => segment.fallbackReason).map((segment) => `第 ${segment.index} 段：${segment.fallbackReason}`));
   const allIssues = evaluated.flatMap((segment) => segment.issues.map((issue) => ({ ...issue, segmentIndex: segment.index })));
   return {
     segments: evaluated,
-    scores: calculateAutoQaScores(allIssues, { segmentCount: evaluated.length }),
+    scores: calculateAutoQaScores(allIssues, { segmentCount: evaluated.length, incomplete: failed.length > 0 }),
     summary: summarizeIssues(allIssues),
     issues: allIssues,
     failureReasons: failed
@@ -7665,6 +7702,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
   const segments = selected.map((segment, index) => {
     const result = segment.result || {};
     return {
+      id: segment.id,
       index: index + 1,
       source: segment.source || "",
       translation: segment.translation || "",
@@ -7688,7 +7726,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     runState: run.runState || "ready",
     segmentCount: segments.length,
     segments,
-    scores: calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length) }),
+    scores: calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length), incomplete: !segments.length || segments.some((segment) => segment.aiQaFallbackReason || !Number.isFinite(segment.qaScore)) }),
     summary: summarizeIssues(allIssues),
     alignmentNote: `直接回放这条批次翻译时的逐段检查结果（${segments.length} 段），没有重新调用模型。`
   };
@@ -7831,7 +7869,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
         evaluateGrammarWithModel({ translation: pairTranslation, locale, contentType: scopeContentType }),
         evaluateAutoQaWithModel({
           source: pairSource, translation: pairTranslation, locale, contentType: scopeContentType, domain,
-          styleProfile, references: approvedReferences, machineDrafts, qaCases, evidence,
+          styleProfile, matches: segmentMatches, references: approvedReferences, machineDrafts, qaCases, evidence,
           toolRunner: buildReferenceToolRunner({ projectId: String(body.projectId || "").trim() })
         })
       ]);
@@ -7850,7 +7888,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
         source: pairSource,
         translation: pairTranslation,
         issues,
-        scores: calculateAutoQaScores(issues, { penalties: qaTuning.penalties, weights: qaTuning.weights }),
+        scores: calculateAutoQaScores(issues, { penalties: qaTuning.penalties, weights: qaTuning.weights, incomplete: failures.length > 0 }),
         summary: summarizeIssues(issues),
         // 每段的扣分只能记在自己头上，文档级打分才能按段封顶后再平均。
         fallbackReason: failures.join("；")
@@ -7869,11 +7907,13 @@ async function evaluateQaBatch(batchId, projectId = "") {
       ...segments.flatMap((segment) => segment.issues.map((issue) => ({ ...issue, segmentIndex: segment.index }))),
       ...alignmentIssues.map((issue, index) => ({ ...issue, segmentIndex: `alignment-${index}` }))
     ];
-    const scores = calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length), penalties: qaTuning.penalties, weights: qaTuning.weights });
+    const failed = settled.filter((result) => result.status === "rejected").map((result) => `模型检查失败：${String(result.reason?.message || result.reason)}`);
+    const scores = calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length), penalties: qaTuning.penalties, weights: qaTuning.weights, incomplete: failed.length > 0 || segments.some((segment) => segment.fallbackReason) });
     const summary = summarizeIssues(allIssues);
     const fallbackReason = segments
       .filter((segment) => segment.fallbackReason)
       .map((segment) => `第 ${segment.index} 组模型检查失败：${segment.fallbackReason}`)
+      .concat(failed)
       .join("；");
     const report = {
       locale, matches, tagsStripped, alignmentNote,
@@ -8720,6 +8760,7 @@ const syncLearningJobTask = createLearningJobTaskBridge({
 
 async function disposeEmbeddedWorkbench() {
   if (!runtimeOptions().embedded) return;
+  await learningAutomation.stop();
   if (conflictScanTimer) clearInterval(conflictScanTimer);
   for (const control of batchWorkers.values()) control.pauseRequested = true;
   for (const control of runningBackgroundTasks.values()) control.cancelRequested = true;
@@ -8737,6 +8778,8 @@ const evaluationJobs = createEvaluationJobRunner({
   createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION }),
   jobsDirectory: join(DATA_ROOT, "learning", "jobs"),
   concurrency: 5,
+  automaticRetryLimit: 1,
+  onCompleted: (job) => { triggerAutoProposal(job.scope); },
   onChanged: syncLearningJobTask,
   deps: {
     getSkill: getTranslationSkill,
@@ -8825,14 +8868,14 @@ async function failEvaluationJobs(runner, predicate, reason) {
 }
 
 function sameEvaluationScope(jobScope, scope) {
-  return ["locale", "contentType", "domain", "project"].every((field) => String(jobScope?.[field] ?? "") === String(scope?.[field] ?? ""));
+  return ["locale", "project"].every((field) => String(jobScope?.[field] ?? "") === String(scope?.[field] ?? ""));
 }
 
-// 自动候选生成：人工批准终稿达到阈值后，在后台提议 challenger；评测与激活仍走人工闸门。
+// 自动候选生成：人工批准终稿达到阈值后提议 challenger，启用仍需人工确认。
 const autoProposer = createAutoProposer({
   // 设置面板里的值；环境变量已在 settings-store 里优先合并过。
-  threshold: getSettings().learning.autoProposeThreshold,
-  growthWindow: getSettings().learning.autoProposeGrowthWindow,
+  threshold: () => getSettings().learning.autoProposeThreshold,
+  growthWindow: () => getSettings().learning.autoProposeGrowthWindow,
   deps: {
     getCurrentChampion: async (scope) => (await listTranslationSkills({ ...scope, status: "champion", limit: 1 }))[0] || null,
     countAcceptedTrajectories: async (scope) => {
@@ -8856,6 +8899,47 @@ const autoProposer = createAutoProposer({
     }
   }
 });
+
+const learningAutomation = createLearningAutomation({ deps: {
+  load: async (scope) => {
+    const champion = await ensureChampionTranslationSkill(scope);
+    const [skills, trajectories] = await Promise.all([
+      listTranslationSkills({ ...scope, limit: 500 }),
+      listLearningTrajectories({ ...scope, limit: 500 })
+    ]);
+    return { champion, candidates: skills.filter((item) => ["challenger", "draft"].includes(item.status)), trajectories,
+      jobs: evaluationJobs.list().filter((job) => sameEvaluationScope(job.scope, scope)) };
+  },
+  save: async (champion, state) => {
+    const current = await getTranslationSkill(champion.id);
+    if (current?.status === "champion") await updateTranslationSkill(current.id, { metadata: { ...current.metadata, learningAutomation: state } });
+  },
+  propose: (scope) => autoProposer.maybePropose(scope),
+  evaluate: async (candidate) => (await startSkillEvaluation(candidate.id)).value,
+  resume: (id) => evaluationJobs.resume(id),
+  gate: async (scope, candidate) => {
+    const assets = await loadGateAssets(scope);
+    const [latest] = await listQualityRuns({ ...scope, skillId: candidate.id, limit: 1 });
+    if (qualityGateInFlight.has(candidate.id) || autoGateScopes.has(learningScopeKeyOf(scope))) return { status: "gating", message: "正在运行固定样本门禁" };
+    if (latest && gateRunCoversAssets(latest, assets)) return latest.decision === "pass"
+      ? { status: "ready", message: "评测与门禁已通过，等待你确认启用" }
+      : { status: "blocked", message: `门禁未通过：${(latest.blocking || []).map((item) => item.message).join("；") || latest.decision}` };
+    if (!assets.samples.length && !assets.cases.length) return { status: "blocked", message: "缺少启用的固定质量样本，请先建立 Gold Set 或回归集" };
+    if (!getSettings().learning.autoGateEnabled) return { status: "blocked", message: "自动门禁已关闭，请手动运行门禁" };
+    const assetKey = JSON.stringify([assets.goldSetVersions, assets.regressionSuiteVersions]);
+    const current = await getTranslationSkill(candidate.id);
+    if (current.metadata?.automationGateAttempt === assetKey) return { status: "blocked", message: "本轮门禁未完成，自动尝试已结束，请查看任务记录后重试" };
+    await updateTranslationSkill(candidate.id, { metadata: { ...current.metadata, automationGateAttempt: assetKey } });
+    await startQualityGateRun({ scope, skill: candidate, triggeredBy: "auto:learning-evaluated", reason: "learning-evaluated" });
+    return { status: "gating", message: "正在运行固定样本门禁" };
+  }
+} });
+
+// 所有依赖初始化完毕后才恢复后台工作；恢复使用检查点保存的模型选择。
+await evaluationJobs.recover();
+for (const skill of await listTranslationSkills({ status: "champion", limit: 500 })) {
+  if (skill.metadata?.learningAutomation?.scope) triggerAutoProposal(skill.metadata.learningAutomation.scope);
+}
 
 // 规则冲突扫描：风格规则、技能附加规则与译者画像都会往同一份提示词里写文字，
 // 三者互不知情。蒸馏沉淀之后与定时各扫一遍，结论进任务中心等人工处置——
@@ -8942,21 +9026,9 @@ function rescheduleConflictScan() {
 }
 
 function triggerAutoProposal(scope) {
-  autoProposer.maybePropose(scope)
-    .then((result) => {
-      if (result?.proposed) {
-        console.log(`已自动生成候选技能：${result.candidateId}（${result.reason}）`);
-        // 候选是自动长出来的，门禁也要自动跟上，否则"批准启用"会被未跑门禁拦住。
-        triggerQualityGateRefresh(scope, { reason: "auto-candidate" });
-        return;
-      }
-      // 阈值未到/窗口防抖/已有候选等是正常不提议；其他原因按异常记录，避免被静默吞掉。
-      const reason = String(result?.reason || "");
-      if (!/^(人工批准终稿|自上次自动提议后|当前作用域已有待评测候选|作用域尚无生效版本|没有可复盘的完成轨迹)/u.test(reason)) {
-        console.error(`自动候选生成检查异常：${reason}`);
-      }
-    })
-    .catch((error) => console.error("自动候选生成检查失败", error));
+  const route = runtimeOptions().modelRoute;
+  return learningAutomation.trigger(learningScope(scope), route ? { modelRoute: { provider: route.provider, model: route.model } } : {})
+    .catch((error) => console.error("自动学习推进失败", error));
 }
 
 const server = http.createServer(async (req, res) => {

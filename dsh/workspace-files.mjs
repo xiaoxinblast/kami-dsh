@@ -483,7 +483,10 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     // The DSH FS currently exposes text-only writes; binary export uses exclusive creation
     // after resolving the destination through the same DSH service and checking containment.
     if (resolve(context.fs.processPath(target)) !== destination) throw new Error("输出文件服务路径不匹配");
-    const file = await open(destination, "wx");
+    const file = await open(destination, "wx").catch((error) => {
+      if (error.code === "EEXIST") error.message = `输出文件已存在，请更换导出路径：${path}`;
+      throw error;
+    });
     try { await file.writeFile(Buffer.from(value.base64, "base64")); } finally { await file.close(); }
     return { path: destination, relativePath: path, filename: basename(path), bytes: (await stat(destination)).size };
   }

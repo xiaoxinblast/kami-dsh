@@ -9,7 +9,7 @@ import { KamiUiService, TYPERT } from "./ui-bridge.mjs";
 export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert", "workingDirectory", "fs", "sandboxPolicy", "agentPresets", "tools"];
 
 export async function apply(ctx) {
-  const profile = process.env.DSH_PROFILE || "desktop";
+  const profile = ctx.get("profileContext")?.name || process.env.DSH_PROFILE || "desktop";
   const dataDirectory = join(resolveDshHome(), "kami-dsh", profile);
   const abort = new AbortController();
   const ready = createWorkbench({ dataDirectory, modelAdapter: createModelAdapter(ctx, llm) });
