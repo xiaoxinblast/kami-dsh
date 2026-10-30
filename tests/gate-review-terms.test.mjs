@@ -44,7 +44,7 @@ test("术语普查挂在批次收尾，且与一致性核对开关解耦", async
     assert.deepEqual(calls, enabled ? ["report:batch-test", "survey:batch-test"] : ["survey:batch-test"]);
   }
   assert.match(server, /type: "term_survey",/u);
-  assert.match(server, /runnerOptions: \{[\s\S]{0,120}termSurvey: \{/u);
+  assert.match(server, /termSurvey: \{\s*version: 2,/u);
   assert.match(app, /term_survey: "术语普查"/u);
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "kami-dsh",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,7 +21,7 @@
   },
   "engines": {
     "node": ">=24.2",
-    "dsh": "0.2.1-rc.2 || 0.2.1-rc.3"
+    "dsh": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.9",
@@ -76,10 +76,10 @@
     "url": "https://github.com/xiaoxinblast/kami-dsh.git"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2 || 0.2.1-rc.3",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2 || 0.2.1-rc.3",
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2 || 0.2.1-rc.3",
-    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2 || 0.2.1-rc.3"
+    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-home-paths": {

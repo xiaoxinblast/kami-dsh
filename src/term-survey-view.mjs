@@ -88,6 +88,9 @@ export function buildTermSurveyView({ survey = null, segments = [], termAssets =
     return {
       source,
       suggestedTarget,
+      markId: text(item.markId),
+      initialTarget: text(item.initialTarget || item.suggestedTarget),
+      tm: item.tm || null,
       confidence: Number(item?.confidence) || 0,
       reason: clip(item?.reason, 160),
       machine: { matched: matched.length, adopted, samples },
@@ -115,6 +118,7 @@ export function buildTermSurveyView({ survey = null, segments = [], termAssets =
     model: text(survey?.model),
     coverage: survey?.coverage || null,
     warning: text(survey?.warning),
+    repair: survey?.repair || null,
     review: review ? { at: text(review.at), stats: review.stats || null } : null,
     stats,
     terms

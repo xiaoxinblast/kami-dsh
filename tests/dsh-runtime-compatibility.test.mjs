@@ -9,12 +9,12 @@ test("DSH startup accepts verified runtime versions without a version exemption"
   const { evaluatePluginCompatibility } = await import(bootModule);
   if (!evaluatePluginCompatibility) return t.skip("This SDK predates the DSH startup compatibility gate");
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  for (const version of ["0.2.1-rc.2", "0.2.1-rc.3"]) {
+  for (const version of ["0.2.1-rc.2", "0.2.1-rc.3", "0.2.1-rc.4", "0.2.1-rc.5"]) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, version), undefined, `Startup must accept DSH ${version}`);
     const { engines, ...withoutEngine } = manifest;
     assert.equal(evaluatePluginCompatibility(withoutEngine, {}, version), undefined, `Runtime peers must accept DSH ${version}`);
   }
-  for (const version of ["0.2.1-rc.1", "0.2.1-rc.4", "0.3.0"]) {
+  for (const version of ["0.2.1-rc.1", "0.2.1-rc.6", "0.2.2-alpha.2", "0.3.0"]) {
     const issue = evaluatePluginCompatibility(manifest, {}, version);
     assert.equal(issue?.exempted, false, `Unverified DSH ${version} must not receive an exemption`);
     assert.equal(issue?.requirements["engines.dsh"], manifest.engines.dsh);

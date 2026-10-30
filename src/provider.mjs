@@ -5,6 +5,7 @@ import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-q
 import { contextBriefMessages, parseContextBriefPart } from "./context-brief.mjs";
 import { adjudicationMessages, consistencyMessages, parseAdjudicationDecisions, parseConsistencyFindings } from "./consistency-check.mjs";
 import { parseTermAlign, parseTermSurvey, termAlignMessages, termSurveyMessages } from "./term-survey.mjs";
+import { parseTermMemoryAlignment, termMemoryMessages } from "./term-memory-survey.mjs";
 import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
 import { parseModelJsonObject } from "./text.mjs";
 
@@ -2254,7 +2255,15 @@ export async function learnWorkingTermsWithModel({ source = "", translation = ""
   }
 }
 
-/** 人工终稿改动了 AI 建议时，让模型在终稿里找出该说法的实际写法（逐字校验在解析里做）。 */
+/** 从 TM 整句译例定位术语片段，不能把整个句子的译文当成术语译法。 */
+export async function resolveTermMemoryWithModel(items = []) {
+  const content = await chat(termMemoryMessages(items), configForRole("main"), {
+    temperature: 0, timeoutMs: 120_000, maxTokens: 3_000, requestLabel: "术语 TM 对齐", responseFormat: { type: "json_object" }
+  });
+  return parseTermMemoryAlignment(content, { items });
+}
+
+/** 人工终稿改动了临时译法时，让模型在终稿里找实际写法（逐字校验在解析里做）。 */
 export async function resolveSurveyTargetsWithModel({ locale = "zh-CN", scope = {}, items = [], onUsage = null } = {}) {
   const messages = termAlignMessages({ locale, scope, items });
   const content = await chat(messages, configForRole("main"), {

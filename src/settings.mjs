@@ -71,10 +71,10 @@ export const SETTING_SPECS = Object.freeze({
   "learning.gateRegressionPassRate": { min: 0.5, max: 1, step: 0.05, default: 1, label: "回归通过率门槛", hint: "低于此比例直接阻断发版；默认 100%，即历史失败一条都不许复发" },
   "learning.autoGateEnabled": { type: "boolean", default: true, label: "回填后自动重建回归集并跑门禁", hint: "审校回填完成后自动把改动并入回归集，并对最新候选执行一次门禁；关掉则只在面板手动触发" },
   "learning.gateDedupeSources": { type: "boolean", default: true, label: "门禁按原文去重", hint: "同一条原文只翻一次、同时按 Gold 与回归两套规则判定；关掉则回到逐条执行（更贵，结论口径不变）" },
-  "learning.termSurveyEnabled": { type: "boolean", default: true, label: "批次翻完后做术语普查", hint: "整批翻完让模型指出“像术语但库里没有”的说法，回填时用人工终稿确认译法；关掉则不做这一步" },
+  "learning.termSurveyEnabled": { type: "boolean", default: true, label: "批次翻完后做术语普查", hint: "查找翻译期标记术语在主 TM 和参考 TM 中的译法；主 TM 优先，同级冲突或无匹配则待定，人工终稿确认后才入正式库" },
   "learning.workingTermsEnabled": { type: "boolean", default: true, label: "翻译时自动学习本文件工作术语", hint: "每翻完一段，让快模型从原文/实际译文里抽取需要在本文件统一的新术语；只作用于当前文件，主术语库优先，不写正式术语表。关掉可省每段一次模型调用" },
 
-  "learning.termAutoWriteReviewedTerms": { type: "boolean", default: true, label: "审校确认的术语自动入库", hint: "仅当“库里没有该源词 + 人工终稿逐字保留了 AI 建议译法”时自动写入项目术语库；其余一律进待审核" },
+  "learning.termAutoWriteReviewedTerms": { type: "boolean", default: true, label: "审校确认的术语自动入库", hint: "关联人工终稿后核对标记术语；保留的译法或经高置信对齐核实的改译可入库，已有术语冲突及证据不足转待核对" },
 });
 
 /** 作品名括号是风格约定而非语言对错，按语种单独配置。空串表示该语种不做约定检查。 */

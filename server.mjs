@@ -18,8 +18,10 @@ import { createTokenCache } from "./src/token-cache.mjs";
 import { settleReadSections } from "./src/read-sections.mjs";
 import { createMatcherPool } from "./src/matcher-pool.mjs";
 import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel,
-  adjudicateConsistencyFindingsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, resolveSurveyTargetsWithModel, reviewGateFailuresWithModel, surveyTermsWithModel, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig, learnWorkingTermsWithModel } from "./src/provider.mjs";
+  adjudicateConsistencyFindingsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, resolveSurveyTargetsWithModel, reviewGateFailuresWithModel, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig, learnWorkingTermsWithModel } from "./src/provider.mjs";
 import { formalTermKeys, mergeWorkingAssets, normalizeWorkingTerms } from "./src/working-glossary.mjs";
+import { resolveTermMemoryWithModel } from "./src/provider.mjs";
+import { markedSurveyTerms, resolveTermMemory } from "./src/term-memory-survey.mjs";
 import { buildPatternKey } from "./src/pattern-memory.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
@@ -64,13 +66,13 @@ import { QUALITY_TIERS, describeTierStrength, planQualityTier, resolveManualTier
 import { CONTEXT_BRIEF_MIN_SEGMENTS, contextBriefEntries, mergeContextBrief, purposeForIndex, splitContextChunks, summarizeContextBrief } from "./src/context-brief.mjs";
 import { CONSISTENCY_EVIDENCE_LIMITS, buildQualityReport, deterministicConsistencyFindings, mergeConsistencyFindings, splitConsistencyChunks } from "./src/consistency-check.mjs";
 import { REPAIR_EVIDENCE_LABELS, REPAIR_SKIP_REASONS, applyDeterministicReplacement, planConsistencyRepairs, summarizeSourceGroups } from "./src/consistency-repair.mjs";
-import { extractProtectedTokens, normalizeSource } from "./src/text.mjs";
-import { deriveTermCandidatesFromHumanFinal, MEMORY_PURPOSES } from "./src/asset-governance.mjs";
+import { digitSequence, extractProtectedTokens, normalizeSource } from "./src/text.mjs";
+import { deriveTermCandidatesFromHumanFinal, MEMORY_PURPOSES, textContainsTerm } from "./src/asset-governance.mjs";
 import { buildReviewReceipt, normalizeReviewDecision } from "./src/review-receipt.mjs";
 import { createRegressionCandidateFromQaCase, decideRegressionCandidate, normalizeGoldSet, normalizeRegressionSuite } from "./src/gold-regression.mjs";
 import { buildGateQueue, decideReleaseGate, evaluateGoldRun, evaluateRegressionRun, gateRefreshDecision, gateRunCoversAssets, resolveGateAssets, selectGateCases, selectGateTargetSkill } from "./src/quality-gate.mjs";
 import { deriveExternalReviewCases, mergeRegressionSources, regressionCaseSetDigest } from "./src/regression-sources.mjs";
-import { alignSurveyToHumanFinal, decideTermWrite, normalizeSurveyTerms, pendingCandidateFromUnresolved, pendingReason, surveyPairs } from "./src/term-survey.mjs";
+import { alignSurveyToHumanFinal, decideTermWrite, pendingCandidateFromUnresolved, pendingReason, surveyPairs } from "./src/term-survey.mjs";
 import { buildTermSurveyView } from "./src/term-survey-view.mjs";
 import { chunkGateFailures, gateFailureCases, mergeGateReviewReports, termInputsFromReview } from "./src/gate-review.mjs";
 import { buildTrainingExport, datasetToJsonl } from "./src/training-export.mjs";
@@ -2733,15 +2735,20 @@ async function translateBatchSegment(body, path = "/api/translate") {
  */
 async function applyTermSurveyToReview({ run, projectId, filename, applied, scope }) {
   const stats = { surveyed: 0, confirmed: 0, resolved: 0, autoWritten: 0, pendingReview: 0, skipped: 0, libraryName: "", warning: "", batchId: "" };
-  const surveyed = Array.isArray(run?.runnerOptions?.termSurvey?.terms) ? run.runnerOptions.termSurvey.terms : [];
+  const surveyed = [...(run?.runnerOptions?.termSurvey?.terms || [])];
+  const recorded = new Set(surveyed.map((term) => normalizeSource(term.source)));
+  for (const term of markedSurveyTerms(run?.runnerOptions?.workingGlossary)) {
+    if (!recorded.has(normalizeSource(term.source))) surveyed.push(term);
+  }
   if (!surveyed.length) return stats;
   stats.surveyed = surveyed.length;
-  const pairs = applied.map(({ segment, pair }) => ({
+  const updatedPairs = applied.map(({ segment, pair }) => ({
     id: String(segment.id || ""),
     source: String(pair.source || ""),
     machineTranslation: String(segment.result?.humanReview?.previousTranslation || ""),
     humanFinal: String(pair.target || "")
   }));
+  const pairs = [...new Map([...(run.segments || []).filter((segment) => segment.accepted === true).map((segment) => ({ id: String(segment.id), source: segment.source, humanFinal: segment.translation, machineTranslation: segment.result?.humanReview?.previousTranslation || "" })), ...updatedPairs].map((pair) => [pair.id, pair])).values()];
   const aligned = alignSurveyToHumanFinal({ terms: surveyed, pairs });
   stats.confirmed = aligned.confirmed.length;
   stats.skipped = aligned.noEvidence.length;
@@ -2812,11 +2819,11 @@ async function applyTermSurveyToReview({ run, projectId, filename, applied, scop
   };
   try {
     const latest = await getBatchRun(run.batchId) || run;
-    const survey = latest.runnerOptions?.termSurvey || run.runnerOptions?.termSurvey;
+    const survey = latest.runnerOptions?.termSurvey || run.runnerOptions?.termSurvey || { version: 2, terms: surveyed };
     if (survey) {
       await saveBatchRun({
         ...latest,
-        runnerOptions: { ...(latest.runnerOptions || {}), termSurvey: { ...survey, review } }
+        runnerOptions: { ...(latest.runnerOptions || {}), termSurvey: { ...survey, terms: surveyed, review } }
       });
     }
   } catch (error) {
@@ -4079,67 +4086,122 @@ function startConsistencyCheck(batchId) {
 }
 
 /**
- * 翻译期术语普查：整批翻完后让模型指出"像术语但库里没有"的说法，
- * 结果挂在批次记录的 runnerOptions.termSurvey 上，等审校回填时用人工终稿确认译法。
+ * 翻译期术语普查：沿用文件工作术语标记，查主 TM / 参考 TM 后统一文件译法。
+ * 无匹配或同级冲突保留待定；结果挂在批次记录，等人工终稿确认后入正式库。
  *
  * 这一步失败不影响批次：只记一条失败任务，翻译结果照常使用。
  */
 async function runTermSurvey(batchId, { taskId = "" } = {}) {
   const run = await getBatchRun(batchId);
   if (!run) throw new Error("未找到这条翻译任务");
+  const previous = run.runnerOptions?.termSurvey;
+  if (previous && run.segments?.some((segment) => segment.accepted === true)) return { ...previous, failures: [] };
   const pairs = surveyPairs(run.segments || []);
   if (!pairs.length) throw new Error("这条任务还没有译文，无法做术语普查");
-  const chunks = splitConsistencyChunks(pairs);
-  const byId = new Map(pairs.map((pair) => [pair.id, pair]));
-  const existingTerms = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [];
+  const assets = (await getProjectAssets(run.locale, run.projectId)).assets || {};
+  const marks = markedSurveyTerms(run.runnerOptions?.workingGlossary, assets.terms || []);
+  const libraries = await getResourceLibraries(run.projectId, { kind: "translation_memory" });
   const report = taskProgressReporter(taskId);
-  report({ phase: "surveying", message: `正在查找疑似术语：0 / ${chunks.length} 片`, percent: 10, completed: 0, total: chunks.length });
+  report({ phase: "surveying", message: `正在查找标记术语的 TM 译法：0 / ${marks.length}`, percent: 10, completed: 0, total: marks.length });
   let completed = 0;
   const failures = [];
-  const results = await runTaskPool(chunks, async (chunk) => surveyTermsWithModel({
-    filename: run.filename,
-    locale: run.locale,
-    purpose: run.contentType || "general",
-    pairs: chunk.ids.map((id) => byId.get(id)).filter(Boolean),
-    part: { index: chunk.index, total: chunks.length },
-    existingTerms
-  }), {
+  const results = await runTaskPool(marks, async (term) => ({ ...term, tm: await resolveTermMemory({
+    term, entries: await termSurveyMemoryEntries(run, term.source, libraries), align: resolveTermMemoryWithModel
+  }) }), {
     concurrency: CONSISTENCY_CHECK_CONCURRENCY,
     onSettled: (result) => {
       completed += 1;
       if (result.status === "rejected") failures.push(String(result.reason?.message || result.reason));
       report({
         phase: "surveying",
-        message: `正在查找疑似术语：${completed} / ${chunks.length} 片`,
-        percent: 10 + Math.round((completed / chunks.length) * 80),
+        message: `正在查找标记术语的 TM 译法：${completed} / ${marks.length}`,
+        percent: 10 + Math.round((completed / Math.max(1, marks.length)) * 65),
         completed,
-        total: chunks.length
+        total: marks.length
       });
     }
   });
-  const terms = normalizeSurveyTerms(
-    results.filter((result) => result.status === "fulfilled").flatMap((result) => result.value?.terms || []),
-    { existingTerms }
-  );
-  const analyzedPairs = results.reduce((total, result, index) => total + (result.status === "fulfilled" ? chunks[index].ids.length : 0), 0);
-  const coverage = { analyzedPairs, totalSegments: (run.segments || []).filter((segment) => segment.selected !== false).length, chunks: chunks.length, failedChunks: failures.length };
+  const terms = results.map((result, index) => result.status === "fulfilled" ? result.value : { ...marks[index], tm: { status: "failed", target: "", evidence: [], reason: `TM 查询或对齐失败：${result.reason?.message || result.reason}` } });
+  const repaired = await repairSurveyTerms(run, terms, assets);
+  const coverage = { analyzedPairs: pairs.length, totalSegments: (run.segments || []).filter((segment) => segment.selected !== false).length, markedTerms: terms.length, checkedTerms: terms.length - failures.length, failedTerms: failures.length };
+  if (repaired.repair.skipped.length) failures.push(`${repaired.repair.skipped.length} 处译文未能统一，请查看术语普查中的待核对原因`);
   const latest = await getBatchRun(batchId) || run;
+  const glossary = latest.runnerOptions?.workingGlossary;
   await saveBatchRun({
     ...latest,
+    segments: repaired.segments,
+    ...(latest.qualityReport?.report ? { qualityReport: { ...latest.qualityReport, report: buildQualityReport({ segments: repaired.segments, brief: latest.contextBrief || null, findings: latest.qualityReport.findings || [], provider: getProviderConfig(), batchId, filename: run.filename, locale: run.locale }) } } : {}),
     runnerOptions: {
       ...(latest.runnerOptions || {}),
+      ...(glossary ? { workingGlossary: { ...glossary, revision: (Number(glossary.revision) || 0) + 1, terms: glossary.terms.map((mark) => {
+        const found = terms.find((term) => normalizeSource(term.source) === normalizeSource(mark.source));
+        return found ? { ...mark, initialTarget: found.initialTarget, target: found.suggestedTarget, tm: found.tm } : mark;
+      }) } } : {}),
       termSurvey: {
-        version: 1,
+        version: 2,
         filename: run.filename,
         model: getProviderConfig().model,
         generatedAt: new Date().toISOString(),
         terms,
         coverage,
+        repair: repaired.repair,
         warning: failures[0] || ""
       }
     }
   });
   return { terms, failures, coverage };
+}
+
+async function termSurveyMemoryEntries(run, source, libraries) {
+  const enabled = new Map(libraries.filter((library) => library.enabled !== false && ["master", "reference"].includes(library.role)).map((library) => [library.id, library]));
+  const rows = [];
+  for (let offset = 0; ; offset += 200) {
+    const page = await getMemories(run.locale, { projectId: run.projectId, search: source, limit: 200, offset });
+    rows.push(...page);
+    if (page.length < 200) break;
+  }
+  const snapshot = taskResources(run.projectId) || run.runnerOptions?.workspaceSnapshot;
+  if (snapshot?.projectId === run.projectId) rows.push(...(snapshot.memories || []));
+  return rows.filter((row) => enabled.has(row.linkedLibraryId || row.libraryId) && textContainsTerm(row.source, source))
+    .map((row) => {
+      const library = enabled.get(row.linkedLibraryId || row.libraryId);
+      return { ...row, sourceFile: row.sourceFiles?.join("、") || row.resourcePath || row.sourceFile, libraryId: library.id, libraryName: library.name, libraryRole: library.role };
+    });
+}
+
+async function repairSurveyTerms(run, terms, assets) {
+  const segments = run.segments.map((segment) => ({ ...segment })), repair = { changed: [], skipped: [] };
+  for (const term of terms) {
+    const target = term.tm.status === "matched" ? term.tm.target : term.suggestedTarget;
+    const variants = [...new Set([term.suggestedTarget, term.initialTarget, ...(run.runnerOptions?.workingGlossary?.conflicts || []).filter((item) => normalizeSource(item.source) === normalizeSource(term.source)).map((item) => item.ignored)])].filter((item) => item && normalizeSource(item) !== normalizeSource(target));
+    for (const segment of segments) {
+      if (segment.selected === false || !segment.translation || !textContainsTerm(segment.source, term.source)) continue;
+      if (segment.accepted === true) continue;
+      const before = segment.translation;
+      if (textContainsTerm(before, target) && !variants.some((variant) => !target.includes(variant) && before.includes(variant))) continue;
+      let after = before;
+      for (const from of variants) {
+        if (target.includes(from) && before.includes(target)) continue;
+        const replaced = applyDeterministicReplacement({ translation: after, from, to: target, protectedTokens: extractProtectedTokens(segment.source) });
+        if (replaced.ok) after = replaced.value;
+      }
+      try {
+        if (after === before) after = await reviseSegmentForConsistency({ run, segment, assets, source: term.source, target, reason: term.tm.status === "matched" ? term.tm.reason : "本文件首次译法统一，正式译法待人工终稿确认" });
+        if (JSON.stringify(extractProtectedTokens(before)) !== JSON.stringify(extractProtectedTokens(after)) || digitSequence(before) !== digitSequence(after)) throw new Error("统一译法改变了保护标记或数字，已保留原译文");
+        const checked = { ...segment, result: { ...segment.result, matches: matchTerms(segment.source, assets, { exactOnly: true, contentType: run.contentType, domain: run.domain }) } };
+        const priorIssues = consistencySegmentIssues(run, checked, before);
+        const introduced = consistencySegmentIssues(run, checked, after).filter((issue) => issue.severity === "error" && !priorIssues.some((old) => old.severity === "error" && old.type === issue.type));
+        if (!after || !textContainsTerm(after, target) || introduced.length) throw new Error(introduced[0]?.message || "未能核实统一后的译法");
+        const change = { segmentId: segment.id, source: term.source, target, before, after, evidence: term.tm.status === "matched" ? term.tm : { kind: "file_working_term" } };
+        segment.translation = after;
+        segment.result = { ...segment.result, termSurveyRepair: change };
+        repair.changed.push(change);
+      } catch (error) { repair.skipped.push({ segmentId: segment.id, source: term.source, reason: error.message }); }
+    }
+    term.suggestedTarget = target;
+  }
+  await syncConsistencyRepairRecords({ run, changes: repair.changed, segments });
+  return { segments, repair };
 }
 
 /** 起一个术语普查后台任务；同一批次已在跑时直接复用。 */
@@ -4165,8 +4227,8 @@ function startTermSurvey(batchId) {
         progress: {
           phase: "completed",
           message: outcome.terms.length
-            ? `发现疑似术语 ${outcome.terms.length} 条：回填审校稿后会按人工终稿入库或转待审核`
-            : "没有发现需要新增的术语",
+            ? `已核对标记术语 ${outcome.terms.length} 条：TM 命中 ${outcome.terms.filter((term) => term.tm?.status === "matched").length} 条，其余待人工终稿确认`
+            : "没有翻译期标记术语可供普查",
           percent: 100,
           completed: outcome.terms.length,
           total: outcome.terms.length
@@ -6885,6 +6947,7 @@ async function apiHandler(req, res, url) {
     if (req.method === "POST") {
       // 同上：核对要跑几十次模型调用，不能挂在请求上等。
       if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后会自动重新生成质量报告" });
+      if (termSurveyTasks.has(batchId)) return json(res, 409, { error: "术语普查正在统一译文，请完成后再运行一致性检查" });
       const alreadyRunning = consistencyCheckTasks.has(batchId);
       if (!alreadyRunning) startConsistencyCheck(batchId).catch((error) => console.error("[Kami] 一致性核对任务异常", error));
       return json(res, 202, { batchId, pending: true, alreadyRunning });
@@ -6897,6 +6960,7 @@ async function apiHandler(req, res, url) {
     const run = await getBatchRun(batchId);
     if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
     if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后会自动重新做术语普查" });
+    if (batchWorkers.has(batchId) || reviewFinalLocks.has(batchId) || consistencyCheckTasks.has(batchId)) return json(res, 409, { error: "批次正在翻译、核对或关联人工终稿，请完成后再做术语普查" });
     const alreadyRunning = termSurveyTasks.has(batchId);
     if (!alreadyRunning) startTermSurvey(batchId).catch((error) => console.error("[Kami] 术语普查任务异常", error));
     return json(res, 202, { batchId, pending: true, alreadyRunning });

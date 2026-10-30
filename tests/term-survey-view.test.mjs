@@ -110,7 +110,7 @@ test("术语普查接线：手动端点、逐条回填结果落库、界面按�
   assert.match(server, /startTermSurvey\(batchId\)\.catch\(\(error\) => console\.error\("\[Kami\] 术语普查任务异常"/u);
   assert.match(server, /termSurvey: buildTermSurveyView\(\{/u);
   // 回填时把逐条结果写回批次记录，否则界面只能看到汇总数字。
-  assert.match(server, /runnerOptions: \{ \.\.\.\(latest\.runnerOptions \|\| \{\}\), termSurvey: \{ \.\.\.survey, review \} \}/u);
+  assert.match(server, /runnerOptions: \{ \.\.\.\(latest\.runnerOptions \|\| \{\}\), termSurvey: \{ \.\.\.survey, terms: surveyed, review \} \}/u);
   assert.match(server, /stats\.items\.push\(\{\n\s+source: candidate\.source,/u);
   // 界面：五个分区标签 + 术语普查列表。
   assert.match(html, /data-batch-tab="terms"/u);

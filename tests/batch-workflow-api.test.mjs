@@ -6,7 +6,9 @@ import vm from "node:vm";
 import { retryServerBatchQa } from "../src/batch-runner.mjs";
 import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows, summarizeBatchSegments } from "../public/batch-status.js";
 import { runTaskPool } from "../src/task-pool.mjs";
-import { surveyPairs, normalizeSurveyTerms } from "../src/term-survey.mjs";
+import { surveyPairs } from "../src/term-survey.mjs";
+import { markedSurveyTerms } from "../src/term-memory-survey.mjs";
+import { normalizeSource } from "../src/text.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 
@@ -36,21 +38,25 @@ test("术语普查在一致性修复后读取批次，不用旧快照覆盖报�
   assert.equal(saved.termSurvey.generatedAt, "new");
 });
 
-test("术语普查部分模型失败时，失败片不计入成功覆盖", async () => {
-  let run = { batchId: "survey-test", projectId: "project-test", filename: "story.txt", locale: "zh-CN", segments: [
+test("术语普查部分查询失败时保留标记，不计入成功覆盖", async () => {
+  let run = { batchId: "survey-test", projectId: "project-test", filename: "story.txt", locale: "zh-CN", runnerOptions: { workingGlossary: { terms: [{ source: "甲", target: "甲" }, { source: "乙", target: "乙" }] } }, segments: [
     { id: "a", source: "甲", translation: "甲", selected: true }, { id: "b", source: "乙", translation: "乙", selected: true }
   ] };
-  const survey = vm.runInNewContext(`(${block("async function runTermSurvey(", "/** 起一个术语普查后台任务").trim()})`, {
+  const survey = vm.runInNewContext(`(${block("async function runTermSurvey(", "async function termSurveyMemoryEntries(").trim()})`, {
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = value; },
-    surveyPairs, normalizeSurveyTerms, runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 2,
-    splitConsistencyChunks: () => [{ index: 1, ids: ["a"] }, { index: 2, ids: ["b"] }],
+    surveyPairs, markedSurveyTerms, normalizeSource, runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 2,
+    getResourceLibraries: async () => [], resolveTermMemoryWithModel: async () => [],
+    termSurveyMemoryEntries: async (_run, source) => { if (source === "乙") throw new Error("503"); return []; },
+    resolveTermMemory: async () => ({ status: "not_found", target: "", evidence: [] }),
+    repairSurveyTerms: async (run) => ({ segments: run.segments, repair: { changed: [], skipped: [] } }),
     getProjectAssets: async () => ({ assets: { terms: [] } }), getProviderConfig: () => ({ model: "test" }), taskProgressReporter: () => () => {},
-    surveyTermsWithModel: async ({ part }) => { if (part.index === 2) throw new Error("503"); return { terms: [] }; }
   });
   const outcome = await survey("survey-test");
-  assert.equal(outcome.coverage.analyzedPairs, 1);
+  assert.equal(outcome.coverage.checkedTerms, 1);
   assert.equal(outcome.coverage.totalSegments, 2);
-  assert.equal(outcome.coverage.failedChunks, 1);
+  assert.equal(outcome.coverage.failedTerms, 1);
+  assert.equal(outcome.terms.length, 2);
+  assert.equal(outcome.terms[1].tm.status, "failed");
   assert.equal(run.runnerOptions.termSurvey.warning, "503");
 });
 

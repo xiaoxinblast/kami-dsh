@@ -21,7 +21,7 @@ test("DSH reports open details and trajectories; settings retain drafts, padding
   const prepared = await workbench.importFile({ path: "source.txt" }, context);
   const run = await workbench.invoke({ path: `/api/batch/run/${prepared.batchId}?projectId=${state.project.id}` }, context);
   const segment = { ...run.segments[0], translation: "装备星之剑。", status: "done", result: { qaScore: 85, aiQa: { status: "review", used: true }, issues: [{ message: "请核对登记译法", suggestion: "使用星刃", severity: "major" }] } };
-  await saveBatchRun({ ...run, runState: "completed", segments: [segment], runnerOptions: { ...run.runnerOptions, termSurvey: { generatedAt: new Date().toISOString(), terms: [{ source: "星の剣", suggestedTarget: "星刃", reason: "测试专名" }] } }, qualityReport: { report: { generatedAt: new Date().toISOString(), coverage: { modelQa: 1 }, facts: { issueCount: 1 }, humanReview: { suggested: 1 } }, findings: [{ detail: "同一名称需要核对", suggestion: "核对术语证据", ids: [segment.id] }] } });
+  await saveBatchRun({ ...run, runState: "completed", segments: [segment], runnerOptions: { ...run.runnerOptions, termSurvey: { generatedAt: new Date().toISOString(), terms: [{ source: "星の剣", suggestedTarget: "星刃", initialTarget: "星之剑", reason: "翻译期标记", tm: { status: "matched", role: "master", reason: "采用主 TM 译法", evidence: [{ libraryName: "项目主记忆库", role: "master", source: "星の剣を装備します。", translation: "装备星刃。", target: "星刃", sourceFile: "過去作/战斗界面台词.mqxliff" }] } }, { source: "装備", suggestedTarget: "装备", initialTarget: "装备", reason: "翻译期标记", tm: { status: "not_found", reason: "主 TM 和参考 TM 无匹配，待人工终稿确认", evidence: [] } }] } }, qualityReport: { report: { generatedAt: new Date().toISOString(), coverage: { modelQa: 1 }, facts: { issueCount: 1 }, humanReview: { suggested: 1 } }, findings: [{ detail: "同一名称需要核对", suggestion: "核对术语证据", ids: [segment.id] }] } });
   await saveLearningTrajectory({ locale: "zh-CN", contentType: "general", domain: "general", project: state.project.id, batchId: run.batchId, segmentId: segment.id, source: segment.source, initialTranslation: "装备星之剑。", finalTranslation: "装备星刃。", status: "completed", humanDecision: { accepted: true, machineTranslation: "装备星之剑。", finalTranslation: "装备星刃。" }, assetRefs: { sourceFile: "reviewed.mqxliff" } });
   const learningScope = { locale: "zh-CN", project: state.project.id, contentType: "general", domain: "general" };
   await saveTranslationSkill({ ...learningScope, ...createDefaultTranslationSkill({ scope: learningScope }), metadata: { learningAutomation: { status: "waiting", message: "还需 17 条未参与本候选学习的人工终稿，补齐后自动评测", missingSamples: 17 } } });
@@ -75,6 +75,16 @@ test("DSH reports open details and trajectories; settings retain drafts, padding
     await page.getByText("同一名称需要核对", { exact: true }).waitFor();
     await page.getByRole("button", { name: "术语普查", exact: true }).click();
     await page.getByText("星の剣 → 星刃", { exact: true }).waitFor();
+    await page.getByText("主 TM 命中 · 采用主 TM 译法", { exact: true }).waitFor();
+    await page.getByText("TM 依据 · 1 条", { exact: true }).click();
+    await page.getByText("项目主记忆库", { exact: true }).waitFor();
+    await page.getByText("待定 · 主 TM 和参考 TM 无匹配，待人工终稿确认", { exact: true }).waitFor();
+    for (const width of [960, 330]) {
+      await page.setViewportSize({ width, height: 1000 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false);
+      if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `term-memory-${width}.png`) });
+    }
+    await page.setViewportSize({ width: 960, height: 1000 });
     await page.getByRole("button", { name: "学习", exact: true }).click();
     const automatic = page.getByRole("region", { name: "自动学习状态", exact: true });
     await automatic.getByText("等待样本", { exact: true }).waitFor();
