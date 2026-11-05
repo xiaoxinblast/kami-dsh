@@ -14,6 +14,17 @@ test("new sessions use the DSH default model and pending selections override pre
   assert.equal(sessionModelRoute(ctx, agent).model, "selected");
 });
 
+test("new Agent model API supplies the session route without registry-level projection reads", () => {
+  let current = { provider: "session", model: "current", reasoningEffort: "high" };
+  const ctx = {
+    agentDefaultModel: { currentSelection: () => ({ provider: "default", model: "global" }) }
+  };
+  const agent = { model: { current: () => current } };
+  assert.deepEqual(sessionModelRoute(ctx, agent), current);
+  current = undefined;
+  assert.deepEqual(sessionModelRoute(ctx, agent), { provider: "default", model: "global" });
+});
+
 let llm;
 try { llm = await import("@deepseek-ai/dsh-llm"); } catch {
   if (process.env.DSH_TEST_LLM_MODULE) llm = await import(process.env.DSH_TEST_LLM_MODULE);

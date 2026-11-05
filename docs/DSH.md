@@ -4,7 +4,7 @@
 
 ## 安装
 
-当前验证目标为 DSH `0.2.1-rc.5`，同时兼容 `0.2.1-rc.2`、`0.2.1-rc.3` 和 `0.2.1-rc.4`；运行环境使用 DSH 安装包自带的 Electron / Node.js。
+当前兼容目标为 DSH `0.2.2-rc.1`，同时支持 `0.2.1-rc.2` 至 `0.2.1-rc.5`；运行环境使用 DSH 安装包自带的 Electron / Node.js。DSH `0.2.2-rc.1` 要求 Node.js `24.9` 或更高版本。
 
 1. 在 DSH 的“插件”→“添加插件”中填写 `https://github.com/xiaoxinblast/kami-dsh#main`，安装仓库中的当前版本。依赖由插件管理器安装。
 2. 开发时也可在仓库运行 `npm ci`、`npm run dsh:check` 后安装绝对目录；Creator 模式的 `plugin_manager` 使用 `action: install_bundle` 与同一安装地址。
@@ -152,6 +152,12 @@ npm pack --dry-run
 `tests/dsh-workspace.test.mjs` 验证路径与链接隔离、任务快照、新文件版本、重启续跑、参考索引与防覆盖导出；SDK 启用时使用真实 DSH LocalFileSystem。`tests/dsh-ui-bridge.test.mjs` 使用真实 Client/Host SDK 检查严格 Remote 编解码、服务注入和页面不追加聊天 JSON。`tests/dsh-workbench.test.mjs` 在禁止 HTTP 的条件下用隔离数据库验证项目创建、批次翻译、原格式导出和数据库重开；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。DSH SDK 可用时，`tests/dsh-model-adapter.test.mjs` 验证消息协议，`tests/dsh-agent.test.mjs` 验证预设工具范围。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
 
 UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。
+
+### 0.9.13 DSH 0.2.2-rc.1 兼容
+
+DSH `0.2.2-rc.1` 新增 Agent 自有模型选择接口，并弃用从 `sessionProjections` 注册表直接读取状态的方式。Kami 优先读取 `agent.model.current()` 获取当前会话实际选择的模型路由，在旧版 DSH 上继续使用投影和请求头回退；因此模型调用不会因注册表投影句柄的变化退回全局默认模型。`engines.dsh` 与四项可选 SDK peer 同步加入 `0.2.2-rc.1`。Session Projection 注册句柄迁移说明见 [DSH 官方升级指南](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/docs/upgrade-guide/v0.2.1-rc.2/session-projection-handles/guide.md)。
+
+本环境的实际缓存 SDK 为 DSH `0.2.1-rc.5`，没有安装 `dsh` 命令或 `0.2.2-rc.1` Host，因此本次验证覆盖了真实 rc.5 协议与启动兼容检查器，以及针对新 Agent 模型接口的单元测试；未执行 rc.1 桌面 Host 验收。
 
 ### 0.9.12 DSH rc.5 兼容与术语 TM 普查
 

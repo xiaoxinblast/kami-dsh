@@ -1,6 +1,8 @@
 export function sessionModelRoute(ctx, agent) {
-  const pending = ctx.sessionProjections.stateOf(agent.session, "modelSelection")?.pending;
-  return pending || agent.session.requestHeader()?.config || ctx.agentDefaultModel.currentSelection();
+  const selected = agent?.model?.current?.();
+  if (selected?.provider && selected?.model) return selected;
+  const pending = ctx.sessionProjections?.stateOf?.(agent?.session, "modelSelection")?.pending;
+  return pending || agent?.session?.requestHeader?.()?.config || ctx.agentDefaultModel.currentSelection();
 }
 
 /** Convert the existing prompt protocol to DSH's provider-neutral message stream. */
