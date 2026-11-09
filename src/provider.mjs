@@ -8,6 +8,7 @@ import { parseTermAlign, parseTermSurvey, termAlignMessages, termSurveyMessages 
 import { parseTermMemoryAlignment, termMemoryMessages } from "./term-memory-survey.mjs";
 import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
 import { parseModelJsonObject } from "./text.mjs";
+import { translationOutputIssue } from "./translation-output.mjs";
 
 const loadedProvider = runtimeOptions().embedded ? { config: {}, persistence: { mode: "dsh", persisted: false } } : loadProviderConfig();
 let persistence = loadedProvider.persistence;
@@ -2385,13 +2386,6 @@ function requireNonEmptyTranslation(value, fallback, label) {
   const error = new Error(issue === "empty_translation" ? `${label}没有返回译文（连续两次都是空白输出）` : `${label}返回了非译文说明，本次未保存。请检查风格指南读取状态后重试。`);
   error.code = issue;
   throw error;
-}
-
-function translationOutputIssue(value) {
-  const text = String(value || "").trim();
-  if (!text) return "empty_translation";
-  if (/(?:^|\n)\s*(?:[#*>-]+\s*)?(?:非译文说明|非译文备注|译者说明|翻译说明)\s*(?:[（(][^\n]*?[）)])?\s*[：:]|原文件查阅失败|(?:未能|无法|不能|未成功)[^\n。]{0,40}(?:读取|查阅)[^\n。]{0,60}(?:风格指南|指南原件)|<\/?(?:think|analysis)>/iu.test(text)) return "invalid_translation";
-  return "";
 }
 
 function uniqueCandidateTexts(items = []) {

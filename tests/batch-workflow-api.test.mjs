@@ -11,6 +11,7 @@ import { markedSurveyTerms } from "../src/term-memory-survey.mjs";
 import { normalizeSource } from "../src/text.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
+import { translationRetryReason } from "../src/translation-output.mjs";
 
 const source = (await readFile(new URL("../server.mjs", import.meta.url), "utf8")).replace(/\r\n/gu, "\n");
 const block = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -64,7 +65,7 @@ test("批次详情不会把同原文另一句段的失败 QA 覆盖到已成功�
   const segments = [{ id: "ok", source: "same source", translation: "已确认译文", selected: true, status: "done", result: { qaScore: 97, aiQa: { score: 97, status: "passed", used: true, fallbackReason: "" } } }];
   let result;
   const handler = vm.runInNewContext(`(async (req, res, url) => { ${block('  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))', '  if (req.method === "POST" && url.pathname === "/api/style-guides/import")')} })`, {
-    getBatchRun: async () => ({ batchId: "batch-test", projectId: "project-test", locale: "zh-CN", segments }),
+    getBatchRun: async () => ({ batchId: "batch-test", projectId: "project-test", locale: "zh-CN", segments }), translationRetryReason,
     getProjectAssets: async () => ({ assets: { terms: [] } }),
     getQaRuns: async () => [{ source: "same source", finalTranslation: "另一句段译文", score: null, status: "review", fallbackReason: "terminated" }],
     assertActiveLocale: () => {}, json: (_res, _status, body) => { result = body; },
@@ -79,7 +80,7 @@ test("批次详情不会把同原文另一句段的失败 QA 覆盖到已成功�
 test("没有在执行的收尾不会误显示为持续排队，旧任务也有明确手动入口提示", async () => {
   const load = vm.runInNewContext(`(${block("async function loadBatchWorkflow(", "async function finalizeBatchWorkflow(").trim()})`, {
     getSettings: () => ({ quality: {}, learning: {} }), buildBatchWorkflow, getBackgroundTask: async () => null,
-    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map()
+    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchTranslationStarts: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map()
   });
   const workflow = await load({ batchId: "old-batch", runState: "completed", segments: [{ id: "s1", selected: true, status: "done", translation: "译文" }] });
   assert.equal(workflow.qualityReport.status, "not_started");
@@ -115,8 +116,8 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
   const readJsonBody = async (req) => { const chunks = []; for await (const chunk of req) chunks.push(chunk); return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); };
   const json = (res, status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); return true; };
   const context = vm.createContext({
-    withRuntimeCall,
-    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchWorkflowWrites: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
+    withRuntimeCall, translationRetryReason, contextAnalysisTasks: new Map(),
+    batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchTranslationStarts: new Map(), batchWorkflowWrites: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = structuredClone(value); run.runnerOptions.batchSummary = summarizeBatchSegments(run.segments); },
     getBackgroundTask: async (id) => tasks.get(id),
     createBackgroundTask: async (input) => { const task = { ...input, id: `task-${tasks.size}`, status: "in_progress", createdAt: new Date().toISOString() }; tasks.set(task.id, task); return task; },

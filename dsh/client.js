@@ -62,6 +62,7 @@ window.__ModuleLoader__.load({
     function issuesOf(segment) {
       const issues = segment.result?.qa?.issues || segment.result?.issues || segment.result?.aiQa?.issues || [];
       return [...issues, ...(segment.error ? [{ severity: "error", message: segment.error }] : []),
+        ...(segment.retryTranslationReason && segment.retryTranslationReason !== segment.error ? [{ severity: "error", message: segment.retryTranslationReason }] : []),
         ...(segment.result?.aiQa?.fallbackReason ? [{ severity: "warning", message: segment.result.aiQa.fallbackReason }] : [])];
     }
     function reportScore(report) {
@@ -280,6 +281,17 @@ window.__ModuleLoader__.load({
         await this.loadRun(token, id);
       }
       save() { return this.perform("save", async (token) => { await this.saveDrafts(token); return "译文已保存，可导出到 memoQ 审校。"; }); }
+      retry(verb, segmentIds) {
+        const id = this.view.selectedId;
+        return this.perform(`${verb}:${id}`, async (token) => {
+          if (this.dirty(id)) throw new Error("请先保存当前译文修改，再重试");
+          if (editingLocked(token.view.run) || token.view.run.contextBriefPending) throw new Error("当前任务仍在执行，请结束后重试");
+          const result = await this.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", this.body(segmentIds === undefined ? {} : { segmentIds }, token), token);
+          delete token.view.exports[id]; delete token.view.sections[`qa:${id}`];
+          await this.loadRun(token, id);
+          return result.message || (result.count === 0 ? "没有需要重试的句段" : "重试已提交，可在任务概览查看进度。");
+        });
+      }
       linkReviewedFinal({ path, libraryId }) {
         const id = this.view.selectedId;
         return this.perform(`final:${id}`, async (token) => {
@@ -401,6 +413,7 @@ window.__ModuleLoader__.load({
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
       .kami .resource-row.term-survey-row{gap:6px}.kami .term-survey-row p{margin:2px 0}.kami .term-survey-row .stack{gap:6px}
+      .kami .segment-select-row{display:flex;align-items:center;gap:6px;padding-left:9px;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .segment-select-row:last-child{border-bottom:0}.kami .segment-select-row>input{flex:none}.kami .segment-select-row>.segment-row{min-width:0;border-bottom:0}
       .kami{height:100%;min-width:0;overflow:auto;container-type:inline-size;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;box-sizing:border-box;scrollbar-gutter:stable}
       .kami *{box-sizing:border-box}.kami button,.kami input,.kami select,.kami textarea{font:inherit;color:inherit;font-size:13px;max-width:100%}.kami button,.kami input,.kami select{border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2);min-height:32px;padding:6px 10px}.kami button{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;line-height:1.4}.kami button:hover{background:var(--dsw-alias-interactive-bg-hover)}.kami button:disabled{opacity:.5;cursor:default}.kami button:focus-visible,.kami input:focus-visible,.kami textarea:focus-visible,.kami select:focus-visible,.kami summary:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px}.kami .primary{background:var(--dsw-alias-button-primary-fill);border-color:transparent;color:var(--dsw-alias-label-primary-foreground)}.kami .primary:hover{filter:brightness(.95)}.kami .quiet{border-color:transparent;background:transparent}.kami .small{font-size:12px;min-height:28px;padding:4px 7px}.kami .icon-button{width:30px;padding:5px;flex:none}.kami .button-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.kami .button-row>*{min-width:0}.kami .button-row input{flex:1;min-width:100px}.kami button svg{flex:none}.kami input,.kami select{min-width:0}.kami input[type=checkbox]{min-height:0;width:15px;height:15px;margin:0;accent-color:var(--dsw-alias-brand-primary)}
       .kami .masthead{padding:18px 20px 0;position:sticky;top:0;z-index:3;background:var(--dsw-alias-bg-layer-1)}.kami .brand-row{display:flex;align-items:center;gap:10px;min-width:0}.kami .brand-name{flex:1;min-width:0}.kami h1{margin:0;font-size:16px;font-weight:650;letter-spacing:-.3px}.kami .eyebrow{color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:1.5px;margin-top:3px}.kami .connection{font-size:11px;color:var(--dsw-alias-label-secondary);display:flex;align-items:center;gap:5px;white-space:nowrap}.kami .connection-dot{width:6px;height:6px;border-radius:50%;background:currentColor}.kami .workspace-bar{display:flex;align-items:center;gap:6px;padding:14px 0 13px;min-width:0;font-size:12px;color:var(--dsw-alias-label-secondary)}.kami .workspace-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kami .project-chip{max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 7px;border-radius:5px;background:var(--dsw-alias-bg-layer-2);font-size:11px}.kami nav{display:flex;flex-wrap:wrap;align-items:center;gap:4px;border-bottom:1px solid var(--dsw-alias-border-l2);padding:0 0 7px}.kami nav>button{flex:0 0 auto;min-width:0;padding:6px;border:0;background:transparent;color:var(--dsw-alias-label-secondary);white-space:nowrap}.kami nav>button[aria-pressed=true]{background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font-weight:600}.kami .body{padding:18px 20px 28px}.kami .stack{display:grid;gap:18px;min-width:0}.kami h2{font-size:18px;letter-spacing:-.4px;margin:0;font-weight:600;overflow-wrap:anywhere}.kami h3{font-size:14px;margin:0;font-weight:600}.kami p{font-size:13px;line-height:1.65;margin:7px 0;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.kami .muted{font-size:12px;color:var(--dsw-alias-label-tertiary);line-height:1.6}.kami .section-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}.kami .section-heading h3{flex:1}.kami .card{padding:16px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;min-width:0;background:var(--dsw-alias-bg-layer-2)}.kami .inset{background:var(--dsw-alias-bg-layer-1)}.kami .rule{border-top:1px solid var(--dsw-alias-border-l2);padding-top:16px}.kami .empty{display:grid;justify-items:center;text-align:center;gap:6px;padding:28px 12px}.kami .empty p{max-width:32em}.kami label{display:grid;gap:7px;font-size:12px;color:var(--dsw-alias-label-secondary);min-width:0}.kami label>input,.kami label>select{width:100%}.kami textarea{width:100%;resize:vertical;min-height:104px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:10px 12px;font-size:14px;line-height:1.75}.kami textarea[readonly]{background:var(--dsw-alias-bg-layer-2)}.kami summary{cursor:pointer;line-height:1.5;font-size:13px;color:var(--dsw-alias-label-secondary)}.kami details[open]>summary{margin-bottom:14px}.kami .feedback{font-size:12px;line-height:1.6;margin:9px 0;overflow-wrap:anywhere;display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--dsw-alias-label-secondary)}.kami .feedback p{margin:0;font-size:12px}.kami .error{color:var(--dsw-alias-state-error-primary)}.kami .notice{padding:10px 12px;background:var(--dsw-alias-bg-layer-3);border-radius:8px;font-size:12px;line-height:1.6}.kami .notice .button-row{margin-top:10px}.kami code{font:11px/1.65 ui-monospace,Consolas,monospace;overflow-wrap:anywhere;word-break:break-word;color:var(--dsw-alias-label-secondary)}
@@ -546,8 +559,9 @@ window.__ModuleLoader__.load({
       const failed = selected.filter((segment) => ["error", "failed"].includes(segment.status)).length, problems = selected.reduce((count, segment) => count + issuesOf(segment).length, 0);
       const locked = editingLocked(run), pending = model.dirty(), id = run.batchId;
       const translated = selected.filter((segment) => segment.status === "done" && segment.translation?.trim());
-      const qaFailed = translated.some((segment) => segment.result?.aiQa?.fallbackReason);
+      const qaFailed = translated.some((segment) => !segment.accepted && !segment.retryTranslationReason && segment.result?.aiQa?.fallbackReason);
       const qa = qaSummary(run, model.view.operations[`qa:${id}`]?.pending);
+      const retryFailed = selected.filter((segment) => segment.retryTranslationReason && !segment.accepted).length;
       const brief = run.contextBrief, briefBusy = run.contextBriefPending || model.view.operations[`context-brief:${id}`]?.pending;
       const briefFailed = brief?.status === "failed" || Boolean(brief?.warning) || (brief?.coverage && brief.coverage.covered < brief.coverage.total);
       const qaDescription = `${qa.model} ${t("段")} ${t("模型 QA")} · ${qa.rules} ${t("段")} ${t("规则检查")} · ${qa.human} ${t("段")} ${t("memoQ 人工终稿")} · ${qa.incomplete} ${t("段")} ${t("QA 未完成")}`;
@@ -566,6 +580,9 @@ window.__ModuleLoader__.load({
           : h(Button, { primary: true, onClick: () => command("start"), busy: model.view.operations[`start:${id}`]?.pending, disabled: locked || pending || model.view.operations[`qa:${id}`]?.pending || run.contextBriefPending || (run.requiresBrief && run.contextBrief?.status !== "ready") }, h(Glyph, { name: "arrow" }), t(locked ? "等待当前阶段结束" : done ? "继续翻译" : "开始翻译")),
           h(Button, { onClick: () => model.save(), disabled: !pending || locked, busy: model.view.operations.save?.pending }, t("保存修改")),
           done > 0 && h(Button, { onClick: exportFile, disabled: locked || pending, quiet: true }, t("工作区导出"))),
+        h("div", { className: "button-row" }, retryFailed > 0 && h(Button, { onClick: () => model.retry("retry-translation"), disabled: locked || pending || run.contextBriefPending, busy: model.view.operations[`retry-translation:${id}`]?.pending }, `${t("重试全部翻译失败")} (${retryFailed})`),
+          qaFailed && h(Button, { onClick: () => model.retry("retry-qa"), disabled: locked || pending || run.contextBriefPending, busy: model.view.operations[`retry-qa:${id}`]?.pending }, t("重试全部未完成 QA"))),
+        h(Feedback, { model, name: `retry-translation:${id}`, t }),
         run.workflow?.overall?.status === "in_progress" && h("p", { className: "muted" }, run.workflow.overall.message),
         (run.requiresBrief || brief || briefBusy) && h("section", { className: "stack", "aria-label": t("语境分析") },
           h("strong", null, t("语境分析"), " · ", t(briefBusy ? "分析中" : briefFailed ? "分析未完成" : brief?.status === "ready" ? "已完成" : "尚未开始")),
@@ -627,7 +644,15 @@ window.__ModuleLoader__.load({
     function ReviewPanel({ model, run, t, initialSelected = "", reports }) {
       const [filter, setFilter] = useState("all"), [offset, setOffset] = useState(Math.max(0, Math.floor(run.segments.findIndex((item) => item.id === initialSelected) / 20) * 20)), [selected, setSelected] = useState(initialSelected), [query, setQuery] = useState(""), [editing, setEditing] = useState(Boolean(initialSelected));
       const id = run.batchId, qaKey = `qa:${id}`;
-      const locked = editingLocked(run) || model.view.operations[qaKey]?.pending || model.view.operations.save?.pending;
+      const [checked, setChecked] = useState([]);
+      const locked = editingLocked(run) || run.contextBriefPending || model.view.operations[qaKey]?.pending || model.view.operations.save?.pending || model.view.operations[`retry-translation:${id}`]?.pending || model.view.operations[`retry-qa:${id}`]?.pending;
+      const canRetry = (item) => item.selected !== false && !item.accepted;
+      const qaRetryable = (item) => canRetry(item) && !item.retryTranslationReason && item.status === "done" && item.translation?.trim() && item.result?.aiQa?.fallbackReason;
+      const checkedIds = checked.filter((id) => run.segments.some((item) => item.id === id && canRetry(item)));
+      const checkedQa = run.segments.filter((item) => checkedIds.includes(item.id) && qaRetryable(item)).map((item) => item.id);
+      const failedCount = run.segments.filter((item) => canRetry(item) && item.retryTranslationReason).length;
+      const qaCount = run.segments.filter(qaRetryable).length;
+      const retry = async (verb, ids) => { const result = await model.retry(verb, ids); if (result.ok) setChecked([]); };
       const page = reviewPage(run.segments, { filter, query, offset, selectedId: selected }), current = page.selected, segment = current?.segment;
       const issueSegments = run.segments.filter((item) => issuesOf(item).length);
       const locate = (direction) => {
@@ -647,17 +672,29 @@ window.__ModuleLoader__.load({
           h("select", { value: filter, "aria-label": t("译段筛选"), onChange: (event) => { setFilter(event.target.value); setOffset(0); setEditing(false); } }, ...[["all", "全部译段"], ["issues", "仅看问题"], ["pending", "尚未翻译"]].map(([value, label]) => h("option", { key: value, value }, t(label))))),
         h("div", { className: "button-row" }, h(Button, { small: true, onClick: inspect, disabled: locked || model.dirty() || !run.segments.some((item) => item.translation?.trim()) }, t("检查本批次")), h(Button, { small: true, quiet: true, onClick: savedReport }, t("查看上次报告")),
           issueSegments.length > 0 && h(React.Fragment, null, h(Button, { small: true, quiet: true, onClick: () => locate(-1) }, t("上个问题")), h(Button, { small: true, quiet: true, onClick: () => locate(1) }, t("下个问题")))),
+        h("section", { className: "stack", "aria-label": t("句段重试") }, h("p", { className: "muted" }, t("勾选句段可跨页批量重试。重新翻译会替换所选机器译文；仅重试 QA 沿用现有译文。")),
+          h("div", { className: "button-row" }, h(Button, { small: true, disabled: locked, onClick: () => setChecked([...new Set([...checkedIds, ...page.items.filter(({ segment }) => canRetry(segment)).map(({ segment }) => segment.id)])]) }, t("勾选本页")),
+            h(Button, { small: true, quiet: true, disabled: locked || !checkedIds.length, onClick: () => setChecked([]) }, `${t("清空勾选")} (${checkedIds.length})`),
+            h(Button, { small: true, disabled: locked || model.dirty() || !checkedIds.length, onClick: () => retry("retry-translation", checkedIds) }, `${t("批量重试翻译")} (${checkedIds.length})`),
+            h(Button, { small: true, disabled: locked || model.dirty() || !checkedQa.length, onClick: () => retry("retry-qa", checkedQa) }, `${t("仅重试所选 QA")} (${checkedQa.length})`)),
+          h("div", { className: "button-row" }, h(Button, { small: true, disabled: locked || model.dirty() || !failedCount, onClick: () => retry("retry-translation") }, `${t("重试全部翻译失败")} (${failedCount})`),
+            h(Button, { small: true, disabled: locked || model.dirty() || !qaCount, onClick: () => retry("retry-qa") }, `${t("重试全部未完成 QA")} (${qaCount})`)),
+          h(Feedback, { model, name: `retry-translation:${id}`, t }), h(Feedback, { model, name: `retry-qa:${id}`, t })),
         h(Feedback, { model, name: qaKey, retry: inspect, t }), h(Feedback, { model, name: `section:${qaKey}`, retry: savedReport, t }),
         model.view.sections[qaKey] && h("details", { className: "rule" }, h("summary", null, t("上次保存的质量报告")), h(QaReport, { report: model.view.sections[qaKey], t })),
-        h("div", { className: "review-layout", "data-editing": editing }, h("div", { className: "review-index" }, h("div", { className: "review-list", "aria-label": t("译段列表") }, ...page.items.map(({ segment: item, number }) => h("button", { type: "button", className: "segment-row", key: item.id, "aria-pressed": segment?.id === item.id, onClick: () => { setSelected(item.id); setEditing(true); } },
-          h("span", { className: "segment-number" }, `#${number}`), h("span", { className: "segment-excerpts" }, h("span", null, item.source), h("span", { className: "muted" }, item.translation || t("尚未翻译"))), h("span", { className: "badge" }, item.draft ? t("未保存") : issuesOf(item).length ? `${issuesOf(item).length} ${t("问题")}` : stateText(item.status, t))))),
+        h("div", { className: "review-layout", "data-editing": editing }, h("div", { className: "review-index" }, h("div", { className: "review-list", "aria-label": t("译段列表") }, ...page.items.map(({ segment: item, number }) => h("div", { className: "segment-select-row", key: item.id },
+          h("input", { type: "checkbox", "aria-label": `${t("勾选句段")} ${number}`, checked: checkedIds.includes(item.id), disabled: locked || !canRetry(item), onChange: (event) => setChecked(event.target.checked ? [...checkedIds, item.id] : checkedIds.filter((id) => id !== item.id)) }),
+          h("button", { type: "button", className: "segment-row", "aria-pressed": segment?.id === item.id, onClick: () => { setSelected(item.id); setEditing(true); } },
+          h("span", { className: "segment-number" }, `#${number}`), h("span", { className: "segment-excerpts" }, h("span", null, item.source), h("span", { className: "muted" }, item.translation || t("尚未翻译"))), h("span", { className: "badge" }, item.draft ? t("未保存") : issuesOf(item).length ? `${issuesOf(item).length} ${t("问题")}` : stateText(item.status, t)))))),
           h(Pager, { offset: page.offset, total: page.total, onChange: setOffset, t })),
           segment && h("article", { className: "segment segment-editor", key: segment.id }, h(Button, { small: true, quiet: true, className: "review-back", onClick: () => setEditing(false) }, t("返回译段列表")), h("div", { className: "segment-heading" }, h("strong", null, `#${current.number}`), h("span", null, segment.draft ? t("待重新检查") : qaLabel(segment).startsWith("模型 QA · ") ? `${t("模型 QA")} · ${qaLabel(segment).split(" · ")[1]}` : t(qaLabel(segment)))),
             locked && h("p", { className: "muted" }, t("执行中只读；阶段结束后可编辑译文。")),
             h("div", { className: "pairs" }, h("div", null, h("span", { className: "source-label" }, t("原文")), h("p", { className: "source-text" }, segment.source)), h("label", null, h("span", { className: "source-label" }, t("译文")), h("textarea", { value: segment.translation || "", readOnly: locked, "aria-label": `${t("译文")} ${current.number}`, onChange: (event) => model.edit(segment.id, event.target.value) }))),
             h("ul", { className: "issues" }, ...issuesOf(segment).map((issue, index) => h("li", { key: index }, issue.message || issue.description || ""))),
             h("div", { className: "segment-footer" }, h("span", { className: "muted" }, t(segment.accepted && !segment.draft ? segment.result?.humanReview?.source === "external-review-import" ? "已关联人工终稿" : "人工确认" : "人工审校在 memoQ 完成，之后关联本地终稿。"))),
-            h("div", { className: "button-row" }, h(Button, { primary: true, small: true, onClick: () => model.save(), disabled: !model.dirty() || locked, busy: model.view.operations.save?.pending }, t("保存修改"))), h(Feedback, { model, name: "save", t }))),
+            h("div", { className: "button-row" }, h(Button, { primary: true, small: true, onClick: () => model.save(), disabled: !model.dirty() || locked, busy: model.view.operations.save?.pending }, t("保存修改")),
+              h(Button, { small: true, onClick: () => retry("retry-translation", [segment.id]), disabled: locked || model.dirty() || !canRetry(segment) }, t("重试此句翻译")),
+              qaRetryable(segment) && h(Button, { small: true, onClick: () => retry("retry-qa", [segment.id]), disabled: locked || model.dirty() }, t("仅重试此句 QA"))), h(Feedback, { model, name: "save", t }))),
         !page.total && h(Empty, { title: "此筛选下没有译段", t }));
     }
     function ExportPanel({ model, run, t, onFinal }) {

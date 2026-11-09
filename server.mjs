@@ -82,6 +82,7 @@ import { BACKGROUND_TASK_STALE_MS, interruptedTaskPatch, selectStaleRunningTasks
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 import { runServerBatch, retryServerBatchQa } from "./src/batch-runner.mjs";
 import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows } from "./public/batch-status.js";
+import { translationRetryReason } from "./src/translation-output.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public", import.meta.url));
 const PROJECT_ROOT = fileURLToPath(new URL("./", import.meta.url));
@@ -126,6 +127,7 @@ let workbenchShutdownStarted = false;
 const batchWorkers = new Map();
 const batchQaWorkers = new Map();
 const batchQaStarts = new Map();
+const batchTranslationStarts = new Map();
 const batchWorkflowWrites = new Map();
 const reviewFinalLocks = new Set();
 /** 批中手动改过的工作术语：内存里比批次记录新，跑批循环每段会先看一眼。 */
@@ -4282,7 +4284,7 @@ async function loadBatchWorkflow(run, knownTasks = new Map()) {
     }
   }
   return { ...workflow, reviewFinalBusy: reviewFinalLocks.has(run.batchId), qaRetryBusy: batchQaWorkers.has(run.batchId), writeBusy: reviewFinalLocks.has(run.batchId) || batchWorkers.has(run.batchId) || batchQaWorkers.has(run.batchId)
-    || batchQaStarts.has(run.batchId) || consistencyCheckTasks.has(run.batchId) || termSurveyTasks.has(run.batchId) };
+    || batchQaStarts.has(run.batchId) || batchTranslationStarts.has(run.batchId) || consistencyCheckTasks.has(run.batchId) || termSurveyTasks.has(run.batchId) };
 }
 
 async function finalizeBatchWorkflow(batchId) {
@@ -4328,7 +4330,7 @@ function startBatchQaRetry(batchId, taskId, segmentIds) {
   batchQaWorkers.set(batchId, { taskId, promise: tracked });
 }
 
-function startBatchWorker(batchId, backgroundTaskId = "") {
+function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
   const existing = batchWorkers.get(batchId);
   if (existing) return existing;
   const controller = { pauseRequested: false, cancelRequested: false, promise: null, backgroundTaskId };
@@ -4340,19 +4342,20 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
   workbenchSessionMonitor?.touch(sessionId);
   controller.promise = Promise.resolve().then(async () => withRuntimeCall({ workspaceSnapshot: (await getBatchRun(batchId))?.runnerOptions?.workspaceSnapshot || null }, () => runServerBatch(batchId, {
     loadRun: getBatchRun,
+    segmentIds,
     saveRun: async (run) => {
       await saveBatchRun(run);
       if (backgroundTaskId) {
-        const selected = (run.segments || []).filter((segment) => segment.selected !== false);
+        const selected = (run.segments || []).filter((segment) => segment.selected !== false && (!segmentIds || segmentIds.includes(String(segment.id))));
         const completed = selected.filter((segment) => segment.status === "done").length;
         const failed = selected.filter((segment) => segment.status === "error").length;
         await updateBackgroundTaskProgress(backgroundTaskId, {
-          status: run.runState === "completed" ? "completed" : run.runState === "needs_attention" ? "failed" : run.runnerOptions?.cancelled ? "needs_attention" : "in_progress",
+          status: segmentIds && completed + failed === selected.length ? failed ? "failed" : "completed" : run.runState === "completed" ? "completed" : run.runState === "needs_attention" ? "failed" : run.runnerOptions?.cancelled ? "needs_attention" : "in_progress",
           // 批次号与"可继续"标记：任务中心的「继续」靠它们找得到这个批次。
           payload: { batchId: run.batchId, filename: run.filename, resumable: true },
           progress: {
             phase: run.runnerOptions?.cancelled ? "cancelled" : run.runState || "running",
-            message: run.runnerOptions?.cancelled ? `批次已中断：已完成 ${completed} / ${selected.length} 段，可继续` : run.runState === "paused" ? "批次已暂停" : `正在翻译：${completed} / ${selected.length}`,
+            message: segmentIds && completed + failed === selected.length ? `翻译重试结束：成功 ${completed} / ${selected.length} 段${failed ? ` · ${failed} 段仍失败` : ""}` : run.runnerOptions?.cancelled ? `批次已中断：已完成 ${completed} / ${selected.length} 段，可继续` : run.runState === "paused" ? "批次已暂停" : `正在翻译：${completed} / ${selected.length}`,
             percent: selected.length ? Math.round((completed / selected.length) * 100) : 0,
             completed,
             total: selected.length,
@@ -6835,13 +6838,40 @@ async function apiHandler(req, res, url) {
     if (!pairs.length) return json(res, 400, { error: "文件里没有可回填的双语条目（需要原文与译文都非空）" });
     return json(res, 200, await importBatchReview({ run, pairs, projectId: String(body.projectId), filename }));
   }
+  if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/retry-translation$/u.test(url.pathname)) {
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const body = await readJsonBody(req);
+    const run = await getBatchRun(batchId);
+    if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    const workflow = await loadBatchWorkflow(run);
+    if (batchTranslationStarts.has(batchId)) return json(res, 409, { error: "翻译重试正在提交，请勿重复操作" });
+    const starting = (async () => {
+      if (workflow.writeBusy || ["running", "queued"].includes(run.runState) || contextAnalysisTasks.has(batchId)) {
+        throw Object.assign(new Error("当前翻译、语境分析或 QA 尚未结束，请稍后重试"), { statusCode: 409 });
+      }
+      if (Object.hasOwn(body, "segmentIds") && (!Array.isArray(body.segmentIds) || !body.segmentIds.length)) throw Object.assign(new Error("请选择要重试的句段"), { statusCode: 400 });
+      const ids = body.segmentIds ? [...new Set(body.segmentIds.map(String))] : run.segments.filter(translationRetryReason).map((segment) => String(segment.id));
+      if (!ids.length) return { batchId, count: 0, message: "没有需要重试的翻译失败项" };
+      const targets = ids.map((id) => run.segments.find((segment) => String(segment.id) === id));
+      if (targets.some((segment) => !segment || segment.selected === false || segment.accepted)) throw Object.assign(new Error("所选句段不存在、未参与翻译或已人工确认，不能重试"), { statusCode: 400 });
+      await saveBatchRun({ ...run, runState: "queued", segments: run.segments.map((segment) => ids.includes(String(segment.id)) ? { ...segment, status: "pending", error: "" } : segment),
+        runnerOptions: { ...run.runnerOptions, cancelled: false, translationError: "" } });
+      const task = await createBackgroundTask({ type: "batch_translation", title: `重试翻译 · ${run.filename}`, locale: run.locale, projectId: run.projectId,
+        progress: { phase: "queued", message: `仅重试 ${ids.length} 个句段`, percent: 0, completed: 0, total: ids.length }, payload: { batchId, segmentIds: ids } });
+      startBatchWorker(batchId, task.id, ids);
+      return { batchId, count: ids.length, runState: "queued", backgroundTaskId: task.id };
+    })();
+    batchTranslationStarts.set(batchId, starting);
+    try { return json(res, 202, await starting); }
+    finally { if (batchTranslationStarts.get(batchId) === starting) batchTranslationStarts.delete(batchId); }
+  }
   if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/(?:start|resume)$/u.test(url.pathname)) {
     const parts = url.pathname.split("/");
     const batchId = decodeURIComponent(parts[4]);
     const body = await readJsonBody(req).catch(() => ({}));
     const run = await getBatchRun(batchId);
     if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
-    if (batchQaWorkers.has(batchId) || batchQaStarts.has(batchId)) return json(res, 409, { error: "AIQA 重试或收尾正在运行，请在当前阶段结束后重试翻译" });
+    if (batchQaWorkers.has(batchId) || batchQaStarts.has(batchId) || batchTranslationStarts.has(batchId)) return json(res, 409, { error: "翻译重试或 AIQA 收尾正在运行，请在当前阶段结束后继续翻译" });
     if (batchWorkers.has(batchId)) return json(res, 200, { batchId, runState: "running", alreadyRunning: true });
     // 语境分析是翻译的前置条件：还没跑完就先把分析跑起来，让前端等在原地，
     // 而不是用"猜出来的语体"先把整批翻掉。
@@ -6894,7 +6924,7 @@ async function apiHandler(req, res, url) {
     if (req.method === "POST") {
       // 手动（重新）分析：立即返回，进度走 GET 轮询与任务中心；
       // 已在跑时服务端会复用同一次任务，不重复烧额度。
-      if (batchWorkers.has(batchId) || batchQaWorkers.has(batchId) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId) || reviewFinalLocks.has(batchId)) return json(res, 409, { error: "批次正在翻译、质检或关联人工终稿，请完成后再重试语境分析" });
+      if (batchWorkers.has(batchId) || batchTranslationStarts.has(batchId) || batchQaWorkers.has(batchId) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId) || reviewFinalLocks.has(batchId)) return json(res, 409, { error: "批次正在翻译、质检或关联人工终稿，请完成后再重试语境分析" });
       const alreadyRunning = contextAnalysisTasks.has(batchId);
       if (!alreadyRunning) startContextAnalysis(batchId).catch((error) => console.error("[Kami] 语境分析任务异常", error));
       return json(res, 202, { batchId, pending: true, alreadyRunning });
@@ -7255,9 +7285,10 @@ async function apiHandler(req, res, url) {
       const task = await batchQaStarts.get(batchId);
       return json(res, 202, { batchId, backgroundTaskId: task.id, alreadyRunning: true });
     }
-    if (["queued", "running"].includes(run.runState)) return json(res, 409, { error: "本轮翻译仍在进行，请等翻译结束后仅重试未完成的 AIQA" });
+    if (["queued", "running"].includes(run.runState) || batchTranslationStarts.has(batchId) || contextAnalysisTasks.has(batchId)) return json(res, 409, { error: "翻译或语境分析仍在进行，请结束后仅重试未完成的 AIQA" });
+    if (Object.hasOwn(body, "segmentIds") && (!Array.isArray(body.segmentIds) || !body.segmentIds.length)) return json(res, 400, { error: "请选择要重试 QA 的句段" });
     const segmentIds = Array.isArray(body.segmentIds) ? body.segmentIds.map(String) : null;
-    const count = run.segments.filter((segment) => isIncompleteBatchQa(segment) && (!segmentIds || segmentIds.includes(String(segment.id)))).length;
+    const count = run.segments.filter((segment) => isIncompleteBatchQa(segment) && !segment.accepted && !translationRetryReason(segment) && (!segmentIds || segmentIds.includes(String(segment.id)))).length;
     if (!count) return json(res, 200, { batchId, total: 0, message: "没有未完成的 AIQA" });
     const worker = batchWorkers.get(batchId);
     const waiting = Boolean(worker && (!worker.translationComplete || worker.followupActive)) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId);
@@ -7337,6 +7368,7 @@ async function apiHandler(req, res, url) {
     const latestRunBySource = new Map();
     for (const qaRun of qaRuns) if (!latestRunBySource.has(qaRun.source)) latestRunBySource.set(qaRun.source, qaRun);
     const segments = run.segments.map((segment) => {
+      segment = { ...segment, retryTranslationReason: translationRetryReason(segment) };
       const qaRun = latestRunBySource.get(segment.source);
       if (!qaRun) return segment;
       const savedQa = segment.result?.aiQa;

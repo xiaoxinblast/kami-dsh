@@ -5,6 +5,7 @@ import { isTransientConnectionError, retryTransient } from "./transient-errors.m
 import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { isIncompleteBatchQa } from "../public/batch-status.js";
+import { translationRetryReason } from "./translation-output.mjs";
 
 /** 连接层失败自动重试一次：等 2 秒再试，内容层错误不重试。 */
 const SEGMENT_RETRY_DELAY_MS = 2_000;
@@ -75,6 +76,7 @@ export async function runServerBatch(batchId, {
   loadProject,
   classifyDocument,
   translateSegment,
+  segmentIds = null,
   loadTermSources = async () => [],
   loadWorkingGlossary = null,
   learnTerms = null,
@@ -95,7 +97,8 @@ export async function runServerBatch(batchId, {
     .map((segment) => ({ segmentId: segment.id, source: segment.source, target: segment.translation }));
   const batchSettings = project.settings?.batch || {};
   const tmSettings = project.settings?.tm || {};
-  const selected = (run.segments || []).filter((segment) => segment.selected !== false);
+  const retryIds = segmentIds ? new Set(segmentIds.map(String)) : null;
+  const selected = (run.segments || []).filter((segment) => segment.selected !== false && (!retryIds || retryIds.has(String(segment.id))));
   // 语境档案已经给出整份文件的用途时直接用它；没有档案才退回"读前 8000 字判一次"。
   const brief = run.contextBrief && run.contextBrief.status === "ready" ? run.contextBrief : null;
   const declaredContentType = String(run.contentType || "general");
@@ -223,6 +226,7 @@ export async function runServerBatch(batchId, {
               const learnedSources = learned.map((term) => String(term.source || "")).filter(Boolean);
               const refreshedTerms = [...formalTermSources, ...merged.terms];
               for (const item of run.segments) {
+                if (retryIds && !retryIds.has(String(item.id))) continue;
                 if (item.status !== "done" || !item.result || !String(item.source || "")) continue;
                 if (!learnedSources.some((source) => item.source.includes(source))) continue;
                 item.result = { ...item.result, patternKey: buildPatternKey(item.source, { terms: refreshedTerms }) };
@@ -243,14 +247,14 @@ export async function runServerBatch(batchId, {
   }
 
   const failed = selected.filter((segment) => segment.status === "error").length;
-  run.runState = failed ? "needs_attention" : "completed";
+  run.runState = failed ? "needs_attention" : retryIds && run.segments.some((segment) => segment.selected !== false && segment.status !== "done") ? "paused" : "completed";
   run.runnerOptions = { ...run.runnerOptions, translationCompletedAt: new Date().toISOString() };
   run.subBatches = checkpointSubBatches(subBatches, run.segments);
   await checkpoint.commit();
   // 交付前闭环先跑：一致性核对 + 质量报告是用户翻完立刻要看的结论；
   // 风格学习与复盘（review）会调多次模型，排在后面免得把报告拖到几分钟后。
-  if (selected.some((segment) => segment.status === "done" && segment.translation)) await finalize(run);
-  if (!failed) await review(run);
+  if (!retryIds && selected.some((segment) => segment.status === "done" && segment.translation)) await finalize(run);
+  if (!retryIds && !failed) await review(run);
   return run;
 }
 
@@ -259,7 +263,7 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
   let run = await loadRun(batchId);
   if (!run) throw new Error("未找到批次任务");
   const ids = segmentIds ? new Set(segmentIds.map(String)) : null;
-  const targets = run.segments.filter((segment) => isIncompleteBatchQa(segment) && (!ids || ids.has(String(segment.id))));
+  const targets = run.segments.filter((segment) => isIncompleteBatchQa(segment) && !segment.accepted && !translationRetryReason(segment) && (!ids || ids.has(String(segment.id))));
   let completed = 0;
   let failed = 0;
   await report({ completed, failed, total: targets.length });
