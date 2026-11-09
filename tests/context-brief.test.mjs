@@ -38,6 +38,14 @@ const entries = [
   { i: 3, id: "seg-3", text: "返回标题" }
 ];
 
+test("单条语境结论漏写 to 时只覆盖 from 指定的这一条", () => {
+  const parsed = parseContextBriefPart(JSON.stringify({ sections: [{ from: 1, to: 1, purpose: "dialogue" }, { from: 2, purpose: "ui", note: "保持倒计时阈值" }, { from: 3, to: 3, purpose: "dialogue" }] }), { entries });
+  assert.deepEqual(parsed.part.sections[1], { from: 2, to: 2, purpose: "ui", tone: "", note: "保持倒计时阈值" });
+  assert.equal(mergeContextBrief([parsed.part], { total: 3 }).coverage.covered, 3);
+  const incomplete = mergeContextBrief([{ ...parsed.part, sections: [{ from: 1, to: 1699, purpose: "dialogue" }] }], { total: 1700 });
+  assert.equal(incomplete.coverage.percent, 99, "缺一条时不能四舍五入显示 100%");
+});
+
 test("解析语境分析结果：区间收拢到本片，未知用途回落通用", () => {
   const content = JSON.stringify({
     documentType: { purpose: "ui", audience: "玩家", tone: "中性", summary: "系统菜单文案" },

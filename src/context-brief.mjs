@@ -134,7 +134,8 @@ export function parseContextBriefPart(content, { entries = [] } = {}) {
   const sections = [];
   for (const section of Array.isArray(payload.sections) ? payload.sections : []) {
     const from = Math.max(minIndex, Math.trunc(Number(section?.from)));
-    const to = Math.min(maxIndex, Math.trunc(Number(section?.to)));
+    // 缺少结束编号时仅保留明确指出的单条，不向相邻条目扩展结论。
+    const to = Math.min(maxIndex, Math.trunc(Number(section?.to ?? section?.from)));
     if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) {
       dropped.push({ kind: "section", reason: "区间无效", value: section });
       continue;
@@ -275,7 +276,7 @@ export function mergeContextBrief(parts = [], { filename = "", total = 0, model 
       analyzed: usable.reduce((sum, part) => sum + part.entryCount, 0),
       total,
       covered: coveredIndices.size,
-      percent: total ? Math.round((coveredIndices.size / total) * 100) : 0
+      percent: total ? Math.min(coveredIndices.size < total ? 99 : 100, Math.round((coveredIndices.size / total) * 100)) : 0
     }
   };
 }
