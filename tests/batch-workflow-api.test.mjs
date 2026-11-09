@@ -63,11 +63,11 @@ test("术语普查部分查询失败时保留标记，不计入成功覆盖", as
 
 test("批次详情不会把同原文另一句段的失败 QA 覆盖到已成功句段", async () => {
   const segments = [{ id: "ok", source: "same source", translation: "已确认译文", selected: true, status: "done", result: { qaScore: 97, aiQa: { score: 97, status: "passed", used: true, fallbackReason: "" } } }];
-  let result;
+  let result, qaTranslation = "另一句段译文";
   const handler = vm.runInNewContext(`(async (req, res, url) => { ${block('  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))', '  if (req.method === "POST" && url.pathname === "/api/style-guides/import")')} })`, {
     getBatchRun: async () => ({ batchId: "batch-test", projectId: "project-test", locale: "zh-CN", segments }), translationRetryReason,
     getProjectAssets: async () => ({ assets: { terms: [] } }),
-    getQaRuns: async () => [{ source: "same source", finalTranslation: "另一句段译文", score: null, status: "review", fallbackReason: "terminated" }],
+    getQaRuns: async () => [{ source: "same source", finalTranslation: qaTranslation, score: null, status: "review", fallbackReason: "terminated" }],
     assertActiveLocale: () => {}, json: (_res, _status, body) => { result = body; },
     loadBatchWorkflow: async (run) => buildBatchWorkflow(run), buildTermSurveyView: () => null, CONTEXT_BRIEF_MIN_SEGMENTS: 20, contextAnalysisTasks: new Map()
   });
@@ -75,6 +75,10 @@ test("批次详情不会把同原文另一句段的失败 QA 覆盖到已成功�
   assert.equal(result.segments[0].result.aiQa.fallbackReason, "");
   assert.equal(result.segments[0].result.qaScore, 97);
   assert.equal(result.workflow.summary.qaIncomplete, 0);
+  qaTranslation = segments[0].translation;
+  segments[0].status = "pending";
+  await handler({ method: "GET" }, {}, new URL("http://localhost/api/batch/run/batch-test?projectId=project-test"));
+  assert.equal(result.segments[0].status, "pending", "old QA cannot mark a queued translation retry as completed");
 });
 
 test("没有在执行的收尾不会误显示为持续排队，旧任务也有明确手动入口提示", async () => {

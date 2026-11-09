@@ -60,12 +60,16 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
         const command = JSON.stringify(args).replace(/\\\\/g, "/");
         const readSources = ["read", "read_image"].includes(name) ? (source ? [source] : [])
           : ["bash", "pwsh"].includes(name) ? originals.filter((item) => command.includes(item.path.replace(/\\/g, "/"))) : [];
-        if (!result.isError && result.content?.length) for (const item of readSources) {
+        const shellRead = ["bash", "pwsh"].includes(name), value = result.value;
+        const isError = Boolean(result.isError || shellRead && (value?.exitCode !== 0 || value.timedOut || value.aborted || value.stdout?.truncated || !value.stdout?.text?.trim()));
+        if (!isError && result.content?.length) for (const item of readSources) {
           if (!used.some((ref) => ref.path === item.path)) used.push({ path: item.path, tool: name });
         }
-        if (result.isError) lastError = text || result.error?.message || "原文件读取失败";
-        onActivity?.({ tool: name, path: source?.path || "", native: true, isError: Boolean(result.isError), elapsedMs: Date.now() - startedAt });
-        return { text: `${boundary.length ? `${boundaryText}\n` : ""}${text}`, nativeContent: [...boundary, ...(result.content || [])], nativeIsError: Boolean(result.isError), refs: source && !result.isError ? [{ path: source.path, tool: name }] : [] };
+        if (isError) lastError = text || result.error?.message || "原文件读取失败或不完整";
+        const readHint = isError && /binary file/i.test(text) && /\.(?:docx|xlsx|pptx|pdf)$/i.test(path || "")
+          ? "\n该原件是文档格式，普通 read 不能读取。请用 skill 加载对应文档技能，再用当前会话的 bash/pwsh 只读查阅原件（Python 标准库 zipfile 可直接读取 Office XML），保留段落、表格、颜色、修订和图片等规则证据；不要生成正文副本，不要重复用 read 读取同一二进制文件。" : "";
+        onActivity?.({ tool: name, path: source?.path || "", native: true, isError, elapsedMs: Date.now() - startedAt });
+        return { text: `${boundary.length ? `${boundaryText}\n` : ""}${text}${readHint}`, nativeContent: [...boundary, ...(result.content || []), ...(readHint ? [{ type: "text", text: readHint }] : [])], nativeIsError: isError, refs: source && !isError ? [{ path: source.path, tool: name }] : [] };
       } catch (error) {
         signal?.throwIfAborted();
         lastError = error.message;

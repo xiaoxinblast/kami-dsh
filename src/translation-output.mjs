@@ -8,7 +8,7 @@ export function translationOutputIssue(value) {
 export function translationRetryReason(segment) {
   if (segment.selected === false || segment.accepted) return "";
   if (["error", "failed"].includes(segment.status)) return segment.error || "翻译失败";
-  if (segment.status !== "done") return "";
+  if (segment.status !== "done" && !String(segment.translation || "").trim()) return "";
   const issue = translationOutputIssue(segment.translation);
   return issue === "empty_translation" ? "未返回译文" : issue ? "译文包含非译文说明，需要重新翻译" : "";
 }

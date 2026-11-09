@@ -3,6 +3,16 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 export const inject = ["tools", "systemPrompt", "kamiWorkbench"];
 
 export async function apply(ctx) {
+  // Capability tools belong to the preset in current DSH compositions, not the Host.
+  if (ctx.get?.("shell")) {
+    const { LocalBashExecutor } = await import("@deepseek-ai/dsh-bash-local");
+    const shellTool = ctx.shell instanceof LocalBashExecutor ? await import("@deepseek-ai/dsh-tool-bash") : await import("@deepseek-ai/dsh-tool-pwsh");
+    ctx.plugin(shellTool, { enableRunInBackground: false });
+  }
+  if (ctx.get?.("skills")) {
+    ctx.plugin(await import("@deepseek-ai/dsh-skill-filesystem"), {});
+    ctx.plugin(await import("@deepseek-ai/dsh-tool-skill"), {});
+  }
   if (typeof ctx.tools.presentAs === "function") ctx.effect(() => ctx.tools.presentAs("native"));
   else {
     const { NativeToolExecutor } = await import("@deepseek-ai/dsh-tool-executor-native");

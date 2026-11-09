@@ -83,6 +83,7 @@ test("retry API finds legacy contamination, rejects invalid targets and locks co
 
 test("retry detection protects human finals and excludes unstarted text", () => {
   assert.equal(translationRetryReason({ status: "pending" }), "");
+  assert.match(translationRetryReason({ status: "pending", translation: "非译文说明：旧失败结果" }), /非译文说明/);
   assert.equal(translationRetryReason({ status: "done", translation: "原文件查阅失败", accepted: true }), "");
   assert.match(translationRetryReason({ status: "done", translation: "**非译文说明：工具失败" }), /非译文说明/);
 });

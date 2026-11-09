@@ -1,6 +1,6 @@
 {
   "name": "kami-dsh",
-  "version": "0.9.17",
+  "version": "0.9.18",
   "private": true,
   "type": "module",
   "scripts": {
@@ -80,7 +80,12 @@
     "@deepseek-ai/dsh-tools": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
     "@deepseek-ai/dsh-tool-executor-native": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
-    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1"
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-bash-local": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-bash": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-pwsh": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-skill": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-home-paths": {
@@ -96,6 +101,21 @@
       "optional": true
     },
     "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-bash-local": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-bash": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-pwsh": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-skill-filesystem": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-skill": {
       "optional": true
     }
   }

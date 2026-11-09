@@ -7383,7 +7383,7 @@ async function apiHandler(req, res, url) {
       return {
         ...segment,
         translation: segment.translation || qaRun.finalTranslation,
-        status: segment.status === "pending" ? "done" : segment.status,
+        status: segment.status,
         result: {
           ...(segment.result || {}),
           translation: segment.translation || qaRun.finalTranslation,

@@ -2,6 +2,27 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+test("Kami equips the active shell executor and skill tools for Office originals", { skip: !process.env.DSH_TEST_LLM_MODULE }, async () => {
+  const sdk = process.env.DSH_TEST_LLM_MODULE;
+  const { LocalBashExecutor } = await import(new URL("../../dsh-bash-local/lib/index.js", sdk));
+  const source = (await readFile(new URL("../dsh/agent.mjs", import.meta.url), "utf8"))
+    .replace(/"@deepseek-ai\/(dsh-[\w-]+)"/g, (_match, name) => JSON.stringify(new URL(`../../${name}/lib/index.js`, sdk).href));
+  const agent = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  for (const bash of [true, false]) {
+    const plugins = [];
+    await agent.apply({
+      get: () => true, shell: bash ? Object.create(LocalBashExecutor.prototype) : {},
+      plugin: (plugin, config) => plugins.push({ plugin, config }),
+      tools: { presentAs: () => () => {}, register: () => {} }, effect: (run) => run(), systemPrompt: { section: () => {} }
+    });
+    const expected = await import(new URL(`../../dsh-tool-${bash ? "bash" : "pwsh"}/lib/index.js`, sdk));
+    assert.equal(plugins[0].plugin, expected, "use the configured executor, including custom Bash on Windows");
+    assert.equal(plugins[0].config.enableRunInBackground, false);
+    assert.equal(plugins[1].plugin, await import(new URL("../../dsh-skill-filesystem/lib/index.js", sdk)));
+    assert.equal(plugins[2].plugin, await import(new URL("../../dsh-tool-skill/lib/index.js", sdk)));
+  }
+});
+
 test("Kami preset keeps its tools visible to child sessions alongside inherited DSH tools", { skip: !process.env.DSH_TEST_LLM_MODULE, timeout: 5000 }, async () => {
   const sdk = process.env.DSH_TEST_LLM_MODULE;
   const [{ Context }, { default: SystemPrompt }, { default: ToolRuntime, defineTool }, { createScope }] = await Promise.all([

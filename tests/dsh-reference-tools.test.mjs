@@ -30,6 +30,22 @@ async function fixture(run) {
   finally { await close(); assert.ok(directory.startsWith(join(tmpdir(), "kami-native-reference-"))); await rm(directory, { recursive: true, force: true }); }
 }
 
+test("Office guide read failures suggest native document tools and failed shell reads cannot satisfy the guide", async () => fixture(async ({ cwd, ctx, agent }) => {
+  let result = { isError: true, content: [{ type: "text", text: "cannot read: binary file" }] };
+  ctx.tools.schemas = () => ["read", "bash", "pwsh"].map((name) => ({ name, parameters: {} }));
+  ctx.tools.execute = async () => result;
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.docx" }] });
+  assert.match((await tools.execute({ name: "read", arguments: { file_path: "guide.docx" } })).text, /bash\/pwsh/);
+  for (const value of [{ exitCode: 1 }, { exitCode: 0, timedOut: true }, { exitCode: 0, stdout: { text: "partial", truncated: true } }]) {
+    result = { value, content: [{ type: "text", text: "partial or failed read" }] };
+    assert.equal((await tools.execute({ name: "bash", arguments: { command: "python read_original.py guide.docx" } })).nativeIsError, true);
+    assert.throws(() => tools.assertReady(), { code: "style_guide_unread" });
+  }
+  result = { value: { exitCode: 0, stdout: { text: "完整规则", truncated: false } }, content: [{ type: "text", text: "完整规则" }] };
+  await tools.execute({ name: "pwsh", arguments: { command: "python read_original.py guide.docx" } });
+  assert.doesNotThrow(() => tools.assertReady());
+}));
+
 test("style guides are read from current originals for translation and QA, even with reference retrieval disabled", async () => fixture(async ({ directory, cwd, fs, ctx, agent, calls }) => {
   const seen = new Set();
   const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
