@@ -4033,6 +4033,23 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
     repaired.segments = adjudicated.segments;
   }
   const changedIds = new Set((repaired.repair.changed || []).map((change) => String(change.segmentId)));
+  // 一致性修订（含旧版本留下的改稿）不能继续显示旧译文的 QA 分数与意见。
+  for (const segment of repaired.segments) {
+    if (segment.selected === false || segment.accepted === true || segment.status !== "done") continue;
+    if (typeof segment.result?.translation === "string" && segment.result.translation !== segment.translation) changedIds.add(String(segment.id));
+  }
+  if (changedIds.size) {
+    let qaRun = { ...run, segments: repaired.segments.map(segment => !changedIds.has(String(segment.id)) || segment.accepted === true ? segment : {
+      ...segment, result: { ...segment.result, translation: segment.translation, qaScore: null, issues: [], qa: null, aiQa: { status: "not_run", used: false, score: null } }
+    }) };
+    const qa = await retryServerBatchQa(batchId, {
+      loadRun: async () => qaRun, saveRun: async value => { qaRun = value; }, segmentIds: [...changedIds],
+      recheckSegment: body => translateBatchSegment({ ...body, workingTerms: [] }, "/api/qa"),
+      report: ({ completed, total }) => report({ phase: "rechecking", message: `正在复检一致性修订：${completed} / ${total} 段`, percent: 50 + Math.round(completed / Math.max(1, total) * 15), completed, total })
+    });
+    repaired.segments = qaRun.segments;
+    if (qa.failed) failures.push(`${qa.failed} 段一致性修订后的 QA 未完成，可批量重试`);
+  }
   let verification = null;
   if (changedIds.size) {
     report({ phase: "verifying", message: `正在复核统一结果：0 片`, percent: 70, completed: 0, total: 1 });

@@ -42,12 +42,19 @@ test("全文尚未翻完时 QA 补试不触发整批检查，终轮及翻译失�
   }
 });
 
-for (const mode of ["success", "partial", "throw"]) {
+for (const mode of ["success", "partial", "throw", "qa-failure"]) {
 test(`一致性修复后的复核结果必须传递到报告和后台任务：${mode}`, async () => {
-  const failure = "人工风格指南尚未成功查阅";
+  const failure = mode === "qa-failure" ? "2 段一致性修订后的 QA 未完成，可批量重试" : "人工风格指南尚未成功查阅";
   let saved, task;
+  const checked = [];
   const working = { source: "より", target: "关系", working: true };
-  const run = { batchId: "verify", runnerOptions: { workingGlossary: { terms: [working] } }, segments: [{ id: "s1", source: "原文", translation: "译文", status: "done", result: { matches: [{ term: working, mode: "exact" }] } }] };
+  const prior = { translation: "旧译文", qaScore: 98, issues: [{ message: "旧稿意见" }], aiQa: { status: "passed", used: true, score: 98 } };
+  const run = { batchId: "verify", runnerOptions: { workingGlossary: { terms: [working] } }, segments: [
+    { id: "s1", source: "原文", translation: "译文", status: "done", result: { ...prior, matches: [{ term: working, mode: "exact" }] } },
+    { id: "legacy", source: "第二句", translation: "历史修正稿", status: "done", result: { ...prior } },
+    { id: "unchanged", source: "第三句", translation: "旧译文", status: "done", result: { ...prior } },
+    { id: "human", source: "第四句", translation: "人工终稿", status: "done", accepted: true, result: { ...prior } }
+  ] };
   const context = vm.createContext({
     getBatchRun: async () => saved || run, saveBatchRun: async (value) => { saved = value; },
     taskProgressReporter: () => () => {}, getProviderConfig: () => ({}), getProjectAssets: async () => ({ assets: {} }),
@@ -59,6 +66,13 @@ test(`一致性修复后的复核结果必须传递到报告和后台任务：${
     runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 1, mergeConsistencyFindings: () => [],
     applyConsistencyRepairs: async ({ segments }) => ({ segments, repair: { changed: [{ segmentId: "s1" }] } }),
     adjudicateRemainingFindings: async ({ segments }) => ({ segments }),
+    retryServerBatchQa,
+    translateBatchSegment: async (body, path) => {
+      assert.equal(path, "/api/qa"); checked.push(body.segmentId);
+      assert.equal(body.workingTerms.length, 0, "machine candidates cannot override the repaired text during QA");
+      if (mode === "qa-failure") throw new Error("connection failed");
+      return { translation: body.translation, qaScore: 99, issues: [], aiQa: { status: "passed", used: true, score: 99, fallbackReason: "" } };
+    },
     recheckConsistencyChunks: async () => {
       if (mode === "throw") throw new Error(failure);
       return { checkedChunks: 1, remaining: [], failures: mode === "partial" ? [failure] : [] };
@@ -74,6 +88,15 @@ test(`一致性修复后的复核结果必须传递到报告和后台任务：${
   assert.equal(saved.qualityReport.warning, mode === "success" ? "" : failure);
   assert.equal(task.status, mode === "success" ? "completed" : "needs_attention");
   if (mode !== "success") assert.match(task.progress.message, /未完整完成/);
+  assert.deepEqual(checked, ["s1", "legacy"], "new and historical repaired texts need QA; unchanged and human finals do not");
+  for (const segment of saved.segments.slice(0, 2)) {
+    assert.equal(segment.result.translation, segment.translation);
+    assert.equal(segment.result.qaScore, mode === "qa-failure" ? null : 99);
+    assert.equal(segment.result.issues.length, 0, "old QA findings must not be shown for the new text");
+    assert.equal(isIncompleteBatchQa(segment), mode === "qa-failure");
+  }
+  assert.equal(saved.segments[2].result.qaScore, 98);
+  assert.equal(saved.segments[3].accepted, true);
 });
 }
 
