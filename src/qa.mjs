@@ -30,6 +30,7 @@ export function runQa({ source, translation, matches = [], translationReferences
   }
   for (const match of matches) {
     const { term, mode = "exact", matchPhrase, caseMismatch = false } = match;
+    if (term.working) continue; // 文件候选不能触发正式术语裁决或硬约束。
     // 保留原文的术语期望的是原文形态本身；区分大小写的术语按原样比对，不做大小写折叠。
     const caseSensitive = match.caseSensitive ?? Boolean(term.caseSensitive);
     const preserveOriginal = match.preserveOriginal ?? Boolean(term.preserveOriginal);

@@ -78,6 +78,19 @@ test("QA 再次失败保留译文并报告未完成，不能误报通过", async
   assert.equal(progress.at(-1).failed, 1);
 });
 
+test("手动修改后 not_run 的译文可单独补做 QA", async () => {
+  const { retryServerBatchQa } = await import("../src/batch-runner.mjs");
+  const run = fixture();
+  run.segments[1].result.aiQa = { status: "not_run", used: false, score: null };
+  let calls = 0;
+  await retryServerBatchQa(run.batchId, {
+    loadRun: async () => run, saveRun: async value => Object.assign(run, value),
+    recheckSegment: async body => { calls += 1; return { translation: body.translation, aiQa: { used: true, score: 100, status: "passed", fallbackReason: "" } }; }
+  });
+  assert.equal(calls, 1);
+  assert.equal(run.segments[1].result.aiQa.used, true);
+});
+
 test("未选中、规则检查与低分 QA 不计入执行失败；阶段进度及旧报告可区分", async () => {
   const { summarizeBatchSegments, buildBatchWorkflow } = await import("../public/batch-status.js");
   const run = fixture();

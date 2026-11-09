@@ -9,6 +9,19 @@ function fixture() {
   };
 }
 
+test("明确带说话人的原文不因语境档案误标 UI 而跳过独立 QA", async () => {
+  const run = fixture();
+  run.contentType = "ui";
+  run.segments = [{ id: "s1", source: "目標確認！", status: "pending", context: { note: "SOURCE_SPEAKER: オペレーター" } },
+    { id: "s2", source: "設定", status: "pending", context: { note: "メニュー" } }];
+  const requests = [];
+  await runServerBatch(run.batchId, {
+    loadRun: async () => run, saveRun: async () => {}, loadProject: async () => ({ settings: {} }), classifyDocument: async () => "ui",
+    translateSegment: async body => { requests.push(body); return { translation: "译文" }; }
+  });
+  assert.deepEqual(requests.map(b => b.segmentPurpose), ["dialogue", "ui"]);
+});
+
 test("初译包含同结构区间的相邻原文，不把机器译文混入消歧上下文", async () => {
   const run = fixture();
   run.segments = Array.from({ length: 12 }, (_, i) => ({ id: `s${i}`, source: `原文${i}`, status: i === 9 ? "pending" : "done", translation: "未核实机器稿", context: { sheet: i < 3 ? "另一表" : "正文" } }));

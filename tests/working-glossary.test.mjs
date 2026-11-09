@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { matchTerms } from "../src/matcher.mjs";
+import { runQa } from "../src/qa.mjs";
 import {
   emptyWorkingGlossary,
   formalTermKeys,
@@ -15,6 +16,13 @@ const formalTerms = [{
   id: "t1", source: "ナビマップ", aliases: [], target: "导览地图",
   forbidden: [], status: "approved", assetTier: "formal", locale: "ja-JP"
 }];
+
+test("工作术语的近似命中不进入正式术语裁决", () => {
+  const match = { mode: "fuzzy", matchPhrase: "チーム隊", term: { source: "チーム３", target: "小队3", working: true } };
+  const projectSettings = { version: 3, qa: { rules: { term_potential: { enabled: true, severity: "warning" } } } };
+  assert.equal(runQa({ source: "チーム隊だ", translation: "是小队", projectSettings, matches: [match] }).some(i => i.type === "potential_term"), false);
+  assert.equal(runQa({ source: "チーム隊だ", translation: "是小队", projectSettings, matches: [{ ...match, term: { ...match.term, working: false } }] }).some(i => i.type === "potential_term"), true);
+});
 
 test("工作术语严格校验：原文/译文逐字子串，主术语库优先", () => {
   const formalKeys = formalTermKeys(formalTerms);

@@ -559,7 +559,7 @@ window.__ModuleLoader__.load({
       const failed = selected.filter((segment) => ["error", "failed"].includes(segment.status)).length, problems = selected.reduce((count, segment) => count + issuesOf(segment).length, 0);
       const locked = editingLocked(run), pending = model.dirty(), id = run.batchId;
       const translated = selected.filter((segment) => segment.status === "done" && segment.translation?.trim());
-      const qaFailed = translated.some((segment) => !segment.accepted && !segment.retryTranslationReason && segment.result?.aiQa?.fallbackReason);
+      const qaFailed = translated.some((segment) => !segment.accepted && !segment.retryTranslationReason && (segment.result?.aiQa?.fallbackReason || segment.result?.aiQa?.status === "not_run"));
       const qa = qaSummary(run, model.view.operations[`qa:${id}`]?.pending);
       const retryFailed = selected.filter((segment) => segment.retryTranslationReason && !segment.accepted).length;
       const brief = run.contextBrief, briefBusy = run.contextBriefPending || model.view.operations[`context-brief:${id}`]?.pending;
@@ -647,7 +647,7 @@ window.__ModuleLoader__.load({
       const [checked, setChecked] = useState([]);
       const locked = editingLocked(run) || run.contextBriefPending || model.view.operations[qaKey]?.pending || model.view.operations.save?.pending || model.view.operations[`retry-translation:${id}`]?.pending || model.view.operations[`retry-qa:${id}`]?.pending;
       const canRetry = (item) => item.selected !== false && !item.accepted;
-      const qaRetryable = (item) => canRetry(item) && !item.retryTranslationReason && item.status === "done" && item.translation?.trim() && item.result?.aiQa?.fallbackReason;
+      const qaRetryable = (item) => canRetry(item) && !item.retryTranslationReason && item.status === "done" && item.translation?.trim() && (item.result?.aiQa?.fallbackReason || item.result?.aiQa?.status === "not_run");
       const checkedIds = checked.filter((id) => run.segments.some((item) => item.id === id && canRetry(item)));
       const checkedQa = run.segments.filter((item) => checkedIds.includes(item.id) && qaRetryable(item)).map((item) => item.id);
       const failedCount = run.segments.filter((item) => canRetry(item) && item.retryTranslationReason).length;

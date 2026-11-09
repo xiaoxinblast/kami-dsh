@@ -160,7 +160,9 @@ export async function runServerBatch(batchId, {
     const position = run.segments.indexOf(segment);
     const context = batchNeighborContext(run, segment);
     // 用途按语境档案的区间继承；档案没覆盖到的段落回落文件级用途。
-    const segmentPurpose = purposeForIndex(brief, position, contentType || "general");
+    let segmentPurpose = purposeForIndex(brief, position, contentType || "general");
+    const speaker = String(segment.context?.note || "").match(/(?:^|[\r\n|])\s*(?:(?:SOURCE|EN)_)?SPEAKER\s*[:：]\s*([^\r\n]+)/iu)?.[1]?.trim();
+    if (["ui", "item_name"].includes(segmentPurpose) && speaker && !/^(?:N\/?A|none|null|-+)$/iu.test(speaker)) segmentPurpose = "dialogue";
     const workingTerms = Array.isArray(run.runnerOptions?.workingGlossary?.terms)
       ? run.runnerOptions.workingGlossary.terms.filter((term) => term?.status !== "rejected")
       : [];

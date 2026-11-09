@@ -1,6 +1,6 @@
 export function isIncompleteBatchQa(segment) {
   return segment.selected !== false && segment.status === "done" && Boolean(String(segment.translation || "").trim())
-    && Boolean(segment.result?.aiQa?.fallbackReason);
+    && (Boolean(segment.result?.aiQa?.fallbackReason) || segment.result?.aiQa?.status === "not_run");
 }
 
 export function summarizeBatchSegments(segments = []) {
