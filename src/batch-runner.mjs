@@ -6,6 +6,9 @@ import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { isIncompleteBatchQa } from "../public/batch-status.js";
 import { translationRetryReason } from "./translation-output.mjs";
+import { microBatchSegments } from "./micro-batch.mjs";
+import { measureStage } from "./performance.mjs";
+import { withRuntimeCall } from "./runtime-context.mjs";
 
 /** 连接层失败自动重试一次：等 2 秒再试，内容层错误不重试。 */
 const SEGMENT_RETRY_DELAY_MS = 2_000;
@@ -34,7 +37,8 @@ function compactResult(result) {
     qualityUpgradeFrom: result.qualityUpgradeFrom || "",
     styleProfile: result.styleProfile ? { id: result.styleProfile.id, name: result.styleProfile.name, version: result.styleProfile.version } : null,
     trajectoryId: result.trajectoryId || "",
-    patternKey: clip(result.patternKey || "", 400)
+    patternKey: clip(result.patternKey || "", 400),
+    ...(result.performance ? { performance: result.performance } : {})
   };
 }
 
@@ -76,10 +80,12 @@ export async function runServerBatch(batchId, {
   loadProject,
   classifyDocument,
   translateSegment,
+  translateGroup = null,
   segmentIds = null,
   loadTermSources = async () => [],
   loadWorkingGlossary = null,
   learnTerms = null,
+  learnGroupTerms = null,
   shouldPause = () => false,
   shouldCancel = () => false,
   touch = () => {},
@@ -117,18 +123,95 @@ export async function runServerBatch(batchId, {
   const checkpoint = createCheckpointWriter({ save: () => saveRun(run) });
   await checkpoint.commit();
 
+  const drafts = new Map(), attemptedGroups = new Set();
+  let pendingTerms = [];
+  const inputFor = (segment) => {
+    const position = run.segments.indexOf(segment);
+    const context = {
+      ...(segment.context || {}),
+      previous: segment.context?.previous || run.segments[position - 1]?.source || "",
+      next: segment.context?.next || run.segments[position + 1]?.source || "",
+      document: run.filename,
+      segmentIndex: position + 1,
+      segmentCount: run.segments.length,
+      entryKey: segment.entryKey || segment.locator?.entryKey || ""
+    };
+    // 用途按语境档案的区间继承；档案没覆盖到的段落回落文件级用途。
+    const segmentPurpose = purposeForIndex(brief, position, contentType || "general");
+    const workingTerms = Array.isArray(run.runnerOptions?.workingGlossary?.terms)
+      ? run.runnerOptions.workingGlossary.terms.filter((term) => term?.status !== "rejected")
+      : [];
+    const patternTerms = [...formalTermSources, ...workingTerms];
+    return {
+      patternKey: buildPatternKey(segment.source, { terms: patternTerms }),
+      body: {
+        projectId: run.projectId,
+        source: segment.source,
+        locale: run.locale,
+        contentType: segmentPurpose,
+        segmentPurpose,
+        domain: run.domain,
+        documentBrief: contextBriefSlice(brief, position, segment.id),
+        neighborContext: context,
+        batchId: run.batchId,
+        segmentId: segment.id,
+        entryId: segment.locator?.unitId || segment.locator?.entryId || segment.context?.entryId || "",
+        entryKey: segment.entryKey || segment.locator?.entryKey || "",
+        sourceFile: run.filename,
+        sourceRow: segment.locator?.row || segment.context?.row || null,
+        previousSource: context.previous,
+        nextSource: context.next,
+        batchReferences: run.segments.slice(0, position).filter(item => item.status === "done" && item.translation && contextBoundary(item) === contextBoundary(segment))
+          .slice(-Math.max(0, Number(tmSettings.contextAnchorCount ?? 5))).map(item => ({ source: item.source, target: item.translation })),
+        patternReferences: selectPatternReferences({ source: segment.source, terms: patternTerms, previous: patternHistory.filter(item => String(item.segmentId) !== String(segment.id)) }),
+        workingTerms,
+        batchGroupEntries: (groupById.get(segment.id) || []).map(item => ({ id: item.id, source: item.source, context: item.context })),
+        qualityTier: options.qualityTier || "auto",
+        reflect: options.reflect !== false,
+        useModelClassification: false
+      }
+    };
+  };
+  const applyLearned = (learned, segment) => {
+    if (!Array.isArray(learned) || !learned.length) return;
+    const glossary = run.runnerOptions?.workingGlossary || emptyWorkingGlossary({ batchId: run.batchId, filename: run.filename, locale: run.locale });
+    const merged = mergeWorkingTermsIntoGlossary(glossary, learned, { sourceSegmentId: segment.id });
+    run.runnerOptions = { ...run.runnerOptions, workingGlossary: merged };
+    // 新增术语后，已翻段落的骨架会变（术语位置从正文变成遮罩）；只重算含该词的段落。
+    const learnedSources = learned.map(term => String(term.source || "")).filter(Boolean);
+    for (const item of run.segments) {
+      if (retryIds && !retryIds.has(String(item.id))) continue;
+      if (item.status !== "done" || !item.result || !String(item.source || "")) continue;
+      if (!learnedSources.some(source => item.source.includes(source))) continue;
+      item.result = { ...item.result, patternKey: buildPatternKey(item.source, { terms: [...formalTermSources, ...merged.terms] }) };
+    }
+  };
+  const flushGroupTerms = async () => {
+    const segments = pendingTerms;
+    pendingTerms = [];
+    if (!segments.length) return;
+    try {
+      const learned = await withRuntimeCall({ performanceTrace: segments.at(-1).result?.performance }, () => measureStage("workingTerms", () => learnGroupTerms({ run, segments }), { groupSize: segments.length }));
+      applyLearned(learned, segments[0]);
+    } catch (error) {
+      console.warn(`[Kami] 小批工作术语学习失败，已跳过：${error.message}`);
+    }
+  };
+
   for (const subBatch of subBatches) {
     for (const segmentId of subBatch.segmentIds) {
       touch();
       if (shouldCancel()) {
+        await flushGroupTerms();
         // 中断：当前段跑完就停，已完成的段落全部保留，之后可以「继续」接着翻。
         run.runState = "paused";
-        run.runnerOptions = { ...options, cancelled: true };
+        run.runnerOptions = { ...run.runnerOptions, cancelled: true };
         run.subBatches = checkpointSubBatches(subBatches, run.segments);
         await checkpoint.commit();
         return run;
       }
       if (shouldPause()) {
+        await flushGroupTerms();
         run.runState = "paused";
         run.subBatches = checkpointSubBatches(subBatches, run.segments);
         await checkpoint.commit();
@@ -142,23 +225,6 @@ export async function runServerBatch(batchId, {
       // 真正的断点由段落结果那次 commit 保证。
       await checkpoint.mark();
       const position = run.segments.indexOf(segment);
-      // 用途按语境档案的区间继承；档案没覆盖到的段落回落文件级用途。
-      const segmentPurpose = purposeForIndex(brief, position, contentType || "general");
-      const context = {
-        ...(segment.context || {}),
-        previous: segment.context?.previous || run.segments[position - 1]?.source || "",
-        next: segment.context?.next || run.segments[position + 1]?.source || "",
-        document: run.filename,
-        segmentIndex: position + 1,
-        segmentCount: run.segments.length,
-        entryKey: segment.entryKey || segment.locator?.entryKey || ""
-      };
-      const anchorCount = Math.max(0, Number(tmSettings.contextAnchorCount ?? 5));
-      const boundary = contextBoundary(segment);
-      const batchReferences = run.segments.slice(0, position)
-        .filter((item) => item.status === "done" && item.translation && contextBoundary(item) === boundary)
-        .slice(-anchorCount)
-        .map((item) => ({ source: item.source, target: item.translation }));
       // UI 可能在批中改了工作术语；只有外部版本比本进程新时才覆盖，避免把本段刚学到的词冲掉。
       if (loadWorkingGlossary) {
         const external = await Promise.resolve().then(() => loadWorkingGlossary(run)).catch(() => null);
@@ -166,42 +232,28 @@ export async function runServerBatch(batchId, {
           run.runnerOptions = { ...run.runnerOptions, workingGlossary: external };
         }
       }
-      const workingTerms = Array.isArray(run.runnerOptions?.workingGlossary?.terms)
-        ? run.runnerOptions.workingGlossary.terms.filter((term) => term?.status !== "rejected")
-        : [];
-      const patternTerms = [...formalTermSources, ...workingTerms];
-      const patternKey = buildPatternKey(segment.source, { terms: patternTerms });
-      const patternReferences = selectPatternReferences({
-        source: segment.source,
-        terms: patternTerms,
-        previous: patternHistory.filter((item) => String(item.segmentId) !== String(segment.id))
-      });
+      let groupFallback = null;
       try {
-        const translateOnce = () => translateSegment({
-          projectId: run.projectId,
-          source: segment.source,
-          locale: run.locale,
-          contentType: segmentPurpose,
-          segmentPurpose,
-          domain: run.domain,
-          documentBrief: contextBriefSlice(brief, position, segment.id),
-          neighborContext: context,
-          batchId: run.batchId,
-          segmentId: segment.id,
-          entryId: segment.locator?.unitId || segment.locator?.entryId || segment.context?.entryId || "",
-          entryKey: segment.entryKey || segment.locator?.entryKey || "",
-          sourceFile: run.filename,
-          sourceRow: segment.locator?.row || segment.context?.row || null,
-          previousSource: context.previous,
-          nextSource: context.next,
-          batchReferences,
-          patternReferences,
-          workingTerms,
-          batchGroupEntries: (groupById.get(segment.id) || []).map((item) => ({ id: item.id, source: item.source, context: item.context })),
-          qualityTier: options.qualityTier || "auto",
-          reflect: options.reflect !== false,
-          useModelClassification: false
-        });
+        if (translateGroup && !attemptedGroups.has(segment.id)) {
+          const candidates = microBatchSegments(run.segments, position, (_, index) => purposeForIndex(brief, index, contentType || "general"));
+          const stop = candidates.findIndex(item => !subBatch.segmentIds.includes(item.id) || (retryIds && !retryIds.has(String(item.id))) || attemptedGroups.has(item.id));
+          const group = stop < 0 ? candidates : candidates.slice(0, stop);
+          if (group.length > 1) {
+            group.forEach(item => attemptedGroups.add(item.id));
+            const groupStarted = Date.now();
+            try {
+              const generated = await translateGroup(group.map(item => inputFor(item).body));
+              if (generated?.length === group.length && group.every(item => generated.some(draft => draft.id === item.id && draft.source === item.source))) {
+                generated.forEach(draft => drafts.set(draft.id, draft));
+              }
+            } catch (error) {
+              console.warn(`[Kami] 小批翻译失败，退回逐段流程：${error.message}`);
+            }
+            if (!drafts.has(segment.id)) groupFallback = { stage: "microBatchAttempt", startedAt: new Date(groupStarted).toISOString(), durationMs: Date.now() - groupStarted, status: "fallback", groupSize: group.length };
+          }
+        }
+        const { body, patternKey } = inputFor(segment);
+        const translateOnce = () => translateSegment(body, { draft: drafts.get(segment.id) || null });
         // 连接层失败（网络抖动 / 模型 502-504）先自动重试一次再判失败；
         // 内容层错误（空译文、格式、校验）不重试，避免白花模型额度。
         const result = await retryTransient(translateOnce, {
@@ -211,27 +263,20 @@ export async function runServerBatch(batchId, {
         });
         segment.translation = result.translation;
         segment.result = compactResult({ ...result, patternKey });
+        if (groupFallback) {
+          segment.result.performance ||= { version: 1, events: [] };
+          segment.result.performance.events.push(groupFallback);
+        }
         segment.status = "done";
         segment.accepted = false;
         // 本段翻完立刻学本文件术语：下一次请求就能用上；失败不影响本段。
-        if (learnTerms) {
+        // 小批初译已共享组内上下文，统一在本组最终译文保存后学习，供下一组使用。
+        if (drafts.has(segment.id) && learnGroupTerms) {
+          pendingTerms.push(segment);
+        } else if (learnTerms) {
           try {
-            const learned = await learnTerms({ run, segment, translation: segment.translation });
-            if (Array.isArray(learned) && learned.length) {
-              const glossary = run.runnerOptions?.workingGlossary
-                || emptyWorkingGlossary({ batchId: run.batchId, filename: run.filename, locale: run.locale });
-              const merged = mergeWorkingTermsIntoGlossary(glossary, learned, { sourceSegmentId: segment.id });
-              run.runnerOptions = { ...run.runnerOptions, workingGlossary: merged };
-              // 新增术语后，已翻段落的骨架会变（术语位置从正文变成遮罩）；只重算含该词的段落。
-              const learnedSources = learned.map((term) => String(term.source || "")).filter(Boolean);
-              const refreshedTerms = [...formalTermSources, ...merged.terms];
-              for (const item of run.segments) {
-                if (retryIds && !retryIds.has(String(item.id))) continue;
-                if (item.status !== "done" || !item.result || !String(item.source || "")) continue;
-                if (!learnedSources.some((source) => item.source.includes(source))) continue;
-                item.result = { ...item.result, patternKey: buildPatternKey(item.source, { terms: refreshedTerms }) };
-              }
-            }
+            const learned = await withRuntimeCall({ performanceTrace: segment.result?.performance }, () => measureStage("workingTerms", () => learnTerms({ run, segment, translation: segment.translation })));
+            applyLearned(learned, segment);
           } catch (error) {
             console.warn(`[Kami] 第 ${position + 1} 段工作术语学习失败，已跳过：${error.message}`);
           }
@@ -240,9 +285,12 @@ export async function runServerBatch(batchId, {
       } catch (error) {
         segment.status = "error";
         segment.error = String(error?.message || error);
+        if (error.performance) segment.result = { ...segment.result, performance: error.performance };
       }
+      drafts.delete(segment.id);
+      if (!drafts.size) await flushGroupTerms();
       run.subBatches = checkpointSubBatches(subBatches, run.segments);
-      await checkpoint.commit();
+      await withRuntimeCall({ performanceTrace: segment.result?.performance }, () => measureStage("save", () => checkpoint.commit()));
     }
   }
 

@@ -67,7 +67,7 @@ test("中断：跑批循环在分块边界停下，任务标成可继续而不�
   assert.match(server, /const cancelled = isCancellation\(error\);/u);
   // 批次：中断用 runnerOptions.cancelled 标记（run_state 只有库里允许的取值）
   const runner = await read("../src/batch-runner.mjs");
-  assert.match(runner, /run\.runState = "paused";\s*\n\s*run\.runnerOptions = \{ \.\.\.options, cancelled: true \};/u);
+  assert.match(runner, /run\.runState = "paused";\s*\n\s*run\.runnerOptions = \{ \.\.\.run\.runnerOptions, cancelled: true \};/u);
   assert.match(server, /shouldCancel: \(\) => controller\.cancelRequested/u);
   assert.match(server, /worker\.cancelRequested = true;/u);
 });

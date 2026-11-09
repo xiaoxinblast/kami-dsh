@@ -69,6 +69,18 @@ function budgetAdapter(responses, { defaultMaxTokens = 32000, prepare = (config)
 const budgetMessages = [{ role: "user", content: "检查译文" }];
 const budgetRoute = { provider: "test", model: "selected-model", reasoningEffort: "high" };
 
+test("performance records the actual prepared model and effort without prompt text", () => budgetFixture(async () => {
+  const trace = { events: [] };
+  const { adapter } = budgetAdapter([{ content: "complete" }], { prepare: config => ({ ...config, model: "actual-model", reasoningEffort: "max" }) });
+  await withRuntimeCall({ performanceTrace: trace, performancePhase: "qa" }, () => adapter(budgetMessages, { route: budgetRoute, requestLabel: "AIQA" }));
+  assert.equal(trace.events.length, 1);
+  assert.equal(trace.events[0].model, "actual-model");
+  assert.equal(trace.events[0].reasoningEffort, "max");
+  assert.equal(trace.events[0].parent, "qa");
+  assert.ok(trace.events[0].durationMs >= 0);
+  assert.equal(JSON.stringify(trace).includes("检查译文"), false);
+}));
+
 test("DSH budgets inherit the session/provider instead of legacy QA and context constants", () => budgetFixture(async () => {
   const { adapter, requests } = budgetAdapter([{ content: "complete" }]);
   await adapter(budgetMessages, { route: { ...budgetRoute, maxTokens: 64000 }, maxTokens: 1800 });

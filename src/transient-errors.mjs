@@ -8,6 +8,7 @@ const TRANSIENT_PATTERNS = [
   /fetch failed/iu,
   /socket hang up/iu,
   /network error/iu,
+  /DeepSeek Messages transport failed/iu,
   /ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|UND_ERR_/iu,
   /返回 (?:500|502|503|504)/u,
   /服务暂时不可用|Service Unavailable/u

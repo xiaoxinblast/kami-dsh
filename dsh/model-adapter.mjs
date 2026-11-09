@@ -1,4 +1,5 @@
 import { getSettings } from "../src/settings-store.mjs";
+import { measureStage } from "../src/performance.mjs";
 
 export function sessionModelRoute(ctx, agent) {
   const selected = agent?.model?.current?.();
@@ -44,8 +45,10 @@ export function createModelAdapter(ctx, llm) {
       if (truncated && !(maxTokens > truncated.details.maxTokens)) break;
       const assembler = new llm.BlockAssembler();
       try {
-        for await (const chunk of prepared.stream({ ...prepared.config, messages: converted, ...(tools.length ? { tools } : {}), signal })) assembler.push(chunk);
-        signal.throwIfAborted();
+        await measureStage("model", async () => {
+          for await (const chunk of prepared.stream({ ...prepared.config, messages: converted, ...(tools.length ? { tools } : {}), signal })) assembler.push(chunk);
+          signal.throwIfAborted();
+        }, { requestLabel: label, provider: prepared.config.provider, model: prepared.config.model, reasoningEffort: prepared.config.reasoningEffort, maxTokens, attempt: attempt + 1 });
       } catch (error) {
         if (signal.aborted) throw new Error(`${label}${options.signal?.aborted ? "已取消" : `超过 ${Math.round((options.timeoutMs || 120_000) / 1000)} 秒，调用超时`}（${prepared.config.model}，输出上限 ${maxTokens ?? "提供商默认"}）`, { cause: error });
         throw error;

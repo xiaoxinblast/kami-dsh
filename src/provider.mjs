@@ -9,6 +9,8 @@ import { parseTermMemoryAlignment, termMemoryMessages } from "./term-memory-surv
 import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
 import { parseModelJsonObject } from "./text.mjs";
 import { translationOutputIssue } from "./translation-output.mjs";
+import { parseMicroBatchTranslations } from "./micro-batch.mjs";
+import { measureStage } from "./performance.mjs";
 
 const loadedProvider = runtimeOptions().embedded ? { config: {}, persistence: { mode: "dsh", persisted: false } } : loadProviderConfig();
 let persistence = loadedProvider.persistence;
@@ -403,7 +405,7 @@ export function contextPackText(contextPack = {}, purpose = "review") {
   return lines.join("\n");
 }
 
-export function packPrompt(contextPack) {
+export function packPrompt(contextPack, { includeStable = true, batch = false } = {}) {
   const pack = projectContextPack(contextPack, "translate");
   const translationSkill = pack.translationSkill;
   const rhymeHint = contextPack.rhymeLike
@@ -415,7 +417,7 @@ export function packPrompt(contextPack) {
   const batchReferenceHint = contextPack.batchReferences?.length
     ? `本批已定稿译文（必须保持句式与风格完全一致，可参考其用词与语气）：${JSON.stringify(contextPack.batchReferences)}\n`
     : "";
-  const batchGroupHint = contextPack.batchGroupEntries?.length
+  const batchGroupHint = !batch && contextPack.batchGroupEntries?.length
     ? `当前文件条目联译组（仅用于理解同组上下文；输出仍然只能是当前原文对应的译文）：${JSON.stringify(contextPack.batchGroupEntries)}\n`
     : "";
   const localeExamples = LOCALES[contextPack.targetLocale]?.localizationExamples || [];
@@ -468,7 +470,7 @@ export function packPrompt(contextPack) {
   if (batchReferenceHint) variable.push(batchReferenceHint.trim());
   if (batchGroupHint) variable.push(batchGroupHint.trim());
   if (rhymeHint) variable.push(rhymeHint.trim());
-  return `${[...stable, ...variable].join("\n\n")}\n\n当前原文：\n${pack.source}`;
+  return `${[...(includeStable ? stable : []), ...variable].join("\n\n")}\n\n当前原文：\n${pack.source}`;
 }
 
 /**
@@ -915,7 +917,7 @@ export async function chatWithTools(messages, config = runtimeConfig, {
     }
     conversation.push({ role: "assistant", content: message.content || "", tool_calls: calls });
     for (const call of calls) {
-      const result = await executeTool({ name: call.function.name, arguments: call.function.arguments });
+      const result = await measureStage("referenceTool", () => executeTool({ name: call.function.name, arguments: call.function.arguments }), { tool: call.function.name, round });
       toolResults.push(result);
       conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || ""), ...(result?.nativeContent ? { nativeContent: result.nativeContent } : {}), ...(result?.nativeIsError ? { nativeIsError: true } : {}) });
       onActivity?.({ tool: call.function.name, refs: result?.refs?.length ?? 0 });
@@ -2219,8 +2221,8 @@ export async function surveyTermsWithModel({ filename = "", locale = "zh-CN", pu
  * 不做术语猜测：source/target 必须由调用方再校验为原文/译文逐字子串；模型只负责
  * 指出"这里有个词值得统一，以及本次实际用了什么译法"。失败返回空数组，不拖垮翻译。
  */
-export async function learnWorkingTermsWithModel({ source = "", translation = "", existingTerms = [], workingTerms = [], filename = "", locale = "zh-CN", purpose = "general", onUsage = null } = {}) {
-  if (!String(source || "").trim() || !String(translation || "").trim()) return [];
+export async function learnWorkingTermsWithModel({ source = "", translation = "", entries = null, existingTerms = [], workingTerms = [], filename = "", locale = "zh-CN", purpose = "general", onUsage = null } = {}) {
+  if (!entries?.length && (!String(source || "").trim() || !String(translation || "").trim())) return [];
   const known = (Array.isArray(existingTerms) ? existingTerms : []).slice(0, 80).map((term) => ({
     source: String(term?.source || "").trim(),
     target: String(term?.target || "").trim(),
@@ -2237,7 +2239,8 @@ export async function learnWorkingTermsWithModel({ source = "", translation = ""
         "source 必须是原文里的逐字子串；target 必须是本次译文里的逐字子串。不要改写、不要补全、不要输出句子。",
         "主术语库已有的源词不要重复报告（见 existingTerms）；工作术语表已有的也不要重复（见 workingTerms）。",
         "只报告有把握的；每段最多 5 条。没有就返回空数组。",
-        `只输出严格 JSON：{"terms":[{"source":"","target":"","confidence":0.9,"reason":"为什么值得统一"}]}。目标语言：${locale}。`
+        `只输出严格 JSON：{"terms":[{"source":"","target":"","confidence":0.9,"reason":"为什么值得统一"}]}。目标语言：${locale}。`,
+        ...(entries ? ["本次包含多条原文/译文。每条术语必须额外返回 sourceSegmentId，严格等于其来源条目的 id；source 和 target 必须出自同一条目，不得跨条目拼接。每条原文最多 5 个术语。"] : [])
       ].join("\n")
     },
     {
@@ -2247,6 +2250,7 @@ export async function learnWorkingTermsWithModel({ source = "", translation = ""
         purpose: purpose || "general",
         source: String(source),
         translation: String(translation),
+        ...(entries ? { entries } : {}),
         existingTerms: known,
         workingTerms: learned
       })
@@ -2256,7 +2260,7 @@ export async function learnWorkingTermsWithModel({ source = "", translation = ""
     const content = await chat(messages, configForRole("fast", runtimeConfig.fastModel || runtimeConfig.mtModel || runtimeConfig.model), {
       temperature: 0.1,
       timeoutMs: 45_000,
-      maxTokens: 800,
+      maxTokens: entries ? 2400 : 800,
       requestLabel: "工作术语学习",
       responseFormat: { type: "json_object" },
       onUsage
@@ -2428,6 +2432,20 @@ async function chooseTranslationCandidate(contextPack, candidates, config, onUsa
  * 执行由服务端风险路由器选定的翻译路线。routePlan 由服务端生成，浏览器
  * 只能请求策略名称，不能把任意模型或密钥注入模型调用。
  */
+export async function translateMicroBatchWithModel(entries, { routePlan, toolRunner = null } = {}) {
+  const messages = [
+    { role: "system", content: '你是日语到简体中文本地化译者。本次翻译一组连续短句，共享完整指南与上下文，但每条只翻译它自己的原文。指南和硬规则仍全部有效。输出形式改为严格 JSON：{"translations":[{"id":"原样的条目ID","translation":"该条的最终译文"}]}。每个输入 ID 恰好出现一次，不合并、拆分、漏掉或新增条目。translation 只能包含译文本身，不含说明、工具状态或其它条目的正文。' },
+    { role: "user", content: entries.map((entry, index) => `条目 ID：${entry.id}\n${packPrompt(entry.contextPack, { includeStable: index === 0, batch: true })}`).join("\n\n---\n\n") }
+  ];
+  const config = configForRole(routePlan?.modelRole, routePlan?.model);
+  const options = { temperature: 0.6, timeoutMs: 75_000, requestLabel: "小批翻译" };
+  const response = toolRunner?.tools?.length
+    ? await chatWithTools(messages, config, { ...options, tools: toolRunner.tools, maxRounds: toolRunner.maxRounds, executeTool: toolRunner.execute, assertReady: toolRunner.assertReady, onActivity: toolRunner.onActivity })
+    : { content: await chat(messages, config, options) };
+  toolRunner?.assertReady?.();
+  return parseMicroBatchTranslations(response.content, entries.map(entry => ({ id: entry.id, source: entry.contextPack.source })));
+}
+
 export async function translateWithRoute(contextPack, { routePlan = null, reflect = true, onUsage = null, toolRunner = null } = {}) {
   const plan = routePlan || { route: "reflective", candidateCount: 1, model: runtimeConfig.model, modelRole: "main" };
   const selectedModel = String(plan.model || runtimeConfig.model);

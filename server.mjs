@@ -1,5 +1,7 @@
 import http from "node:http";
 import { runtimeOptions, withRuntimeCall } from "./src/runtime-context.mjs";
+import { measureStage } from "./src/performance.mjs";
+import { translateMicroBatchWithModel } from "./src/provider.mjs";
 import { mergeWorkspaceMemories, mergeWorkspaceTerms, taskResources, workspaceStyleGuide } from "./src/workspace-resources.mjs";
 import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
@@ -2708,7 +2710,20 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
   return { batchId: body.batchId, imported, skipped, batchLearning, styleProfiles, styleFallbacks, trajectoryLinks, trajectoryMatch: { ambiguous: trajectoryMatch.ambiguous, unmatched: trajectoryMatch.unmatched, alreadyAccepted: trajectoryMatch.alreadyAccepted }, trajectoryLinkFailures, summary, decisions };
 }
 
-async function translateBatchSegment(body, path = "/api/translate") {
+async function translateBatchSegment(body, path = "/api/translate", { draft = null } = {}) {
+  const performance = { version: 1, events: [], ...(draft ? { groupId: draft.groupId, groupSize: draft.groupSize, ...(draft.groupPerformance ? { group: draft.groupPerformance } : {}) } : {}) };
+  return withRuntimeCall({ performanceTrace: performance, translationDraft: draft }, async () => {
+    try {
+      const result = await measureStage("segment", () => dispatchBatchSegment(body, path));
+      return { ...result, performance };
+    } catch (error) {
+      error.performance = performance;
+      throw error;
+    }
+  });
+}
+
+async function dispatchBatchSegment(body, path) {
   const dispatch = runtimeOptions().dispatch;
   if (dispatch) return dispatch({ method: "POST", path, body });
   const response = await fetch(`http://127.0.0.1:${PORT}${path}`, {
@@ -2719,6 +2734,20 @@ async function translateBatchSegment(body, path = "/api/translate") {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `翻译请求失败（${response.status}）`);
   return payload;
+}
+
+async function translateBatchDrafts(requests) {
+  const prepared = [];
+  for (const body of requests) prepared.push(await withRuntimeCall({ prepareTranslation: true }, () => translateBatchSegment(body)));
+  const signature = item => JSON.stringify([item.contextPack.targetLocale, item.contextPack.contentType, item.contextPack.domain, item.contextPack.styleProfile, item.contextPack.userProfile, item.contextPack.translationSkill, item.routing.model, item.routing.modelRole]);
+  if (prepared.some(item => item.contextPack.rhymeLike || item.contextPack.batchVerse?.active || item.routing.reflect || !["direct", "reflective", "fact_guarded"].includes(item.routing.route) || signature(item) !== signature(prepared[0]))) return null;
+  const groupId = randomUUID();
+  const performance = { version: 1, events: prepared.flatMap((item, index) => item.performance.events.map(event => ({ ...event, segmentId: requests[index].segmentId }))) };
+  const drafts = await withRuntimeCall({ performanceTrace: performance }, () => measureStage("translation", () => translateMicroBatchWithModel(prepared.map((item, index) => ({ id: requests[index].segmentId, contextPack: item.contextPack })), {
+    routePlan: prepared[0].routing,
+    toolRunner: buildReferenceToolRunner({ projectId: requests[0].projectId, skill: prepared[0].contextPack.translationSkill })
+  })));
+  return drafts.map((draft, index) => ({ ...draft, projectId: requests[index].projectId, batchId: requests[index].batchId, initial: draft.translation, reflection: "", groupId, groupSize: drafts.length, ...(index === 0 ? { groupPerformance: performance } : {}) }));
 }
 
 /**
@@ -4367,7 +4396,8 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
     },
     loadProject: getProject,
     classifyDocument: async (text) => (await classify({ text, hint: "auto", useModel: true })).contentType,
-    translateSegment: translateBatchSegment,
+    translateSegment: (body, options) => translateBatchSegment(body, "/api/translate", options),
+    translateGroup: runtimeOptions().embedded && runtimeOptions().microBatch !== false ? translateBatchDrafts : null,
     loadTermSources: async (run) => (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [],
     loadWorkingGlossary: async (run) => workingGlossaryOverrides.get(run.batchId) || null,
     learnTerms: async ({ run, segment, translation }) => {
@@ -4388,6 +4418,17 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
         targetText: translation,
         sourceSegmentId: segment.id
       });
+    },
+    learnGroupTerms: async ({ run, segments }) => {
+      if (getSettings().learning.workingTermsEnabled === false) return [];
+      const formalTerms = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [];
+      const raw = await learnWorkingTermsWithModel({
+        entries: segments.map(segment => ({ id: segment.id, source: segment.source, translation: segment.translation })),
+        existingTerms: formalTerms, workingTerms: run.runnerOptions?.workingGlossary?.terms || [], filename: run.filename, locale: run.locale, purpose: run.contentType || "general"
+      });
+      return segments.flatMap(segment => normalizeWorkingTerms(raw.filter(term => term.sourceSegmentId === segment.id), {
+        formalTerms, sourceText: segment.source, targetText: segment.translation, sourceSegmentId: segment.id
+      }).slice(0, 5));
     },
     shouldPause: () => controller.pauseRequested,
     shouldCancel: () => controller.cancelRequested,
@@ -8352,6 +8393,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     return json(res, 200, { chunk: updated });
   }
   if (req.method === "POST" && url.pathname === "/api/translate") {
+    const preparationStarted = Date.now();
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale);
     if (!String(body.source || "").trim()) {
@@ -8542,6 +8584,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
     });
     const tierPlanFor = (tier) => planQualityTier({ tier, purpose: classification.contentType, provider, risk, manualRoute: body.route });
     let routing = tierPlanFor(tierDecision.tier);
+    runtimeOptions().performanceTrace?.events.push({ stage: "preparation", startedAt: new Date(preparationStarted).toISOString(), durationMs: Date.now() - preparationStarted, status: "completed" });
+    if (runtimeOptions().prepareTranslation) return json(res, 200, { contextPack, routing });
     let qualityTier = routing.tier;
     let qualityUpgradeFrom = "";
     const tierStrength = describeTierStrength({ tier: routing.tier, provider });
@@ -8589,15 +8633,17 @@ async function evaluateQaBatch(batchId, projectId = "") {
       const executePlan = async (plan, previousResult = null) => {
         const useModelQa = aiQaEnabled && plan.modelQa;
         const planContext = { ...contextPack, qualityTier: plan.tier };
-        const translationResult = previousResult || await translateWithRoute(planContext, { routePlan: plan, reflect: plan.reflect === true, toolRunner: referenceToolRunner });
+        const draft = runtimeOptions().translationDraft;
+        const trustedDraft = draft && draft.id === body.segmentId && draft.source === body.source && draft.projectId === projectId && draft.batchId === body.batchId ? draft : null;
+        const translationResult = previousResult || trustedDraft || await measureStage("translation", () => translateWithRoute(planContext, { routePlan: plan, reflect: plan.reflect === true, toolRunner: referenceToolRunner }));
         if (useModelQa) {
-          const loop = await runAiQaLoop({
+          const loop = await measureStage("qa", () => runAiQaLoop({
             contextPack: planContext, initialTranslation: translationResult.translation, matches, locale,
             contentType: classification.contentType, domain, batchId: body.batchId || "",
             providedReferences: translationReferences, passScore: Math.max(routedPassScore, plan.tier === "strict" ? 93 : 0),
             maxRevisions: Math.min(maxRevisions, Number.isFinite(plan.maxRevisions) ? plan.maxRevisions : maxRevisions),
             projectSettings, projectId
-          });
+          }));
           return { translation: translationResult, aiQa: loop };
         }
         return {
@@ -8714,7 +8760,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
             referenceUsage: { refs: referenceToolRunner?.refs?.() || [], events: referenceUsages },
             events: [
               { type: "started", at: trajectory.createdAt },
-              { type: "completed", at: new Date().toISOString(), latencyMs: Date.now() - startedAt, aiQaIterations: aiQa.iterations }
+              { type: "completed", at: new Date().toISOString(), latencyMs: Date.now() - startedAt, aiQaIterations: aiQa.iterations, ...(runtimeOptions().performanceTrace ? { performance: runtimeOptions().performanceTrace } : {}) }
             ],
             status: aiQa.status === "review" || qualityRoute.decision === "human_review" ? "review" : "completed",
             error: aiQa.fallbackReason || ""

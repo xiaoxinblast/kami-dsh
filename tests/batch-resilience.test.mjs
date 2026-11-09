@@ -62,6 +62,8 @@ test("连接层失败才重试：内容层错误直接抛出", async () => {
   assert.equal(isTransientConnectionError(new TypeError("fetch failed")), true);
   assert.equal(isTransientConnectionError(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })), true);
   assert.equal(isTransientConnectionError(new Error("模型服务返回 502，请稍后重试")), true);
+  assert.equal(isTransientConnectionError(new Error("翻译：DeepSeek Messages transport failed")), true);
+  assert.equal(isTransientConnectionError(new Error("AIQA：DeepSeek Messages transport failed")), true);
   assert.equal(isTransientConnectionError(new Error("模型没有返回译文（连续两次都是空白输出）")), false);
   assert.equal(isTransientConnectionError(new Error("Directus GET /items/batch_runs 失败（503 Service \"api\" is unavailable. Under pressure.）")), false,
     "我们自己的库报错不在翻译重试范围内");

@@ -11,6 +11,7 @@ import { markedSurveyTerms } from "../src/term-memory-survey.mjs";
 import { normalizeSource } from "../src/text.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
+import { measureStage } from "../src/performance.mjs";
 import { translationRetryReason } from "../src/translation-output.mjs";
 
 const source = (await readFile(new URL("../server.mjs", import.meta.url), "utf8")).replace(/\r\n/gu, "\n");
@@ -151,7 +152,7 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
   const readJsonBody = async (req) => { const chunks = []; for await (const chunk of req) chunks.push(chunk); return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); };
   const json = (res, status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); return true; };
   const context = vm.createContext({
-    withRuntimeCall, translationRetryReason, contextAnalysisTasks: new Map(),
+    withRuntimeCall, measureStage, translationRetryReason, contextAnalysisTasks: new Map(),
     batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchTranslationStarts: new Map(), batchWorkflowWrites: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = structuredClone(value); run.runnerOptions.batchSummary = summarizeBatchSegments(run.segments); },
     getBackgroundTask: async (id) => tasks.get(id),

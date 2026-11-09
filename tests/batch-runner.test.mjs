@@ -9,6 +9,77 @@ function fixture() {
   };
 }
 
+test("小批初译仍逐段 QA 和保存，合并术语供下一组使用", async () => {
+  const run = fixture();
+  run.segments = Array.from({ length: 8 }, (_, i) => ({ id: `s${i}`, source: `原文${i}`, status: "pending" }));
+  const groups = [], singles = [], learned = [], snapshots = [];
+  await runServerBatch(run.batchId, {
+    loadRun: async () => run, saveRun: async value => snapshots.push(structuredClone(value)),
+    loadProject: async () => ({ settings: {} }), classifyDocument: async () => "dialogue",
+    translateGroup: async requests => {
+      groups.push(requests);
+      return requests.map(body => ({ id: body.segmentId, source: body.source, translation: `小批${body.source}` }));
+    },
+    translateSegment: async (body, { draft }) => {
+      singles.push(body.segmentId);
+      assert.ok(draft);
+      return { translation: `${draft.translation}经QA`, aiQa: { used: true, score: 100 } };
+    },
+    learnTerms: () => assert.fail("小批不能逐段调用术语学习"),
+    learnGroupTerms: async ({ segments }) => {
+      learned.push(segments.map(s => s.id));
+      assert.ok(segments.every(s => s.translation.endsWith("经QA")));
+      return [{ source: "原文", target: "原文", sourceSegmentId: segments[0].id }];
+    }
+  });
+  assert.deepEqual(groups.map(g => g.length), [4, 4]);
+  assert.equal(groups[1][0].workingTerms.length, 1);
+  assert.deepEqual(singles, run.segments.map(s => s.id));
+  assert.deepEqual(learned.map(g => g.length), [4, 4]);
+  assert.ok(snapshots.some(s => s.segments.filter(s => s.status === "done").length === 1));
+  assert.ok(run.segments.every(s => s.result.aiQa.used));
+});
+
+test("小批输出失败后每段回到原流程，暂停时只保存已审完的句段", async () => {
+  for (const fail of [true, false]) {
+    const run = fixture(), calls = [], groups = [], learned = [];
+    await runServerBatch(run.batchId, {
+      loadRun: async () => run, saveRun: async () => {}, loadProject: async () => ({ settings: {} }), classifyDocument: async () => "dialogue",
+      translateGroup: async requests => {
+        groups.push(requests);
+        if (fail) throw new Error("invalid_micro_batch");
+        return requests.map(body => ({ id: body.segmentId, source: body.source, translation: "小批初译" }));
+      },
+      translateSegment: async (body, { draft }) => { calls.push(body.segmentId); assert.equal(Boolean(draft), !fail); return { translation: "已审译文" }; },
+      learnGroupTerms: async ({ segments }) => { learned.push(...segments.map(s => s.id)); return []; },
+      shouldPause: () => !fail && calls.length === 1
+    });
+    assert.equal(groups.length, 1);
+    assert.equal(calls.length, fail ? 3 : 1);
+    assert.equal(run.runState, fail ? "completed" : "paused");
+    if (!fail) {
+      assert.deepEqual(learned, [run.segments[0].id]);
+      assert.equal(run.segments[1].status, "pending");
+      assert.equal(run.segments[1].translation, undefined);
+    }
+  }
+});
+
+test("小批中断保存已学到的术语，不用启动时的旧选项覆盖", async () => {
+  const run = fixture();
+  let completed = 0;
+  await runServerBatch(run.batchId, {
+    loadRun: async () => run, saveRun: async () => {}, loadProject: async () => ({ settings: {} }), classifyDocument: async () => "dialogue",
+    translateGroup: async requests => requests.map(body => ({ id: body.segmentId, source: body.source, translation: "译文" })),
+    translateSegment: async () => { completed += 1; return { translation: "译文" }; },
+    learnGroupTerms: async ({ segments }) => [{ source: "原文", target: "译文", sourceSegmentId: segments[0].id }],
+    shouldCancel: () => completed === 1
+  });
+  assert.equal(run.runnerOptions.cancelled, true);
+  assert.equal(run.runnerOptions.workingGlossary.terms[0].sourceSegmentId, "seg-1");
+  assert.equal(run.segments[1].status, "pending");
+});
+
 test("服务端按真实 subBatches 执行，每段结果落盘一次（不再逐段写两遍）", async () => {
   const run = fixture();
   const snapshots = [];
