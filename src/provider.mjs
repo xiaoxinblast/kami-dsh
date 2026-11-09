@@ -2091,7 +2091,7 @@ export async function describeReferenceWithModel({ name = "", kind = "", text = 
 export async function analyzeDocumentContextWithModel({ filename = "", format = "", locale = "zh-CN", declaredPurpose = "", entries = [], part = null, onUsage = null } = {}) {
   const messages = contextBriefMessages({ filename, format, locale, declaredPurpose, entries, part });
   const content = await chat(messages, configForRole("main"), {
-    temperature: 0.2, timeoutMs: 120_000, maxTokens: 8_000, requestLabel: "语境分析", responseFormat: { type: "json_object" }, onUsage
+    temperature: 0.2, timeoutMs: 120_000, maxTokens: 256_000, requestLabel: "语境分析", responseFormat: { type: "json_object" }, onUsage
   });
   try {
     return parseContextBriefPart(content, { entries });
@@ -2102,7 +2102,7 @@ export async function analyzeDocumentContextWithModel({ filename = "", format = 
       { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
       { role: "user", content: "上一个回答不是可解析的严格 JSON。请只重新输出一个紧凑 JSON 对象，字段为 documentType、sections、crossRefs、notes；不要 Markdown、解释或代码围栏。" }
     ], configForRole("main"), {
-      temperature: 0, timeoutMs: 60_000, maxTokens: 8_000, requestLabel: "语境分析格式重试", responseFormat: { type: "json_object" }, onUsage
+      temperature: 0, timeoutMs: 60_000, maxTokens: 256_000, requestLabel: "语境分析格式重试", responseFormat: { type: "json_object" }, onUsage
     });
     try {
       return parseContextBriefPart(retry, { entries });
