@@ -155,11 +155,17 @@ npm pack --dry-run
 
 UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。
 
-### 0.9.13 DSH 0.2.2-rc.1 兼容
+### 0.9.14 修复 DSH 0.2.2-rc.1 预设加载失败
+
+DSH `0.2.2-rc.1` 桌面运行时已移除 `ctx.tools.presentAs()`。旧版 Kami 调用该接口会使预设内部加载失败；插件管理页仍可显示组件运行中，但新建会话菜单会隐藏该预设。具体错误可在“设置 → Agent 预设”查看：`ctx.tools.presentAs is not a function`。
+
+`0.9.14` 在新版运行时注册官方 `NativeToolExecutor`，在仍提供 `presentAs()` 的旧版运行时继续使用原接口。已直接使用本机 DSH `0.2.2-rc.1` 安装包复现旧代码失败，并验证修复后的四个工具注册、原生工具展示、子会话继承和启动版本准入；同组测试也通过 `0.2.1-rc.5` SDK。更新后按插件管理结果正常重启 DSH。
+
+### 0.9.13 DSH 0.2.2-rc.1 模型路由兼容
 
 DSH `0.2.2-rc.1` 新增 Agent 自有模型选择接口，并弃用从 `sessionProjections` 注册表直接读取状态的方式。Kami 优先读取 `agent.model.current()` 获取当前会话实际选择的模型路由，在旧版 DSH 上继续使用投影和请求头回退；因此模型调用不会因注册表投影句柄的变化退回全局默认模型。`engines.dsh` 与四项可选 SDK peer 同步加入 `0.2.2-rc.1`。Session Projection 注册句柄迁移说明见 [DSH 官方升级指南](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/docs/upgrade-guide/v0.2.1-rc.2/session-projection-handles/guide.md)。
 
-本机没有安装或启动 DSH `0.2.2-rc.1` 桌面 Host。隔离的官方 rc.1 SDK 包含 Agent、LLM、Tools、Home Paths 与 Typert Protocol 核心模块，但不含 `dsh-app-boot` 和插件管理器。使用真实 rc.1 模块导入 Kami Host/Agent 插件并执行隔离激活 smoke test，4 个 Agent 工具均注册成功，`agent.model.current()` 路由读取通过；这不等同于完整桌面 Host/profile 验收。真实 rc.5 协议与启动兼容检查器及 rc.1 模型路由单元测试也通过。
+当时未安装或启动 DSH `0.2.2-rc.1` 桌面 Host，验证使用的是隔离 SDK，未覆盖当前桌面包移除 `presentAs()` 后的预设启动行为。`0.9.13` 的模型路由检查不能视为完整桌面 Host/profile 验收；预设加载问题由 `0.9.14` 修复。
 
 Node.js `25.9.0` 下以串行方式运行 `npm test`：1,122 项，1,046 项通过、0 项失败、76 项因环境条件跳过。允许本地回环 mock 服务后，Directus 与模型接口测试通过；完整 rc.1 桌面验收仍需配套 Host。
 

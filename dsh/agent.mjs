@@ -2,8 +2,12 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 
 export const inject = ["tools", "systemPrompt", "kamiWorkbench"];
 
-export function apply(ctx) {
-  ctx.effect(() => ctx.tools.presentAs("native"));
+export async function apply(ctx) {
+  if (typeof ctx.tools.presentAs === "function") ctx.effect(() => ctx.tools.presentAs("native"));
+  else {
+    const { NativeToolExecutor } = await import("@deepseek-ai/dsh-tool-executor-native");
+    ctx.tools.setExecutor(new NativeToolExecutor(ctx));
+  }
   ctx.systemPrompt.section({
     name: "kami-translator",
     order: 50,

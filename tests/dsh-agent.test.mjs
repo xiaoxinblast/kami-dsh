@@ -21,18 +21,26 @@ test("Kami preset keeps its tools visible to child sessions alongside inherited 
     try {
       ctx.tools.register(defineTool({ name: "host_shell", description: "Host test capability", parameters: {}, output: { schema: { type: "json" }, render: () => [] }, execute: async () => ({}) }));
       const source = (await readFile(new URL("../dsh/agent.mjs", import.meta.url), "utf8"))
-        .replace('"@deepseek-ai/dsh-tools"', JSON.stringify(new URL("../../dsh-tools/lib/index.js", sdk).href));
+        .replace('"@deepseek-ai/dsh-tools"', JSON.stringify(new URL("../../dsh-tools/lib/index.js", sdk).href))
+        .replace('"@deepseek-ai/dsh-tool-executor-native"', JSON.stringify(new URL("../../dsh-tool-executor-native/lib/index.js", sdk).href));
       const agent = await import(`data:text/javascript,${encodeURIComponent(source)}`);
-      agent.apply(scope.ctx);
+      await agent.apply(scope.ctx);
+      const assertNative = (scopeKey) => {
+        if (typeof ctx.tools.modeFor === "function") assert.equal(ctx.tools.modeFor(scopeKey), "native");
+        else assert.deepEqual(
+          ctx.tools.selectExecutor(scopeKey).describe(ctx.tools.definitions(scopeKey)).schemas.map((tool) => tool.name).sort(),
+          ["host_shell", "kami_file_import", "kami_help", "kami_workbench", "kami_workspace"]
+        );
+      };
       assert.deepEqual(ctx.tools.schemas(key).map((tool) => tool.name).sort(), ["host_shell", "kami_file_import", "kami_help", "kami_workbench", "kami_workspace"]);
       const sessionKey = {};
       const session = createScope(ctx, sessionKey, { parent: key });
       try {
         assert.deepEqual(ctx.tools.schemas(sessionKey).map((tool) => tool.name).sort(), ["host_shell", "kami_file_import", "kami_help", "kami_workbench", "kami_workspace"]);
-        assert.equal(ctx.tools.modeFor(sessionKey), "native");
+        assertNative(sessionKey);
       } finally { await session.dispose(); }
       assert.deepEqual(ctx.tools.schemas().map((tool) => tool.name), ["host_shell"]);
-      assert.equal(ctx.tools.modeFor(key), "native");
+      assertNative(key);
       await scope.dispose();
       assert.deepEqual(ctx.tools.schemas().map((tool) => tool.name), ["host_shell"]);
       resolveReady();
