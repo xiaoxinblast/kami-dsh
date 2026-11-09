@@ -57,3 +57,25 @@ test("embedded workbench translates and exports a file without HTTP and survives
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("独立 QA 从批次补齐相邻原文，脱离批次时保留调用方上下文", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kami-qa-context-"));
+  const calls = [];
+  const workbench = await createWorkbench({ dataDirectory: directory, modelAdapter: async (messages, options) => {
+    if (options.requestLabel === "AIQA") calls.push(messages.map(m => m.content).join("\n"));
+    return { content: '{"issues":[]}' };
+  } });
+  try {
+    const context = { human: true }, projectId = (await workbench.invoke({ method: "POST", path: "/api/projects", body: { name: "QA 上下文" } }, context)).project.id;
+    const prepared = await workbench.invoke({ method: "POST", path: "/api/batch/prepare", body: { projectId, filename: "context.txt", text: "カードを配る。\nベットだ。\n次の番だ。", locale: "zh-CN" } }, context);
+    const body = { projectId, locale: "zh-CN", contentType: "dialogue", source: "ベットだ。", translation: "下注。", aiQa: true };
+    await workbench.invoke({ method: "POST", path: "/api/qa", body: { ...body, batchId: prepared.batchId } }, context);
+    assert.match(calls.at(-1), /カードを配る。/u);
+    assert.match(calls.at(-1), /次の番だ。/u);
+    await workbench.invoke({ method: "POST", path: "/api/qa", body: { ...body, neighborContext: { note: "调用方提供的原文语境" } } }, context);
+    assert.match(calls.at(-1), /调用方提供的原文语境/u);
+  } finally {
+    await workbench.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

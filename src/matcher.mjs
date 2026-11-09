@@ -1,5 +1,6 @@
 import { expectedTermTarget, filterEffectiveTerms } from "./asset-governance.mjs";
 import { normalizeSource, similarity } from "./text.mjs";
+import { surveyTermApplies } from "./term-memory-survey.mjs";
 
 function scopeBoost(term, contentType, domain) {
   let boost = 0;
@@ -196,6 +197,8 @@ export function matchTerms(text, assets, {
       if (!normalizedVariant) continue;
       const exactPossible = intersects(variant.keys, textBigrams);
       const exactHit = exactPossible && normalizedText.includes(normalizedVariant);
+      // 工作术语尚未核实，不能把较长单词内部的片段作为独立候选传给翻译和 QA。
+      if (term.working && exactHit && !surveyTermApplies(text, variant.raw)) continue;
       const foldedHit = exactPossible && !exactHit
         ? variant.forms.find((form) => form !== normalizedVariant && textForms.some((textForm) => textForm.includes(form)))
         : undefined;

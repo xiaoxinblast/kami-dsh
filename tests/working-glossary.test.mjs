@@ -49,3 +49,20 @@ test("合并后的工作术语能被 matchTerms 命中，且主库同源词不�
   assert.equal(matches.find((match) => match.term.source === "プレミアムパス")?.working, true);
   assert.equal(matches.find((match) => match.term.source === "ナビマップ")?.term.target, "导览地图");
 });
+
+test("工作术语不命中未登记的长单词内部，正式术语保留原匹配规则", () => {
+  const assets = mergeWorkingAssets({ locale: "zh-CN", terms: [] }, { terms: [
+    { source: "ミナ", target: "米娜", aliases: ["カイ"] },
+    { source: "STAR", target: "星星" }
+  ] });
+  for (const exactOnly of [false, true]) {
+    for (const source of ["ミナミへ進め", "カイザーだ", "START now", "ミナとミナミへ進め"]) {
+      assert.deepEqual(matchTerms(source, assets, { exactOnly }), [], source);
+    }
+    for (const source of ["ミナ、進め", "カイは進め", "STAR now"]) {
+      assert.equal(matchTerms(source, assets, { exactOnly }).length, 1, source);
+    }
+  }
+  const formal = { locale: "zh-CN", terms: [{ ...assets.terms[0], working: false }] };
+  assert.equal(matchTerms("ミナミへ進め", formal, { exactOnly: true }).length, 1);
+});

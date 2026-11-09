@@ -65,7 +65,7 @@ import { checkFactSchema, detectDeliveryContext, extractFactSchema } from "./src
 import { applyProjectQaPolicy, projectRuleMetadata } from "./src/project-config.mjs";
 import { assessTranslationRisk, decideQualityRoute, qualityThresholdForRisk, selectTranslationRoute, TRANSLATION_ROUTES } from "./src/translation-routing.mjs";
 import { QUALITY_TIERS, describeTierStrength, planQualityTier, resolveManualTier, selectQualityTier } from "./src/quality-tier.mjs";
-import { CONTEXT_BRIEF_MIN_SEGMENTS, contextBriefEntries, mergeContextBrief, purposeForIndex, splitContextChunks, summarizeContextBrief } from "./src/context-brief.mjs";
+import { CONTEXT_BRIEF_MIN_SEGMENTS, contextBriefEntries, contextBriefSlice, mergeContextBrief, purposeForIndex, splitContextChunks, summarizeContextBrief } from "./src/context-brief.mjs";
 import { CONSISTENCY_EVIDENCE_LIMITS, buildQualityReport, deterministicConsistencyFindings, mergeConsistencyFindings, splitConsistencyChunks } from "./src/consistency-check.mjs";
 import { REPAIR_EVIDENCE_LABELS, REPAIR_SKIP_REASONS, applyDeterministicReplacement, planConsistencyRepairs, summarizeSourceGroups } from "./src/consistency-repair.mjs";
 import { digitSequence, extractProtectedTokens, normalizeSource } from "./src/text.mjs";
@@ -82,7 +82,7 @@ import { advanceTrainingRun, buildTrainingManifest, canTransition, createTrainin
 import { WorkbenchSessionMonitor, shutdownDockerDesktop } from "./src/workbench-lifecycle.mjs";
 import { BACKGROUND_TASK_STALE_MS, interruptedTaskPatch, selectStaleRunningTasks } from "./src/background-task-sweep.mjs";
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
-import { runServerBatch, retryServerBatchQa } from "./src/batch-runner.mjs";
+import { runServerBatch, retryServerBatchQa, batchNeighborContext } from "./src/batch-runner.mjs";
 import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows } from "./public/batch-status.js";
 import { translationRetryReason } from "./src/translation-output.mjs";
 
@@ -7732,8 +7732,13 @@ async function apiHandler(req, res, url) {
     const styleProfile = await getProjectStyleProfile(locale, { projectId });
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project: projectId }));
     const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { projectId, contentType, domain, limit: -1, scopeFallback: true }), { limit: 3, queryEmbedding: await embedSource(body.source || ""), contentType, domain });
+    const batch = body.batchId ? await getBatchRun(body.batchId) : null;
+    const candidates = batch?.projectId === body.projectId ? batch.segments.filter(segment => segment.source === body.source && (!body.segmentId || segment.id === body.segmentId)) : [];
+    const segment = candidates.length === 1 ? candidates[0] : null;
     const contextPack = buildContextPack({
-      titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance });
+      titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance,
+      neighborContext: segment ? batchNeighborContext(batch, segment) : body.neighborContext,
+      documentBrief: segment ? contextBriefSlice(batch.contextBrief, batch.segments.indexOf(segment), segment.id) : body.documentBrief });
     const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", projectSettings, projectId: body.projectId || "" });
     return json(res, 200, { matches, translation: aiQa.translation, issues: aiQa.issues, qaScore: aiQa.score, aiQa, styleProfile: contextPack.styleProfile });
   }

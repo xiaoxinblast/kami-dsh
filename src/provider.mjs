@@ -331,7 +331,8 @@ export function projectContextPack(contextPack = {}, purpose = "translate") {
     } : null,
     requiredTerms: contextPack.requiredTerms || [],
     preferredTerms: contextPack.preferredTerms || [],
-    workingTerms: contextPack.workingTerms || [],
+    // 独立审校及修订只按原文、正式资产判断，不能拿机器自学候选反证正确译文。
+    workingTerms: ["review", "revise"].includes(purpose) ? [] : contextPack.workingTerms || [],
     patternReferences: contextPack.patternReferences || [],
     protectedTokens: contextPack.protectedTokens || [],
     factSchema: contextPack.factSchema || null,

@@ -9,6 +9,44 @@ function fixture() {
   };
 }
 
+test("初译包含同结构区间的相邻原文，不把机器译文混入消歧上下文", async () => {
+  const run = fixture();
+  run.segments = Array.from({ length: 12 }, (_, i) => ({ id: `s${i}`, source: `原文${i}`, status: i === 9 ? "pending" : "done", translation: "未核实机器稿", context: { sheet: i < 3 ? "另一表" : "正文" } }));
+  await runServerBatch(run.batchId, {
+    loadRun: async () => run, saveRun: async () => {}, loadProject: async () => ({ settings: {} }), classifyDocument: async () => "dialogue",
+    segmentIds: ["s9"], translateSegment: async body => {
+      assert.match(body.neighborContext.note, /原文3/u);
+      assert.match(body.neighborContext.note, /原文11/u);
+      assert.doesNotMatch(body.neighborContext.note, /原文2|未核实机器稿/u);
+      assert.equal(body.previousSource, "原文8");
+      return { translation: "译文" };
+    }
+  });
+  assert.equal(run.segments[9].status, "done", run.segments[9].error);
+});
+
+test("重译使本段自学的旧工作术语失效，保留人工、其他段及已核实 TM 术语", async () => {
+  const run = fixture();
+  run.runnerOptions = { workingGlossary: { revision: 2, terms: [
+    { source: "ベット", target: "贝特", origin: "segment-learn", sourceSegmentId: "seg-1" },
+    { source: "人名", target: "人名", origin: "manual", sourceSegmentId: "seg-1" },
+    { source: "他段", target: "他段", origin: "segment-learn", sourceSegmentId: "seg-2" },
+    { source: "用語", target: "术语", origin: "segment-learn", sourceSegmentId: "seg-1", tm: { status: "matched", role: "master", target: "术语", evidence: [{ role: "master", source: "用語", translation: "术语", target: "术语" }] } }
+  ] } };
+  const result = await runServerBatch(run.batchId, {
+    loadRun: async () => run, saveRun: async () => {}, loadProject: async () => ({ settings: {} }), classifyDocument: async () => "dialogue",
+    segmentIds: ["seg-1"],
+    translateSegment: async body => {
+      assert.deepEqual(body.workingTerms.map(t => t.source), ["人名", "他段", "用語"]);
+      return { translation: "下注", issues: [] };
+    },
+    learnTerms: async () => [{ source: "ベット", target: "下注", origin: "segment-learn", sourceSegmentId: "seg-1" }]
+  });
+  assert.equal(result.segments[0].status, "done");
+  assert.equal(result.runnerOptions.workingGlossary.terms.find(t => t.source === "ベット").target, "下注");
+  assert.ok(result.runnerOptions.workingGlossary.revision > 2);
+});
+
 test("小批初译仍逐段 QA 和保存，合并术语供下一组使用", async () => {
   const run = fixture();
   run.segments = Array.from({ length: 8 }, (_, i) => ({ id: `s${i}`, source: `原文${i}`, status: "pending" }));

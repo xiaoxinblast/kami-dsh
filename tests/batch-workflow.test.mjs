@@ -51,6 +51,7 @@ test("QA 重试只处理未完成 QA，保存修订并保留成功段与翻译�
   });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].source, "b");
+  assert.equal(requests[0].segmentId, run.segments[1].id, "重复原文须用句段 ID 取回对应语境");
   assert.equal(requests[0].translation, "乙");
   assert.equal(requests[0].aiQa, true);
   assert.equal(run.segments[1].translation, "乙（修订）");

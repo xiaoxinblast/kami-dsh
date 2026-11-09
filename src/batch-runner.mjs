@@ -4,6 +4,7 @@ import { createCheckpointWriter } from "./checkpoint-writer.mjs";
 import { isTransientConnectionError, retryTransient } from "./transient-errors.mjs";
 import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
+import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
 import { isIncompleteBatchQa } from "../public/batch-status.js";
 import { translationRetryReason } from "./translation-output.mjs";
 import { microBatchSegments } from "./micro-batch.mjs";
@@ -44,6 +45,29 @@ function compactResult(result) {
 
 function contextBoundary(segment = {}) {
   return `${segment.locator?.type || ""}\u0000${segment.locator?.sheet || segment.context?.sheet || ""}`;
+}
+
+/** 保留邻近原文以消解跨句比喻；不把先前机器译文当作语义依据。 */
+export function batchNeighborContext(run, segment) {
+  const position = run.segments.indexOf(segment), boundary = contextBoundary(segment);
+  const nearby = [];
+  for (const direction of [-1, 1]) {
+    const items = [];
+    for (let offset = 1; offset <= (direction < 0 ? 8 : 4); offset += 1) {
+      const index = position + direction * offset, item = run.segments[index];
+      if (!item || contextBoundary(item) !== boundary) break;
+      items.push({ index, source: String(item.source || "").slice(0, 300) });
+    }
+    nearby.push(...items);
+  }
+  return {
+    ...(segment.context || {}),
+    previous: segment.context?.previous || run.segments[position - 1]?.source || "",
+    next: segment.context?.next || run.segments[position + 1]?.source || "",
+    document: run.filename, segmentIndex: position + 1, segmentCount: run.segments.length,
+    note: [segment.context?.note, nearby.length ? `相邻原文（只用于消歧）：\n${nearby.sort((a, b) => a.index - b.index).map(item => `#${item.index + 1} ${item.source}`).join("\n")}` : ""].filter(Boolean).join("\n"),
+    entryKey: segment.entryKey || segment.locator?.entryKey || ""
+  };
 }
 
 function executionGroups(segments, settings, segmentationMode) {
@@ -105,6 +129,13 @@ export async function runServerBatch(batchId, {
   const tmSettings = project.settings?.tm || {};
   const retryIds = segmentIds ? new Set(segmentIds.map(String)) : null;
   const selected = (run.segments || []).filter((segment) => segment.selected !== false && (!retryIds || retryIds.has(String(segment.id))));
+  // 重译不能拿本段旧机器稿自学的译法证明自己；撤下旧候选，再从本次结果学习。
+  const glossary = run.runnerOptions?.workingGlossary;
+  if (retryIds && Array.isArray(glossary?.terms)) {
+    const retrySources = new Set(selected.filter(segment => segment.status !== "done").map(segment => String(segment.id)));
+    const terms = glossary.terms.filter(term => term.origin !== "segment-learn" || !retrySources.has(String(term.sourceSegmentId)) || verifiedSurveyMemory(term));
+    if (terms.length !== glossary.terms.length) run.runnerOptions = { ...run.runnerOptions, workingGlossary: { ...glossary, terms, revision: (Number(glossary.revision) || 0) + 1 } };
+  }
   // 语境档案已经给出整份文件的用途时直接用它；没有档案才退回"读前 8000 字判一次"。
   const brief = run.contextBrief && run.contextBrief.status === "ready" ? run.contextBrief : null;
   const declaredContentType = String(run.contentType || "general");
@@ -127,15 +158,7 @@ export async function runServerBatch(batchId, {
   let pendingTerms = [];
   const inputFor = (segment) => {
     const position = run.segments.indexOf(segment);
-    const context = {
-      ...(segment.context || {}),
-      previous: segment.context?.previous || run.segments[position - 1]?.source || "",
-      next: segment.context?.next || run.segments[position + 1]?.source || "",
-      document: run.filename,
-      segmentIndex: position + 1,
-      segmentCount: run.segments.length,
-      entryKey: segment.entryKey || segment.locator?.entryKey || ""
-    };
+    const context = batchNeighborContext(run, segment);
     // 用途按语境档案的区间继承；档案没覆盖到的段落回落文件级用途。
     const segmentPurpose = purposeForIndex(brief, position, contentType || "general");
     const workingTerms = Array.isArray(run.runnerOptions?.workingGlossary?.terms)
@@ -326,7 +349,7 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
       try {
         const qa = await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
           locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
-          domain: run.domain || "auto", batchId,
+          domain: run.domain || "auto", batchId, segmentId: segment.id,
           workingTerms: run.runnerOptions?.workingGlossary?.terms || [],
           aiQa: true });
         const translation = qa.translation || originalTranslation;

@@ -114,3 +114,16 @@ test("初译提示词分层下发工作术语与同句式参考", () => {
   assert.match(prompt, /同句式参考（这些句子共用同一固定框架/u);
   assert.match(prompt, /购买高级通行证可获得 3 个宝箱/u);
 });
+
+test("独立审校及修订不接收未核实的工作术语，正式术语仍保留", () => {
+  const source = pack({ workingTerms: [{ source: "ベット", target: "贝特", working: true }] });
+  assert.match(packPrompt(source), /贝特/u, "初译仍可参考文件内候选");
+  for (const purpose of ["review", "revise"]) {
+    const text = contextPackText(source, purpose);
+    assert.doesNotMatch(text, /贝特|本文件工作术语/u, "机器候选不能作为独立 QA 的改写依据");
+    assert.match(text, /高级通行证/u);
+    assert.match(text, /购买/u);
+    assert.match(text, /前一句/u);
+  }
+  assert.equal(source.workingTerms.length, 1, "投影不修改初译的上下文");
+});
