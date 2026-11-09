@@ -11,7 +11,7 @@ import { parseModelJsonObject } from "./text.mjs";
  * 本模块只做纯计算：分片、提示词、解析校验、合并、取用。模型调用放在 provider。
  */
 export const CONTEXT_BRIEF_VERSION = 1;
-export const CONTEXT_BRIEF_CHUNK_MAX_SEGMENTS = 300;
+export const CONTEXT_BRIEF_CHUNK_MAX_SEGMENTS = 100;
 export const CONTEXT_BRIEF_CHUNK_MAX_CHARS = 40_000;
 /** 太短的文件没有"上下文"可言，直接按单句判定，省一次调用。 */
 export const CONTEXT_BRIEF_MIN_SEGMENTS = 6;

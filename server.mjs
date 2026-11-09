@@ -3287,7 +3287,7 @@ function taskProgressReporter(taskId) {
 /**
  * 通读整份文件，产出语境档案。
  *
- * 分片并行（每片 ≤300 条且 ≤40000 字），片内失败只丢这一片，最后合并成一份档案；
+ * 分片并行（每片 ≤100 条且 ≤40000 字），片内失败只丢这一片，最后合并成一份档案；
  * 全部分片都失败时档案标记为 failed，翻译路径自动回落通用口径。
  */
 async function runContextAnalysis(batchId, { taskId = "" } = {}) {
