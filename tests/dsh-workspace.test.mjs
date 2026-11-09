@@ -15,10 +15,10 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
   const data = join(directory, "data"), first = join(directory, "项目甲"), second = join(directory, "项目乙");
   const { fs, close } = await workspaceFs();
   const messages = [];
-  const modelAdapter = async (input, options) => { messages.push(JSON.stringify(input)); return { content: options.requestLabel === "工作术语学习" ? '{"terms":[]}' : options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "保存设置。" }; };
+  const modelAdapter = async (input, options) => { messages.push(JSON.stringify(input)); if (["翻译", "Auto QA"].includes(options.requestLabel) && options.tools?.length && !input.some((message) => message.role === "tool")) return { content: "", toolCalls: [{ id: "read-guide", function: { name: "read", arguments: JSON.stringify({ file_path: "rules/指南.md" }) } }] }; return { content: options.requestLabel === "工作术语学习" ? '{"terms":[]}' : options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "保存设置。" }; };
   let workbench = await createWorkbench({ dataDirectory: data, modelAdapter });
   const context = { cwd: first, fs, human: true, isKamiSession: true, signal: new AbortController().signal };
-  context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => context.cwd }, tools: { schemas: () => [] } }, { session: {} }, options, context.signal);
+  context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => context.cwd }, tools: { schemas: () => [{ name: "read", parameters: { type: "object", properties: { file_path: { type: "string" } } } }], execute: async ({ arguments: args }) => ({ value: { path: join(first, args.file_path) }, content: [{ type: "text", text: await readFile(join(first, args.file_path), "utf8") }] }) } }, { session: {} }, options, context.signal);
   const other = { ...context, cwd: second };
   let projectId, batchId, snapshot;
   const readRun = async (id = batchId, ctx = context) => { const value = await workbench.invoke({ path: `/api/batch/run/${id}?projectId=${projectId}` }, ctx); return value.run || value; };
@@ -43,7 +43,7 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       for (const [purpose, path] of [["style-guide", "rules/指南.md"], ["terms", "glossary.csv"], ["tm", "tm.csv"], ["reference", "reference.md"]]) {
         const value = await workbench.importFile({ purpose, path }, context);
         assert.equal(value.registered, true);
-        if (purpose === "reference") assert.ok(value.version); else assert.match(value.hash, /^[a-f\d]{64}$/);
+        if (["reference", "style-guide"].includes(purpose)) assert.ok(value.version); else assert.match(value.hash, /^[a-f\d]{64}$/);
       }
       const config = JSON.parse(await readFile(join(first, ".kami/project.json"), "utf8"));
       assert.deepEqual(config.styleGuides, ["rules/指南.md"]);
@@ -69,7 +69,8 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       batchId = prepared.batchId;
       snapshot = await rawSnapshot();
       assert.equal(snapshot.source.path, "source/对白.txt");
-      assert.match(snapshot.guide.instruction, /指南版本甲/);
+      assert.equal(snapshot.guide, null);
+      assert.equal(snapshot.styleGuideMode, "agent-native");
       assert.equal(snapshot.terms[0].target, "设置");
       assert.equal(snapshot.memories[0].qualityStatus, "machine_verified");
       assert.equal(snapshot.referenceChunks.length, 0);
@@ -90,23 +91,24 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
       const next = await workbench.importFile({ path: "source/对白.txt" }, context);
       const nextSnapshot = await rawSnapshot(next.batchId);
       assert.notEqual(snapshot.source.hash, nextSnapshot.source.hash);
-      assert.match(nextSnapshot.guide.instruction, /指南版本乙/);
+      assert.equal(nextSnapshot.guide, null);
+      assert.notEqual(snapshot.resources.find((item) => item.purpose === "style-guide").version, nextSnapshot.resources.find((item) => item.purpose === "style-guide").version);
       assert.equal(snapshot.resources.find((item) => item.purpose === "reference").version, nextSnapshot.resources.find((item) => item.purpose === "reference").version);
       const run = await readRun();
       await workbench.invoke({ path: "/api/batch/run", method: "POST", body: { ...run, runState: "paused" } }, context);
       await workbench.close();
       workbench = await createWorkbench({ dataDirectory: data, modelAdapter });
-      assert.match((await rawSnapshot()).guide.instruction, /指南版本甲/);
+      assert.equal((await rawSnapshot()).guide, null);
       await workbench.invoke({ path: `/api/batch/run/${batchId}/start`, method: "POST", body: { projectId } }, context);
       let current;
       const deadline = Date.now() + 12000;
       do { await new Promise((done) => setTimeout(done, 25)); current = await readRun(); } while (["running", "queued"].includes(current.runState) && Date.now() < deadline);
       assert.equal(current.segments[0].status, "done", current.segments[0].error);
       assert.equal(current.segments[0].source, "設定を保存します。");
-      assert.ok(messages.some((text) => text.includes("指南版本甲")), "resumed translation consumes pinned guide");
+      assert.ok(messages.some((text) => text.includes("指南版本乙")), "resumed translation reads the current guide original");
       const qa = await workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { batchId, projectId, locale: "zh-CN", source: current.segments[0].source, translation: current.segments[0].translation } }, context);
-      assert.match(qa.styleProfile.instruction, /指南版本甲/);
-      assert.doesNotMatch(qa.styleProfile.instruction, /指南版本乙/);
+      assert.match(qa.styleProfile.instruction, /rules\/指南.md/);
+      assert.doesNotMatch(qa.styleProfile.instruction, /指南版本甲|指南版本乙/);
       await assert.rejects(workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { batchId: "missing-batch", projectId, locale: "zh-CN", source: "設定", translation: "设置" } }, context), /未找到.*批次/);
       const exported = await workbench.perform({ action: "export", batchId, projectId, mode: "writeback" }, context);
       assert.match(relative((await workbench.workspace({}, context)).workspace, exported.path), /^outputs[\\/]/);

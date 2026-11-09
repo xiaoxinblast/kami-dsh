@@ -1,6 +1,6 @@
 import http from "node:http";
 import { runtimeOptions, withRuntimeCall } from "./src/runtime-context.mjs";
-import { mergeWorkspaceMemories, mergeWorkspaceTerms, taskResources } from "./src/workspace-resources.mjs";
+import { mergeWorkspaceMemories, mergeWorkspaceTerms, taskResources, workspaceStyleGuide } from "./src/workspace-resources.mjs";
 import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -1480,7 +1480,7 @@ async function getProjectAssets(locale, projectId = "") {
 
 async function getProjectStyleProfile(locale, options = {}) {
   const stored = await getStoredProjectStyleProfile(locale, options);
-  const guide = taskResources(options.projectId)?.guide;
+  const guide = workspaceStyleGuide(options.projectId);
   return guide ? { ...stored, ...guide, instruction: [stored?.instruction, guide.instruction].filter(Boolean).join("\n\n") } : stored;
 }
 
@@ -8372,7 +8372,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
       // 统一降级链：同语体同领域 → 同语体通用 → 通用同领域 → 通用×通用。
       getProjectStyleProfile(locale, { projectId }),
       getQaCases(locale, { projectId, contentType: classification.contentType, domain, limit: -1, scopeFallback: true }),
-      Promise.resolve(taskResources(projectId)?.guide || getUserProfile(locale, { projectId })),
+      Promise.resolve(workspaceStyleGuide(projectId) || getUserProfile(locale, { projectId })),
       projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
     ]);
     // 候选先粗筛再精排：整库 8 万条时，这一段的代价是每段十几秒 / 369MB。

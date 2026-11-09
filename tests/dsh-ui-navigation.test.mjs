@@ -93,13 +93,13 @@ test("file reading and review requests use the current session with separate ope
 
 test("resource compilation requests let the current agent understand originals and save reusable results", async () => {
   const { WorkbenchModel } = await stateModule(), calls = [];
-  const model = new WorkbenchModel({ sessionId: "current", call: async () => ({ groups: [{ purpose: "style-guide", updatePath: ".kami/compiled/style.json", files: [{ path: "rules/guide.docx", hash: "a".repeat(64), status: "pending" }] }], failures: [] }), prompt: async (...args) => calls.push(args) });
+  const model = new WorkbenchModel({ sessionId: "current", call: async () => ({ groups: [{ purpose: "terms", updatePath: ".kami/compiled/terms.json", files: [{ path: "rules/guide.docx", hash: "a".repeat(64), status: "pending" }] }], failures: [] }), prompt: async (...args) => calls.push(args) });
   model.view.workspace = "D:/fixture";
-  const result = await model.compileResource({ path: "rules/guide.docx", purpose: "style-guide", hash: "a".repeat(64) });
+  const result = await model.compileResource({ path: "rules/guide.docx", purpose: "terms", hash: "a".repeat(64) });
   assert.equal(result.ok, true);
   assert.equal(calls[0][0], "current"); assert.equal(calls[0][2], "D:/fixture");
-  for (const text of ["rules/guide.docx", "理解原文件", "固定模板", "compiledPath", "compilation.status=ready", "例外和正反例"]) assert.ok(calls[0][1].includes(text));
-  assert.equal(model.view.operations["agent-compile:style-guide:rules/guide.docx"].pending, false);
+  for (const text of ["rules/guide.docx", "理解原文件", "固定模板", "compiledPath", "compilation.status=ready"]) assert.ok(calls[0][1].includes(text));
+  assert.equal(model.view.operations["agent-compile:terms:rules/guide.docx"].pending, false);
 });
 
 test("batch compilation submits one agent task, skips unchanged files, and keeps library updates together", async () => {
@@ -108,10 +108,10 @@ test("batch compilation submits one agent task, skips unchanged files, and keeps
     calls.push(operation);
     return { groups: [{ purpose: "tm", libraryId: "memory", libraryName: "项目 TM", updatePath: ".kami/compiled/memory.json", files: [
       { path: "old.xlsx", hash: "a".repeat(64), status: "ready" }, { path: "new.xlsx", hash: "b".repeat(64), status: "pending" }
-    ] }, { purpose: "style-guide", libraryId: "", updatePath: ".kami/compiled/style.json", files: [{ path: "style.docx", hash: "c".repeat(64), status: "pending" }] }], failures: [] };
+    ] }, { purpose: "terms", libraryId: "", updatePath: ".kami/compiled/terms.json", files: [{ path: "style.docx", hash: "c".repeat(64), status: "pending" }] }], failures: [] };
   }, prompt: async (...args) => prompts.push(args) });
   model.view.workspace = "D:/fixture";
-  const selection = [{ path: "new.xlsx", purpose: "tm", libraryId: "memory" }, { path: "style.docx", purpose: "style-guide" }];
+  const selection = [{ path: "new.xlsx", purpose: "tm", libraryId: "memory" }, { path: "style.docx", purpose: "terms" }];
   assert.equal((await model.compileResources(selection, "compile-selected")).ok, true);
   assert.equal(calls.length, 1); assert.equal(calls[0].actionType, "compilations");
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0].selection)), selection);

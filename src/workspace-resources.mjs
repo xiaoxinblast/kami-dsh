@@ -9,6 +9,15 @@ export function taskResources(projectId = "") {
   return snapshot && snapshot.projectId === projectId ? snapshot : null;
 }
 
+export function workspaceStyleGuide(projectId = "") {
+  const snapshot = taskResources(projectId);
+  if (snapshot?.styleGuideMode !== "agent-native") return snapshot?.guide;
+  const files = snapshot.resources.filter((item) => item.purpose === "style-guide");
+  if (!files.length) return null;
+  return { id: `workspace:${snapshot.id}`, name: "工作区风格指南原件", projectId, status: "active",
+    instruction: `人工风格指南只关联原文件，没有编译正文。翻译或审校前必须使用当前会话的原生工具直接查阅以下指南，遵守完整规则、例外和正反例；人工指南优先于自动风格规范、技能规则和译者画像。不要把文件路径当成已读正文，不生成纯文本转换副本或编译缓存。Office/PDF、图片中的排版和标记须按原格式查阅；读取失败或未读完整时明确说明，不能声称已遵守指南。正文以实际读取时的原件为准。\n${files.map((item) => JSON.stringify({ path: item.path, version: item.version })).join("\n")}` };
+}
+
 export function mergeWorkspaceTerms(assets, snapshot) {
   if (!snapshot?.terms?.length) return assets;
   // Existing approved library entries retain precedence, including their aliases.

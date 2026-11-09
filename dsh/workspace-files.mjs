@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { extractStyleGuideFile } from "../src/style-guide-import.mjs";
 import { extractTermPairs } from "../src/table-term-extractor.mjs";
 import { extractXliffPairs } from "../src/xliff-document.mjs";
 import { readBatchOriginal } from "../src/batch-originals.mjs";
@@ -70,11 +69,6 @@ function resourceMetadataPair(source, target) {
 }
 
 function compiledResource(purpose, value) {
-  if (purpose === "style-guide") {
-    const text = value.style_guide ?? value.text;
-    if (typeof text !== "string" || !text.trim()) throw new Error("风格指南编译结果需要完整的 style_guide 正文");
-    return { text: text.trim(), characters: [...text.trim()].length };
-  }
   const rows = purpose === "terms" && Array.isArray(value.terms) ? value.terms.map((item) => ({ ...item, source: item.ja, target: item.zh })) : value.entries ?? value.pairs;
   if (!Array.isArray(rows)) throw new Error("术语编译需要 terms:[{ja,zh,note}]；TM 编译需要 entries:[{source,target,context,file}]");
   const candidates = [];
@@ -170,7 +164,6 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     const groups = new Map(), files = new Map(), libraries = new Map(state.libraries.map((library) => [library.id, library]));
     const links = new Map(state.config.libraryFiles.map((item) => [`${item.purpose}\0${item.path}`, item.libraryId])), defaults = new Map();
     const resolveLibrary = (purpose, id) => {
-      if (purpose === "style-guide") return null;
       if (!id && !defaults.has(purpose)) defaults.set(purpose, fileLibrary(state.libraries, purpose));
       const library = id ? libraries.get(id) : defaults.get(purpose);
       if (!library || library.kind !== (purpose === "terms" ? "term_base" : "translation_memory")) throw new Error("资源库不存在，或库类型与文件用途不匹配");
@@ -181,7 +174,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       if (!groups.has(key)) groups.set(key, { workspace: state.workspace, projectId: state.config.projectId, purpose, libraryId: library?.id || "", libraryName: library?.name || "项目风格指南", paths: [] });
       return groups.get(key);
     };
-    for (const purpose of ["terms", "tm", "style-guide"]) for (const path of state.config[fields[purpose]]) {
+    for (const purpose of ["terms", "tm"]) for (const path of state.config[fields[purpose]]) {
       const group = get(purpose, resolveLibrary(purpose, links.get(`${purpose}\0${path}`)));
       group.paths.push(path); files.set(`${purpose}\0${path}`, group);
     }
@@ -271,14 +264,14 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
   }
   async function compilationRequests(state, selection, context) {
     const catalog = compilationCatalog(state), enabled = new Set(state.libraries.filter((library) => library.enabled !== false).map((library) => library.id));
-    if (selection === undefined) selection = Object.entries(fields).filter(([purpose]) => purpose !== "reference").flatMap(([purpose, field]) => state.config[field].filter((path) => {
+    if (selection === undefined) selection = Object.entries(fields).filter(([purpose]) => ["terms", "tm"].includes(purpose)).flatMap(([purpose, field]) => state.config[field].filter((path) => {
       const group = catalog.files.get(`${purpose}\0${path}`);
       return !group.libraryId || enabled.has(group.libraryId);
     }).map((path) => ({ path, purpose })));
     if (!Array.isArray(selection)) throw new Error("selection 必须是所选资源数组");
     const groups = new Map(), seen = new Set(), memo = new Map(), failures = [];
     for (const item of selection) {
-      if (!["terms", "tm", "style-guide"].includes(item?.purpose)) throw new Error("批量编译仅支持术语、TM 和风格指南");
+      if (!["terms", "tm"].includes(item?.purpose)) throw new Error("批量编译仅支持术语和 TM；风格指南直接查阅原件");
       const path = relativePath(item.path), purpose = item.purpose, key = `${purpose}\0${path}`;
       if (!catalog.files.has(key)) throw new Error(`文件尚未关联：${path}`);
       if (seen.has(key)) continue;
@@ -352,6 +345,10 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
         const root = await workspaceRoot(context), state = { workspace: root, config: { ...next, libraryFiles: resolveFileLibraries(next, libraries) }, libraries };
         for (const [purpose, field] of Object.entries(fields)) {
           if (purpose === "reference" || !Object.hasOwn(args.resources || {}, field)) continue;
+          if (purpose === "style-guide") {
+            for (const path of next[field]) await referenceSource(root, path, context);
+            continue;
+          }
           if (next[field].length < current[field].length && next[field].every((path) => current[field].includes(path))) continue;
           for (const path of next[field]) {
             const source = await readSource(root, path, context, undefined, true);
@@ -397,8 +394,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     try { parsed = JSON.parse(await readFile(cachePath, "utf8")); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
     if (!parsed) {
-      if (purpose === "style-guide") parsed = await extractStyleGuideFile({ filename: source.filename, buffer: source.bytes });
-      else if (/\.(?:mqxliff|xliff)$/iu.test(source.filename)) parsed = { candidates: extractXliffPairs(source.bytes, source.filename) };
+      if (/\.(?:mqxliff|xliff)$/iu.test(source.filename)) parsed = { candidates: extractXliffPairs(source.bytes, source.filename) };
       else {
         parsed = await extractTermPairs({ filename: source.filename, buffer: source.bytes, locale: "zh-CN" });
         if (parsed.statistics.truncated) throw new Error(`表格超出解析行数上限：${source.path}`);
@@ -413,16 +409,14 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     resourceObservations(resourceContext);
     const config = configValue({ ...state.config, ...resources });
     const result = { id: randomUUID(), workspace: state.workspace, projectId: config.projectId, createdAt: new Date().toISOString(), outputDirectory: config.outputDirectory, resources: [], terms: [], memories: [], referenceChunks: [], guide: null,
-      ...(config.references.length ? { referenceMode: "agent-native" } : {}) };
-    const guides = [];
-    const guideTexts = new Set();
+      styleGuideMode: "agent-native", ...(config.references.length ? { referenceMode: "agent-native" } : {}) };
     const compiled = new Map();
     const libraries = (await invoke({ path: `/api/projects/${encodeURIComponent(config.projectId)}/libraries` }, context)).libraries || [];
     const compilationState = { ...state, config, libraries };
     const libraryById = new Map(libraries.map((library) => [library.id, library]));
     for (const [purpose, field] of Object.entries(fields)) {
       for (const path of config[field]) {
-        if (purpose === "reference") {
+        if (["reference", "style-guide"].includes(purpose)) {
           const source = await referenceSource(state.workspace, path, context);
           result.resources.push({ ...source, purpose, reader: "agent-native" });
           continue;
@@ -432,19 +426,13 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
         const resource = await parseResource(compilationState, purpose, path, context, resourceContext, library?.id, compiled);
         const { parsed, ...metadata } = resource;
         result.resources.push({ ...metadata, ...(library ? { libraryId: library.id, libraryName: library.name, libraryPriority: library.priority } : {}) });
-        if (purpose === "style-guide") {
-          if (!guideTexts.has(parsed.text)) { guideTexts.add(parsed.text); guides.push(`【${path}】\n${parsed.text}`); }
-        }
-        else {
-          const libraryId = `workspace:${hash(`${purpose}\0${path}`)}`;
-          const items = parsed.candidates.filter((item) => item.source && item.target && item.decision !== "excluded" && !resourceMetadataPair(item.source, item.target)).map((item, index) => ({ ...item, origins: item.origins || [{ path, hash: resource.hash, note: item.note || "", aliases: item.aliases || [], ...(item.rowNumber ? { rowNumber: item.rowNumber } : {}) }], id: `${libraryId}:${index}`, locale: "zh-CN", projectId: config.projectId, libraryId, linkedLibraryId: library?.id, libraryName: library?.name || path, libraryRole: "reference", libraryPriority: library?.priority || 1, libraryEnabled: true, status: "approved", qualityStatus: purpose === "tm" ? "machine_verified" : "human_approved", assetTier: purpose === "tm" ? "working" : "formal", workspaceResource: true, taskId: result.id, sourceFile: path, contentType: item.contentType || "general", domain: item.domain || "general" }));
-          for (const item of items) result[purpose === "terms" ? "terms" : "memories"].push(item);
-        }
+        const libraryId = `workspace:${hash(`${purpose}\0${path}`)}`;
+        const items = parsed.candidates.filter((item) => item.source && item.target && item.decision !== "excluded" && !resourceMetadataPair(item.source, item.target)).map((item, index) => ({ ...item, origins: item.origins || [{ path, hash: resource.hash, note: item.note || "", aliases: item.aliases || [], ...(item.rowNumber ? { rowNumber: item.rowNumber } : {}) }], id: `${libraryId}:${index}`, locale: "zh-CN", projectId: config.projectId, libraryId, linkedLibraryId: library?.id, libraryName: library?.name || path, libraryRole: "reference", libraryPriority: library?.priority || 1, libraryEnabled: true, status: "approved", qualityStatus: purpose === "tm" ? "machine_verified" : "human_approved", assetTier: purpose === "tm" ? "working" : "formal", workspaceResource: true, taskId: result.id, sourceFile: path, contentType: item.contentType || "general", domain: item.domain || "general" }));
+        for (const item of items) result[purpose === "terms" ? "terms" : "memories"].push(item);
       }
     }
     result.terms = mergeLibraryEntries(result.terms, "terms");
     result.memories = mergeLibraryEntries(result.memories, "tm");
-    if (guides.length) result.guide = { id: `workspace:${result.id}`, name: "工作区风格指南", instruction: guides.join("\n\n"), projectId: config.projectId, status: "active" };
     return result;
   }
   async function importFile(args, context) {
@@ -458,9 +446,10 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       const savedLink = state.config.libraryFiles.find((item) => item.purpose === purpose && item.path === relativePath(path));
       const library = ["terms", "tm"].includes(purpose) ? fileLibrary(state.libraries, purpose, args.libraryId || savedLink?.libraryId) : null;
       if (args.libraryId && !library) throw new Error("此文件用途不使用术语或 TM 资源库");
-      const source = purpose === "reference" ? await referenceSource(state.workspace, path, context) : await readSource(state.workspace, path, context, undefined, true);
+      if (purpose === "style-guide" && (args.compiledPath || args.resourceContext?.length)) throw new Error("风格指南只关联原文件，请用当前会话工具直接查阅，不提交编译结果或正文");
+      const source = ["reference", "style-guide"].includes(purpose) ? await referenceSource(state.workspace, path, context) : await readSource(state.workspace, path, context, undefined, true);
       const resource = { ...source, purpose, ...(library ? { libraryId: library.id, libraryName: library.name } : {}) };
-      if (purpose !== "reference") resource.compilation = await compilation(state, purpose, source, args, context);
+      if (["terms", "tm"].includes(purpose)) resource.compilation = await compilation(state, purpose, source, args, context);
       if (args.register !== false) await update(context, (config) => ({ ...config, [fields[purpose]]: [...new Set([...config[fields[purpose]], resource.path])],
         libraryFiles: [...config.libraryFiles.filter((item) => item.purpose !== purpose || item.path !== resource.path), ...(library ? [{ path: resource.path, purpose, libraryId: library.id }] : [])] }));
       return { ...resource, registered: args.register !== false, readMode: "agent", taskScoped: true };

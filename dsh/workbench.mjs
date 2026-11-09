@@ -82,7 +82,7 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
       let value = json ? JSON.parse(buffer.toString() || "null") : { base64: buffer.toString("base64"), contentType: headers["content-type"], disposition: headers["content-disposition"] };
       if (status >= 400) throw Object.assign(new Error(value?.error || `Operation failed (${status})`), { statusCode: status });
       // Parsed resource bodies remain in the Host/database; callers receive provenance only.
-      if (value && typeof value === "object") value = JSON.parse(JSON.stringify(value, (key, item) => key === "workspaceSnapshot" && item ? { id: item.id, workspace: item.workspace, projectId: item.projectId, source: item.source, resources: item.resources, createdAt: item.createdAt, outputDirectory: item.outputDirectory } : item));
+      if (value && typeof value === "object") value = JSON.parse(JSON.stringify(value, (key, item) => key === "workspaceSnapshot" && item ? { id: item.id, workspace: item.workspace, projectId: item.projectId, source: item.source, resources: item.resources, styleGuideMode: item.styleGuideMode, createdAt: item.createdAt, outputDirectory: item.outputDirectory } : item));
       return value;
     });
   };

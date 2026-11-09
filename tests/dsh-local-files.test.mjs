@@ -15,8 +15,8 @@ test("local resources use original files and agent observations without upload l
   const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async () => ({ content: "译文" }) });
   let fullResourceReads = 0, referenceRanges = 0;
   const observedFs = new Proxy(fs, { get(target, key) {
-    if (key === "readBytes") return (...args) => { if (target.processPath(args[0]).endsWith("原始资料.bin")) fullResourceReads++; return target.readBytes(...args); };
-    if (key === "readByteRange") return (...args) => { if (target.processPath(args[0]).endsWith("原始资料.bin")) referenceRanges++; return target.readByteRange(...args); };
+    if (key === "readBytes") return (...args) => { if (["原始资料.bin", "风格.pdf"].some((name) => target.processPath(args[0]).endsWith(name))) fullResourceReads++; return target.readBytes(...args); };
+    if (key === "readByteRange") return (...args) => { if (["原始资料.bin", "风格.pdf"].some((name) => target.processPath(args[0]).endsWith(name))) referenceRanges++; return target.readByteRange(...args); };
     const value = Reflect.get(target, key, target); return typeof value === "function" ? value.bind(target) : value;
   } });
   const context = { cwd, fs: observedFs, human: true, signal: new AbortController().signal };
@@ -49,15 +49,22 @@ test("local resources use original files and agent observations without upload l
     await workbench.workspace({ action: "configure", resources: { references: [] } }, context);
     await writeFile(join(cwd, "source.txt"), "設定を保存します。");
     await assert.rejects(workbench.importFile({ path: "source.txt", resources: { projectId: "other" } }, context), /字段/);
-    await assert.rejects(workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: guide.hash, text: 42 }] }, context), /resourceContext/);
-    const prepared = await workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: guide.hash, text: "本任务由 Agent 查阅原始 PDF：按钮使用保存。" }] }, context);
+    await assert.rejects(workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: 42 }] }, context), /resourceContext/);
+    const prepared = await workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "本任务由 Agent 查阅原始 PDF：按钮使用保存。" }] }, context);
     const snapshot = (await workbench.store.request(`/items/batch_runs/${prepared.batchId}`)).runner_options.workspaceSnapshot;
-    assert.match(snapshot.guide.instruction, /按钮使用保存/);
-    assert.equal(snapshot.resources[0].reader, "agent");
-    const qa = await workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { projectId: snapshot.projectId, locale: "zh-CN", source: "設定を保存します。", translation: "保存设置。", resourceContext: [{ path: guide.path, hash: guide.hash, text: "独立审校同样查阅原始 PDF，按钮使用保存。" }] } }, context);
-    assert.match(qa.styleProfile.instruction, /独立审校同样查阅原始 PDF/);
+    assert.equal(snapshot.guide, null);
+    assert.doesNotMatch(JSON.stringify(snapshot), /按钮使用保存/);
+    assert.equal(fullResourceReads, 0); assert.equal(referenceRanges, 0);
+    assert.equal(snapshot.resources[0].reader, "agent-native");
+    const qa = await workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { projectId: snapshot.projectId, locale: "zh-CN", source: "設定を保存します。", translation: "保存设置。", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "独立审校同样查阅原始 PDF，按钮使用保存。" }] } }, context);
+    assert.match(qa.styleProfile.instruction, /风格.pdf/);
+    assert.doesNotMatch(qa.styleProfile.instruction, /独立审校同样查阅原始 PDF/);
+    assert.match(qa.fallbackReason, /原 DSH 会话/);
     await writeFile(join(cwd, "风格.pdf"), "changed original");
-    await assert.rejects(workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: guide.hash, text: "stale" }] }, context), /变化|版本/);
+    const current = await workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "stale" }] }, context);
+    assert.equal((await workbench.store.request(`/items/batch_runs/${current.batchId}`)).runner_options.workspaceSnapshot.guide, null);
+    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", compiledPath: "unread.json" }, context), /不提交编译结果/);
+    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "stale" }] }, context), /不提交编译结果/);
     assert.equal(await readFile(join(cwd, "风格.pdf"), "utf8"), "changed original");
   } finally {
     await workbench.close(); await close();

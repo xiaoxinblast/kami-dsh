@@ -76,12 +76,12 @@ test("linked resources automatically queue compilation and show pending/ready re
     await page.waitForFunction(() => document.querySelector(".kami"), null, { timeout: 5000 }).catch(() => { throw new Error(`DSH component render failed: ${errors.join("; ")}`); });
     await page.getByRole("button", { name: "资产", exact: true }).click();
     await page.locator(".library-row").filter({ hasText: termLibrary.name }).getByRole("button", { name: "打开", exact: true }).click();
-    const link = async (path) => {
+    const link = async (path, compile = true) => {
       const details = page.locator("details").filter({ has: page.locator("summary", { hasText: "关联工作区文件" }) });
       if (!await details.evaluate((element) => element.open)) await details.locator("summary").click();
       await details.locator("input").fill(path);
       await details.getByRole("button", { name: "关联文件", exact: true }).click();
-      await page.getByText("待 Agent 编译", { exact: true }).waitFor();
+      await page.getByText(compile ? "待 Agent 编译" : "已关联原文件 · 翻译和审校时直接读取", { exact: true }).waitFor();
     };
     const screenshot = async (name) => {
       if (!process.env.KAMI_UI_SCREENSHOTS) return;
@@ -100,14 +100,21 @@ test("linked resources automatically queue compilation and show pending/ready re
     await page.getByText("已编译，可用于翻译 · 1 条", { exact: true }).waitFor();
     await screenshot("compile-terms-ready");
     await page.getByRole("button", { name: "风格指南", exact: true }).click();
-    await link("style.custom");
-    await page.waitForFunction(() => window.prompts.length === 2);
-    await page.evaluate(() => fetch("/complete", { method: "POST", body: JSON.stringify({ path: "style.custom", purpose: "style-guide" }) }));
-    await page.getByRole("button", { name: "刷新编译状态", exact: true }).click();
-    await page.getByText(/已编译，可用于翻译 · \d+ 字符/).waitFor();
+    await link("style.custom", false);
+    assert.equal(await page.evaluate(() => window.prompts.length), 1, "guide association does not queue compilation or reading");
+    assert.equal(await page.locator(".compilation-badge").count(), 0);
+    assert.equal(await page.getByRole("button", { name: "编译选中", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "让 Agent 编译", exact: true }).count(), 0);
+    await page.getByText("风格指南只关联原件，翻译和审校前由 Agent 直接查阅并遵守，不预解析或编译。", { exact: true }).waitFor();
+    await screenshot("style-original-wide");
+    if (process.env.KAMI_UI_SCREENSHOTS) await page.locator(".kami").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "style-files-wide.png"), animations: "disabled" });
     await page.setViewportSize({ width: 420, height: 1000 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-    await screenshot("compile-style-ready-narrow");
+    await screenshot("style-original-narrow");
+    if (process.env.KAMI_UI_SCREENSHOTS) await page.locator(".kami").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "style-files-narrow.png"), animations: "disabled" });
+    await page.getByRole("button", { name: "让 Agent 查看原文件", exact: true }).click();
+    await page.waitForFunction(() => window.prompts.length === 2);
+    assert.match(await page.evaluate(() => window.prompts.at(-1).content[0].text), /style.custom.*直接查看原格式/);
     const batchPaths = Array.from({ length: 25 }, (_, index) => `bulk-${String(index + 1).padStart(2, "0")}.custom`);
     const nested = ["已完成批次/EXP_Batch_8_ZH-HANS.xlsx_zho-CN.mqxliff", "已完成批次/另一个参考文件.custom"];
     await mkdir(join(cwd, "已完成批次"));
@@ -153,7 +160,8 @@ test("linked resources automatically queue compilation and show pending/ready re
     await page.getByRole("button", { name: "编译全部待编译", exact: true }).click();
     await page.waitForFunction(() => window.prompts.length === 4);
     const allPrompt = await page.evaluate(() => window.prompts[3].content[0].text);
-    for (const path of [...nested, "memory.custom", "style2.custom"]) assert.ok(allPrompt.includes(path));
+    for (const path of [...nested, "memory.custom"]) assert.ok(allPrompt.includes(path));
+    assert.ok(!allPrompt.includes("style2.custom")); assert.ok(!allPrompt.includes("style.custom"));
     assert.ok(!allPrompt.includes("disabled.custom")); assert.ok(!allPrompt.includes("bulk-25.custom"));
     await page.locator(".kami").evaluate((element) => { element.scrollTop = 0; });
     if (process.env.KAMI_UI_SCREENSHOTS) await page.locator("section.card").filter({ has: page.getByRole("button", { name: "编译全部待编译", exact: true }) }).screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "compile-all-narrow.png"), animations: "disabled" });
@@ -205,7 +213,7 @@ test("linked resources automatically queue compilation and show pending/ready re
     await page.getByRole("button", { name: "任务", exact: true }).click();
     const provenance = page.locator("details.snapshot");
     await provenance.locator("summary").click();
-    await provenance.getByText("原文、术语、TM 和风格指南沿用此版本；参考资料按需读取当前原件。", { exact: true }).waitFor();
+    await provenance.getByText("原文、术语和 TM 沿用此版本；风格指南和参考资料直接读取当前原件。", { exact: true }).waitFor();
     const referenceRecord = provenance.locator(".snapshot-row").filter({ hasText: "reference.original" });
     assert.ok((await referenceRecord.locator("code").textContent()).length > 0);
     assert.equal((await referenceRecord.locator("code").textContent()).includes("SHA-256"), false);

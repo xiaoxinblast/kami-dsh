@@ -132,13 +132,15 @@ export function referenceBudgetFrom(settings = {}, skill = null) {
  */
 export function buildReferenceToolRunner({ index, projectId = "", settings = {}, skill = null, onActivity = null, onlyChunkIds = null } = {}) {
   const budget = referenceBudgetFrom(settings, skill);
-  if (!projectId || !budget.enabled) return null;
+  if (!projectId) return null;
   const snapshot = taskResources(projectId), runtime = runtimeOptions();
-  const references = (snapshot?.resources || []).filter((item) => item.purpose === "reference");
-  if (snapshot?.referenceMode === "agent-native" || runtime.embedded && references.length) {
+  const styleGuides = snapshot?.styleGuideMode === "agent-native" ? snapshot.resources.filter((item) => item.purpose === "style-guide") : [];
+  if (!budget.enabled && !styleGuides.length) return null;
+  const references = budget.enabled ? (snapshot?.resources || []).filter((item) => item.purpose === "reference") : [];
+  if (styleGuides.length || snapshot?.referenceMode === "agent-native" || runtime.embedded && references.length) {
     if (onlyChunkIds !== null) return null;
-    if (typeof runtime.referenceTools !== "function") throw new Error("参考资料只关联原件；请在原 DSH 会话中运行翻译，以使用 Agent 的原生查阅工具");
-    return runtime.referenceTools({ workspace: snapshot.workspace, references, onActivity, maxRounds: budget.maxRounds });
+    if (typeof runtime.referenceTools !== "function") throw new Error("风格指南和参考资料只关联原件；请在原 DSH 会话中运行翻译或审校，以使用 Agent 的原生查阅工具");
+    return runtime.referenceTools({ workspace: snapshot.workspace, references, styleGuides, onActivity, maxRounds: budget.maxRounds });
   }
   const runner = createReferenceToolRunner({
     index,

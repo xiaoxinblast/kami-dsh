@@ -9,6 +9,7 @@ import { buildReferenceToolRunner } from "../src/reference-context.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
 import { translateWithReflection } from "../src/provider.mjs";
+import { workspaceStyleGuide } from "../src/workspace-resources.mjs";
 
 async function fixture(run) {
   const directory = await mkdtemp(join(tmpdir(), "kami-native-reference-")), workspace = join(directory, "workspace"), other = join(directory, "other");
@@ -28,6 +29,77 @@ async function fixture(run) {
   try { await run({ directory, cwd, other, fs, ctx, agent, calls, switchRoot: () => { root = other; }, deny: () => { denied = true; } }); }
   finally { await close(); assert.ok(directory.startsWith(join(tmpdir(), "kami-native-reference-"))); await rm(directory, { recursive: true, force: true }); }
 }
+
+test("style guides are read from current originals for translation and QA, even with reference retrieval disabled", async () => fixture(async ({ directory, cwd, fs, ctx, agent, calls }) => {
+  const seen = new Set();
+  const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
+    if (!["翻译", "Auto QA"].includes(options.requestLabel)) return { content: options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "译文" };
+    assert.match(JSON.stringify(messages), /人工指南优先|人工风格指南/);
+    assert.ok(options.tools.some((tool) => tool.function.name === "list_style_guide_files"));
+    if (!messages.some((message) => message.role === "tool")) return { content: "", toolCalls: [{ id: "guide-read", function: { name: "read", arguments: '{"file_path":"guide.custom"}' } }] };
+    assert.match(JSON.stringify(messages), /live_style_probe/);
+    assert.doesNotMatch(JSON.stringify(messages), /stale_style_probe|legacy_style_probe/);
+    seen.add(options.requestLabel);
+    return { content: options.requestLabel === "Auto QA" ? '{"issues":[]}' : "保存设置。" };
+  } });
+  const signal = new AbortController().signal;
+  const context = { cwd, fs, human: true, signal, referenceTools: (options) => createWorkspaceReferenceTools(ctx, agent, options, signal) };
+  try {
+    const state = await workbench.workspace({ action: "bind", name: "原件风格指南" }, context);
+    await writeFile(join(cwd, "guide.custom"), "stale_style_probe");
+    await writeFile(join(cwd, "source.txt"), "設定を保存します。");
+    await workbench.invoke({ method: "POST", path: "/api/style-guides/import", body: { projectId: state.project.id, filename: "legacy.txt", base64: Buffer.from("legacy_style_probe").toString("base64") } }, context);
+    const linked = await workbench.importFile({ path: "guide.custom", purpose: "style-guide" }, context);
+    assert.equal(linked.compilation, undefined); assert.equal(linked.hash, undefined); assert.ok(linked.version);
+    const prepared = await workbench.importFile({ path: "source.txt" }, context);
+    const snapshot = (await workbench.store.request(`/items/batch_runs/${prepared.batchId}`)).runner_options.workspaceSnapshot;
+    assert.equal(snapshot.guide, null); assert.equal(snapshot.styleGuideMode, "agent-native"); assert.equal(calls.length, 0);
+    assert.doesNotMatch(JSON.stringify(snapshot), /stale_style_probe/);
+    assert.equal((await workbench.workspace({ action: "compilations" }, context)).groups.length, 0);
+    await writeFile(join(cwd, "guide.custom"), "live_style_probe：按钮使用保存；例外和正反例均按本原件。");
+    const translated = await workbench.invoke({ path: "/api/translate", method: "POST", body: { batchId: prepared.batchId, projectId: state.project.id, locale: "zh-CN", source: "設定を保存します。", qualityTier: "fast", reflect: false } }, context);
+    assert.equal(translated.translation, "保存设置。");
+    for (const batchId of [prepared.batchId, undefined]) {
+      const qa = await workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { batchId, projectId: state.project.id, locale: "zh-CN", source: "設定を保存します。", translation: "保存设置。" } }, context);
+      assert.match(qa.styleProfile.instruction, /guide.custom/);
+      assert.equal(qa.fallbackReason, "");
+    }
+    assert.deepEqual([...seen].sort(), ["Auto QA", "翻译"].sort()); assert.equal(calls.length, 3);
+    withRuntimeCall({ embedded: true, workspaceSnapshot: snapshot, referenceTools: context.referenceTools }, () => {
+      const runner = buildReferenceToolRunner({ projectId: state.project.id, settings: { enabled: false } });
+      assert.ok(runner.tools.some((tool) => tool.function.name === "read"));
+      assert.ok(runner.tools.some((tool) => tool.function.name === "list_style_guide_files"));
+      assert.ok(!runner.tools.some((tool) => tool.function.name === "list_reference_files"));
+    });
+    await assert.rejects(readFile(join(directory, "data/runtime/workspace-resources")), /ENOENT/);
+    await assert.rejects(readFile(join(directory, "data/runtime/compiled-resources")), /ENOENT/);
+  } finally { await workbench.close(); }
+}));
+
+test("native guide tools preserve visual results, guide priority, and read failures without using old compiled text", async () => fixture(async ({ cwd, ctx, agent, deny }) => {
+  const guides = [{ path: "guide.custom", purpose: "style-guide" }];
+  await writeFile(join(cwd, "guide.custom"), "完整规则");
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: guides });
+  assert.match((await tools.execute({ name: "list_style_guide_files" })).text, /翻译或审校前必须直接读取/);
+  const read = await tools.execute({ name: "read", arguments: { file_path: "guide.custom" } });
+  assert.match(read.text, /人工规范，优先于/);
+  assert.match(read.text, /完整规则/);
+  const visual = { type: "image", data: "image-bytes", mimeType: "image/png" };
+  const visualTools = createWorkspaceReferenceTools({ ...ctx, tools: {
+    schemas: () => [{ name: "read_image", parameters: { type: "object", properties: {} } }],
+    execute: async () => ({ value: { path: join(cwd, "guide.custom") }, content: [visual] })
+  } }, agent, { workspace: cwd, styleGuides: guides });
+  const image = await visualTools.execute({ name: "read_image", arguments: { file_path: "guide.custom" } });
+  assert.deepEqual(image.nativeContent[1], visual);
+  const failing = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: guides });
+  deny();
+  const result = await failing.execute({ name: "read", arguments: { file_path: "guide.custom" } });
+  assert.equal(result.nativeIsError, true); assert.deepEqual(failing.refs(), []);
+  assert.doesNotMatch(result.text, /完整规则/);
+  withRuntimeCall({ workspaceSnapshot: { projectId: "p", guide: { instruction: "旧批次冻结规则" } } }, () => {
+    assert.equal(workspaceStyleGuide("p").instruction, "旧批次冻结规则");
+  });
+}));
 
 test("reference lookups use current session tools and original bytes without a compiled index", async () => fixture(async ({ cwd, ctx, agent, calls, switchRoot }) => {
   await writeFile(join(cwd, "setting.custom"), "原件初始内容");
