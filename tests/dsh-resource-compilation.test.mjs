@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { createWorkspaceReferenceTools } from "../dsh/reference-tools.mjs";
 import { createResourceLibraryCompiler } from "../src/resource-library-compilation.mjs";
@@ -22,7 +22,7 @@ async function fixture(run) {
   const context = { cwd, fs, human: true, signal: new AbortController().signal };
   context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => cwd }, tools: {
     schemas: () => [{ name: "read", parameters: { type: "object", properties: { file_path: { type: "string" } } } }],
-    execute: async ({ arguments: args }) => ({ content: [{ type: "text", text: await readFile(join(cwd, args.file_path), "utf8") }] })
+    execute: async ({ arguments: args }) => ({ content: [{ type: "text", text: await readFile(resolve(cwd, args.file_path), "utf8") }] })
   } }, { session: {} }, options, context.signal);
   try {
     const state = await workbench.workspace({ action: "bind", name: "资源编译验收" }, context);

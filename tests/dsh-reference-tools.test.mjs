@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
@@ -54,10 +54,121 @@ test("Windows Bash reference reads translate shell drive paths before native pro
     return { value: { exitCode: 0, stdout: { text: "完整规则" } }, content: [{ type: "text", text: "完整规则" }] };
   };
   const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd });
-  for (const workdir of ["/d/project", "/mnt/c/project", "D:/project", undefined]) await tools.execute({ name: "bash", arguments: { command: "pwd", ...(workdir ? { workdir } : {}) } });
-  assert.deepEqual(calls.map((args) => args.workdir), ["d:/project", "c:/project", "D:/project", undefined]);
+  const shellPath = cwd.replace(/\\/g, "/").replace(/^([a-z]):/i, "/$1");
+  for (const workdir of [shellPath, `/mnt${shellPath}`, cwd, undefined]) await tools.execute({ name: "bash", arguments: { command: "pwd", ...(workdir ? { workdir } : {}) } });
+  assert.deepEqual(calls.map((args) => args.workdir), [cwd, cwd, cwd, cwd]);
   ctx.tools.execute = async () => ({ isError: true, content: [{ type: "text", text: "spawn bash ENOENT" }] });
-  assert.match((await tools.execute({ name: "bash", arguments: { command: "pwd", workdir: "/d/project" } })).text, /d:\/project/);
+  assert.ok((await tools.execute({ name: "bash", arguments: { command: "pwd", workdir: shellPath } })).text.includes(cwd));
+}));
+
+test("native searches and shell calls bind omitted and relative directories to the task workspace", async () => fixture(async ({ cwd, directory, ctx, agent }) => {
+  const calls = [], child = join(cwd, "资料");
+  await mkdir(child);
+  ctx.tools.schemas = () => ["glob", "grep", "bash", "pwsh"].map((name) => ({ name, description: name, parameters: {} }));
+  ctx.tools.execute = async (call) => {
+    calls.push(call);
+    return { value: { exitCode: 0, stdout: { text: "查阅结果" } }, content: [{ type: "text", text: "查阅结果" }] };
+  };
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd });
+  for (const name of ["glob", "grep", "bash", "pwsh"]) {
+    const key = ["glob", "grep"].includes(name) ? "path" : "workdir";
+    const args = { command: `"${join(directory, "runtime", "python.exe")}" -c "print(1)"`, pattern: "*.docx" };
+    await tools.execute({ name, arguments: args });
+    assert.equal(calls.at(-1).arguments[key], cwd, `${name} must pass an explicit workspace directory`);
+    assert.equal(Object.hasOwn(args, key), false, "normalization must not mutate the model call");
+    await tools.execute({ name, arguments: { ...args, [key]: "资料" } });
+    assert.equal(calls.at(-1).arguments[key], child);
+    assert.equal(calls.at(-1).arguments.command, args.command, "external runtime executables remain usable from the workspace");
+  }
+}));
+
+test("native searches and shell workdirs reject outside paths and directory links before dispatch", async () => fixture(async ({ cwd, other, ctx, agent }) => {
+  const calls = [];
+  await symlink(other, join(cwd, "outside-link"), process.platform === "win32" ? "junction" : "dir");
+  ctx.tools.schemas = () => ["glob", "grep", "bash", "pwsh"].map((name) => ({ name, parameters: {} }));
+  ctx.tools.execute = async (call) => { calls.push(call); return { content: [{ type: "text", text: "must not execute" }] }; };
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.docx" }] });
+  for (const name of ["glob", "grep", "bash", "pwsh"]) for (const path of [other, "../other", "outside-link", "~"]) {
+    const key = ["glob", "grep"].includes(name) ? "path" : "workdir";
+    const result = await tools.execute({ name, arguments: { [key]: path, command: "pwd", pattern: "*.docx" } });
+    assert.equal(result.nativeIsError, true);
+    assert.ok(result.text.includes(cwd), "the correction must identify the actual workspace");
+    assert.match(result.text, /工作区/);
+  }
+  assert.equal(calls.length, 0);
+  assert.throws(() => tools.assertReady(), { code: "style_guide_unread" });
+}));
+
+test("native file reads anchor relative paths but retain explicit document-tool paths", async () => fixture(async ({ cwd, other, ctx, agent }) => {
+  const calls = [];
+  ctx.tools.schemas = () => ["read", "read_image"].map((name) => ({ name, parameters: {} }));
+  ctx.tools.execute = async (call) => { calls.push(call); return { content: [{ type: "text", text: "document tool instructions" }] }; };
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd });
+  for (const name of ["read", "read_image"]) {
+    await tools.execute({ name, arguments: { file_path: "资料/guide.docx" } });
+    assert.equal(calls.at(-1).arguments.file_path, resolve(cwd, "资料/guide.docx"));
+    const skillPath = join(other, "document-tool", "SKILL.md");
+    await tools.execute({ name, arguments: { file_path: skillPath } });
+    assert.equal(calls.at(-1).arguments.file_path, skillPath);
+  }
+}));
+
+test("the first native model call already has its workspace and absolute guide paths", async () => fixture(async ({ cwd, ctx, agent }) => {
+  const resources = [{ purpose: "style-guide", path: "资料/风格指南.docx", version: "v1" }];
+  withRuntimeCall({ workspaceSnapshot: { projectId: "p", workspace: cwd, styleGuideMode: "agent-native", resources } }, () => {
+    const guide = workspaceStyleGuide("p");
+    assert.ok(guide.instruction.includes(cwd));
+    assert.ok(guide.instruction.includes(JSON.stringify(resolve(cwd, resources[0].path))));
+  });
+  ctx.tools.schemas = () => ["glob", "grep", "bash", "pwsh"].map((name) => ({ name, description: name, parameters: {} }));
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: resources });
+  for (const name of ["glob", "grep", "bash", "pwsh"]) {
+    const tool = tools.tools.find((item) => item.function.name === name);
+    assert.ok(tool.function.description.includes(cwd));
+  }
+  assert.match(tools.tools.find((item) => item.function.name === "bash").function.description, /Bash.*PowerShell/);
+}));
+
+test("original lists use the optional skill service without an undeclared Cordis property access", async () => fixture(async ({ cwd, ctx, agent }) => {
+  ctx.tools.schemas = () => [{ name: "skill", parameters: {} }];
+  Object.defineProperty(ctx, "skills", { get() { throw new Error('cannot get property "skills" without inject'); } });
+  let listed = 0;
+  ctx.get = (name) => name === "skills" ? { list: async ({ cwd: root, scope }) => {
+    assert.equal(root, cwd); assert.equal(scope, agent); listed++;
+    return [{ name: "document-reader", description: "原件读取工具" }];
+  } } : undefined;
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.docx" }] });
+  const result = await tools.execute({ name: "list_style_guide_files" });
+  assert.match(result.text, /absolutePath/);
+  assert.match(result.text, /document-reader/);
+  assert.equal(result.nativeIsError, undefined);
+  assert.equal(listed, 1);
+  ctx.get = () => undefined;
+  const withoutSkills = await tools.execute({ name: "list_style_guide_files" });
+  assert.match(withoutSkills.text, /absolutePath/);
+  assert.equal(withoutSkills.nativeIsError, undefined);
+}));
+
+test("real Cordis can list guide paths and available skills without a skills injection", { skip: !process.env.DSH_TEST_LLM_MODULE }, async () => fixture(async ({ cwd, fs, agent }) => {
+  const { Context } = await import(new URL("../../cordis/lib/index.js", process.env.DSH_TEST_LLM_MODULE));
+  const root = new Context();
+  root.reflect.provide("fs", fs);
+  root.reflect.provide("workingDirectory", { get: () => cwd });
+  root.reflect.provide("tools", { schemas: () => [{ name: "skill", parameters: {} }] });
+  root.plugin({ apply(ctx) { ctx.reflect.provide("skills", { list: async () => [{ name: "document-reader", description: "原件读取工具" }] }); } });
+  let resolveReady, rejectReady;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  root.plugin({ inject: ["fs", "workingDirectory", "tools"], async apply(ctx) {
+    try {
+      assert.throws(() => ctx.skills, /without inject/);
+      const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.docx" }] });
+      const result = await tools.execute({ name: "list_style_guide_files" });
+      assert.equal(result.nativeIsError, undefined);
+      assert.match(result.text, /absolutePath/); assert.match(result.text, /document-reader/);
+      resolveReady();
+    } catch (error) { rejectReady(error); }
+  } });
+  try { await ready; } finally { await root.fiber.dispose(); }
 }));
 
 test("style guides are read from current originals for translation and QA, even with reference retrieval disabled", async () => fixture(async ({ directory, cwd, fs, ctx, agent, calls }) => {
@@ -65,6 +176,9 @@ test("style guides are read from current originals for translation and QA, even 
   const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
     if (!["翻译", "Auto QA"].includes(options.requestLabel)) return { content: options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "译文" };
     assert.match(JSON.stringify(messages), /人工指南优先|人工风格指南/);
+    const guidePrompt = options.requestLabel === "Auto QA" ? JSON.parse(messages.find((message) => message.role === "user").content).styleProfile.instruction : messages.map((message) => String(message.content)).join("\n");
+    assert.ok(guidePrompt.includes(cwd), "workspace must be present before listing tools are called");
+    assert.ok(guidePrompt.includes(JSON.stringify(join(cwd, "guide.custom"))), "the model must receive the absolute original path");
     assert.ok(options.tools.some((tool) => tool.function.name === "list_style_guide_files"));
     if (!messages.some((message) => message.role === "tool")) return { content: "", toolCalls: [{ id: "guide-read", function: { name: "read", arguments: '{"file_path":"guide.custom"}' } }] };
     assert.match(JSON.stringify(messages), /live_style_probe/);

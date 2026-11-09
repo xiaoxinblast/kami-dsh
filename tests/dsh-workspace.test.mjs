@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import JSZip from "jszip";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
@@ -18,7 +18,7 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
   const modelAdapter = async (input, options) => { messages.push(JSON.stringify(input)); if (["翻译", "Auto QA"].includes(options.requestLabel) && options.tools?.length && !input.some((message) => message.role === "tool")) return { content: "", toolCalls: [{ id: "read-guide", function: { name: "read", arguments: JSON.stringify({ file_path: "rules/指南.md" }) } }] }; return { content: options.requestLabel === "工作术语学习" ? '{"terms":[]}' : options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "保存设置。" }; };
   let workbench = await createWorkbench({ dataDirectory: data, modelAdapter });
   const context = { cwd: first, fs, human: true, isKamiSession: true, signal: new AbortController().signal };
-  context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => context.cwd }, tools: { schemas: () => [{ name: "read", parameters: { type: "object", properties: { file_path: { type: "string" } } } }], execute: async ({ arguments: args }) => ({ value: { path: join(first, args.file_path) }, content: [{ type: "text", text: await readFile(join(first, args.file_path), "utf8") }] }) } }, { session: {} }, options, context.signal);
+  context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => context.cwd }, tools: { schemas: () => [{ name: "read", parameters: { type: "object", properties: { file_path: { type: "string" } } } }], execute: async ({ arguments: args }) => ({ value: { path: resolve(first, args.file_path) }, content: [{ type: "text", text: await readFile(resolve(first, args.file_path), "utf8") }] }) } }, { session: {} }, options, context.signal);
   const other = { ...context, cwd: second };
   let projectId, batchId, snapshot;
   const readRun = async (id = batchId, ctx = context) => { const value = await workbench.invoke({ path: `/api/batch/run/${id}?projectId=${projectId}` }, ctx); return value.run || value; };
