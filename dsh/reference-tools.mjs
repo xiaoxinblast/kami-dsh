@@ -42,6 +42,7 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
         }
         if (!names.has(name)) throw new Error("此工具不属于当前会话的参考查阅能力");
         const args = typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
+        if (process.platform === "win32" && name === "bash" && typeof args.workdir === "string") args.workdir = args.workdir.replace(/^\/(?:mnt\/)?([a-z])(?:\/|$)/i, "$1:/");
         const callId = `kami-reference-${randomUUID()}`, callSignal = signal || new AbortController().signal;
         let result;
         if (typeof ctx.tools.setExecutor === "function") {
@@ -65,9 +66,10 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
         if (!isError && result.content?.length) for (const item of readSources) {
           if (!used.some((ref) => ref.path === item.path)) used.push({ path: item.path, tool: name });
         }
-        if (isError) lastError = text || result.error?.message || "原文件读取失败或不完整";
+        const workdirHint = isError && shellRead ? `\n命令工作目录：${args.workdir || current}。请确认目录存在${process.platform === "win32" ? "；Windows 进程的工作目录使用盘符路径" : ""}。` : "";
+        if (isError) lastError = `${text || result.error?.message || "原文件读取失败或不完整"}${workdirHint}`;
         const readHint = isError && /binary file/i.test(text) && /\.(?:docx|xlsx|pptx|pdf)$/i.test(path || "")
-          ? "\n该原件是文档格式，普通 read 不能读取。请用 skill 加载对应文档技能，再用当前会话的 bash/pwsh 只读查阅原件（Python 标准库 zipfile 可直接读取 Office XML），保留段落、表格、颜色、修订和图片等规则证据；不要生成正文副本，不要重复用 read 读取同一二进制文件。" : "";
+          ? "\n该原件是文档格式，普通 read 不能读取。请用 skill 加载对应文档技能，再用当前会话的 bash/pwsh 只读查阅原件（Python 标准库 zipfile 可直接读取 Office XML），保留段落、表格、颜色、修订和图片等规则证据；不要生成正文副本，不要重复用 read 读取同一二进制文件。" : workdirHint;
         onActivity?.({ tool: name, path: source?.path || "", native: true, isError, elapsedMs: Date.now() - startedAt });
         return { text: `${boundary.length ? `${boundaryText}\n` : ""}${text}${readHint}`, nativeContent: [...boundary, ...(result.content || []), ...(readHint ? [{ type: "text", text: readHint }] : [])], nativeIsError: isError, refs: source && !isError ? [{ path: source.path, tool: name }] : [] };
       } catch (error) {

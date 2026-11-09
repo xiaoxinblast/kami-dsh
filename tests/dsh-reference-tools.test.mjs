@@ -46,6 +46,20 @@ test("Office guide read failures suggest native document tools and failed shell 
   assert.doesNotThrow(() => tools.assertReady());
 }));
 
+test("Windows Bash reference reads translate shell drive paths before native process startup", { skip: process.platform !== "win32" }, async () => fixture(async ({ cwd, ctx, agent }) => {
+  const calls = [];
+  ctx.tools.schemas = () => [{ name: "bash", parameters: {} }];
+  ctx.tools.execute = async ({ arguments: args }) => {
+    calls.push(args);
+    return { value: { exitCode: 0, stdout: { text: "完整规则" } }, content: [{ type: "text", text: "完整规则" }] };
+  };
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd });
+  for (const workdir of ["/d/project", "/mnt/c/project", "D:/project", undefined]) await tools.execute({ name: "bash", arguments: { command: "pwd", ...(workdir ? { workdir } : {}) } });
+  assert.deepEqual(calls.map((args) => args.workdir), ["d:/project", "c:/project", "D:/project", undefined]);
+  ctx.tools.execute = async () => ({ isError: true, content: [{ type: "text", text: "spawn bash ENOENT" }] });
+  assert.match((await tools.execute({ name: "bash", arguments: { command: "pwd", workdir: "/d/project" } })).text, /d:\/project/);
+}));
+
 test("style guides are read from current originals for translation and QA, even with reference retrieval disabled", async () => fixture(async ({ directory, cwd, fs, ctx, agent, calls }) => {
   const seen = new Set();
   const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
