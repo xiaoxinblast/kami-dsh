@@ -6807,7 +6807,16 @@ async function apiHandler(req, res, url) {
     if (existing && Array.isArray(body.segments) && (await loadBatchWorkflow(existing)).writeBusy) {
       return json(res, 409, { error: "当前翻译或 QA 尚未结束，请保留草稿并在阶段结束后保存" });
     }
-    const saved = await saveBatchRun({ ...existing, ...body, runnerOptions: { ...existing?.runnerOptions, ...body.runnerOptions }, locale: assertActiveLocale(body.locale || "zh-CN") });
+    const runnerOptions = { ...existing?.runnerOptions, ...body.runnerOptions };
+    const glossary = runnerOptions.workingGlossary;
+    if (existing && Array.isArray(body.segments) && Array.isArray(glossary?.terms)) {
+      const previous = new Map((existing.segments || []).map(segment => [String(segment.id), String(segment.translation || "")]));
+      const edited = new Set(body.segments.filter(segment => previous.has(String(segment.id)) && previous.get(String(segment.id)) !== String(segment.translation || "")).map(segment => String(segment.id)));
+      // 保存纠正稿后，旧机器稿学出的候选已失去依据；保留人工词条和有主 / 参考 TM 证据的词条。
+      const terms = glossary.terms.filter(term => term.origin !== "segment-learn" || !edited.has(String(term.sourceSegmentId)) || verifiedSurveyMemory(term));
+      if (terms.length !== glossary.terms.length) runnerOptions.workingGlossary = { ...glossary, terms, revision: (Number(glossary.revision) || 0) + 1 };
+    }
+    const saved = await saveBatchRun({ ...existing, ...body, runnerOptions, locale: assertActiveLocale(body.locale || "zh-CN") });
     return json(res, 200, saved);
   }
   if (req.method === "GET" && url.pathname === "/api/batch/files") {

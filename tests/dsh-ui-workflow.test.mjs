@@ -54,11 +54,16 @@ test("UI controller uses Host paths, waits for a paused worker, preserves edits 
     do { await new Promise((resolve) => setTimeout(resolve, 15)); await model.loadRun(); } while (model.view.run.workflow.writeBusy && Date.now() < deadline);
     assert.equal(model.view.run.workflow.writeBusy, false);
     const segment = model.view.run.segments[0];
+    await model.invoke("/api/batch/run", "POST", model.body({ batchId, runnerOptions: { workingGlossary: { revision: 1, terms: [
+      { source: "設定", target: "旧机器候选", origin: "segment-learn", sourceSegmentId: segment.id }
+    ] } } }));
     model.edit(segment.id, "保存设置。人工终稿。");
     await model.refresh();
     assert.equal(model.displayRun().segments[0].translation, "保存设置。人工终稿。");
     assert.equal((await model.save()).ok, true);
     assert.equal(model.view.run.runnerOptions.workspaceSnapshot.source.hash, originalHash);
+    assert.equal(model.view.run.runnerOptions.workingGlossary.terms.length, 0, "saving the corrected draft must remove its stale machine term candidate");
+    assert.equal(model.view.run.runnerOptions.workingGlossary.revision, 2);
     assert.equal(qaLabel(model.view.run.segments[0]), "尚未执行 QA", "editing must invalidate the previous QA claim");
     await model.saveQaResults({ segments: [{ source: segment.source, translation: "保存设置。人工终稿。", scores: { overall: 95 }, issues: [{ message: "人工终稿回归检查" }] }] });
     await model.refresh();
