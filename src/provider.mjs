@@ -909,10 +909,11 @@ export async function chatWithTools(messages, config = runtimeConfig, {
     for (const call of calls) {
       const result = await executeTool({ name: call.function.name, arguments: call.function.arguments });
       toolResults.push(result);
-      conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || ""), ...(result?.nativeContent ? { nativeContent: result.nativeContent, nativeIsError: result.nativeIsError } : {}) });
+      conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || ""), ...(result?.nativeContent ? { nativeContent: result.nativeContent } : {}), ...(result?.nativeIsError ? { nativeIsError: true } : {}) });
       onActivity?.({ tool: call.function.name, refs: result?.refs?.length ?? 0 });
     }
-    content = message.content || content;
+    // 工具调用期间的文字是查阅过程，不是最终回答。
+    content = "";
     // 轮次用尽时最后一轮仍在要工具：把这件事报给调用方。
     // 以前这种情况只会返回空 content，调用方分不清"模型给了空译文"和"根本没答"。
     if (round === lastRound) exhausted = true;
@@ -1456,6 +1457,7 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
       executeTool: toolRunner.execute,
       onActivity: toolRunner.onActivity
     });
+    toolRunner.assertReady?.();
     reviewMessages = result.messages || messages;
     content = result.exhausted ? await chat([
       ...reviewMessages,
@@ -1856,7 +1858,7 @@ export function parseAiQaLineResponse(content) {
 }
 
 export async function reviseTranslationWithQa({ contextPack, translation, issues, references = [], qaCases = [], onUsage = null }) {
-  return chat([
+  const revised = await chat([
     { role: "system", content: "你是最终修订译者。只修复 QA 明确指出的问题，保留正确内容、数字、格式、占位符、术语的语境判断结果、明确硬约束和原有信息边界；若问题涉及表达不地道，就用更地道的说法改写，不要退回逐字直译；若原文或文件语境显示韵律结构，修订必须同时重现节奏与押韵。只输出完整修订译文，不要解释。" },
     {
       role: "user",
@@ -1869,6 +1871,7 @@ export async function reviseTranslationWithQa({ contextPack, translation, issues
       ].join("\n\n")
     }
   ], runtimeConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "AIQA 修订", onUsage });
+  return requireNonEmptyTranslation(revised, translation, "AIQA 修订");
 }
 
 export async function adjudicatePotentialTermsWithModel({ contextPack, translation, issues, onUsage = null }) {
@@ -1898,7 +1901,7 @@ export async function adjudicatePotentialTermsWithModel({ contextPack, translati
   const payload = JSON.parse(content.slice(start, end + 1));
   if (!String(payload.translation || "").trim() || !Array.isArray(payload.decisions)) throw new Error("术语裁决模型返回格式无效");
   return {
-    translation: String(payload.translation).trim(),
+    translation: requireNonEmptyTranslation(String(payload.translation).trim(), translation, "术语裁决"),
     decisions: payload.decisions.slice(0, candidates.length).map((decision) => ({
       officialSource: String(decision.officialSource || ""),
       matchedSource: String(decision.matchedSource || ""),
@@ -2126,11 +2129,12 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
     ? (await chatWithTools(messages, configForRole("main"), {
       ...requestOptions,
       tools: toolRunner.tools,
-      maxRounds: Number(toolRunner.maxRounds) || 2,
+      maxRounds: toolRunner.maxRounds ?? 2,
       executeTool: toolRunner.execute,
       onActivity: toolRunner.onActivity
     })).content
     : await chat(messages, configForRole("main"), requestOptions);
+  toolRunner?.assertReady?.();
   const validIds = pairs.map((pair) => String(pair.id));
   try {
     return parseConsistencyFindings(content, { validIds });
@@ -2317,36 +2321,33 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
   const callConfig = configForRole(modelRole, model);
   // 温度：普通文本 0.6 给地道表达留空间，韵文/批排比 0.85 给节奏与韵脚再创作。
   const translationTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : (rhymeLike || batchVerse ? 0.85 : 0.6);
-  const initialMessages = [{ role: "user", content: packPrompt(contextPack) }];
+  const initialMessages = [{ role: "system", content: "只输出最终译文本身，不附加非译文说明、查阅报告、工具状态或推理过程。查阅失败由任务错误报告，不得混入译文。" }, { role: "user", content: packPrompt(contextPack) }];
   const initialOptions = { timeoutMs: 75_000, requestLabel: "翻译", temperature: translationTemperature, seed, onSeedUnsupported, onUsage };
   // 参考资料按需查询：只挂在初译这一步，自检与修订不重复查询，避免成本失控。
   const firstPass = toolRunner?.tools?.length
     ? await chatWithTools(initialMessages, callConfig, {
       ...initialOptions,
       tools: toolRunner.tools,
-      maxRounds: Number(toolRunner.maxRounds) || 2,
+      maxRounds: toolRunner.maxRounds ?? 2,
       executeTool: toolRunner.execute,
       onActivity: toolRunner.onActivity
     })
     : { content: await chat(initialMessages, callConfig, initialOptions), exhausted: false };
+  toolRunner?.assertReady?.();
   let initial = String(firstPass.content || "").trim();
   const nativeMessages = firstPass.nativeMessages || [];
-  if (!initial) {
+  if (translationOutputIssue(initial)) {
     // 模型把轮次全花在查参考资料上（或直接吐了空白）时，以前这个空串会被当成译文：
     // 评测把它记成"候选漏译、质量 30 分"，生产批次把它记成"这一段翻好了"。
     // 这里补一轮不带工具的直译，明确告诉它不要再查资料、直接给译文。
-    const reason = firstPass.exhausted ? "上一轮把工具轮次用完了还没给译文" : "上一轮返回了空白";
+    const reason = firstPass.exhausted ? "上一轮把工具轮次用完了还没给译文" : initial ? "上一轮混入了非译文说明" : "上一轮返回了空白";
     initial = String(await chat([
       { role: "system", content: "你是日语到简体中文的本地化译者。不要再调用任何工具、不要输出解释或推理过程，直接给出一行最终译文。" },
       ...nativeMessages,
       { role: "user", content: `${nativeMessages.length ? "" : packPrompt(contextPack)}\n\n补充要求（${reason}）：请只输出这一条的简体中文译文本身。` }
-    ], callConfig, { ...initialOptions, requestLabel: "翻译（空译文重试）", tools: undefined })).trim();
+    ], callConfig, { ...initialOptions, requestLabel: initial ? "翻译（非译文重试）" : "翻译（空译文重试）", tools: undefined })).trim();
   }
-  if (!initial) {
-    const error = new Error("模型没有返回译文（连续两次都是空白输出）");
-    error.code = "empty_translation";
-    throw error;
-  }
+  initial = requireNonEmptyTranslation(initial, "", "模型");
   if (!reflect && !rhymeLike) return { initial, translation: initial, reflection: "" };
   if (rhymeLike) {
     // 韵文本地化专用通道：初译只作参考，要求模型以目标语言玩家视角再创作，
@@ -2377,12 +2378,20 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
  */
 function requireNonEmptyTranslation(value, fallback, label) {
   const text = String(value || "").trim();
-  if (text) return value;
+  const issue = translationOutputIssue(text);
+  if (!issue) return value;
   const initial = String(fallback || "").trim();
-  if (initial) return fallback;
-  const error = new Error(`${label}没有返回译文（连续两次都是空白输出）`);
-  error.code = "empty_translation";
+  if (!translationOutputIssue(initial)) return fallback;
+  const error = new Error(issue === "empty_translation" ? `${label}没有返回译文（连续两次都是空白输出）` : `${label}返回了非译文说明，本次未保存。请检查风格指南读取状态后重试。`);
+  error.code = issue;
   throw error;
+}
+
+function translationOutputIssue(value) {
+  const text = String(value || "").trim();
+  if (!text) return "empty_translation";
+  if (/(?:^|\n)\s*(?:[#*>-]+\s*)?(?:非译文说明|非译文备注|译者说明|翻译说明)\s*(?:[（(][^\n]*?[）)])?\s*[：:]|原文件查阅失败|(?:未能|无法|不能|未成功)[^\n。]{0,40}(?:读取|查阅)[^\n。]{0,60}(?:风格指南|指南原件)|<\/?(?:think|analysis)>/iu.test(text)) return "invalid_translation";
+  return "";
 }
 
 function uniqueCandidateTexts(items = []) {
@@ -2426,12 +2435,12 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
       temperature: 0.25, timeoutMs: 75_000, requestLabel: "机器初译", onUsage
     });
     const finalModel = runtimeConfig.qualityModel || runtimeConfig.model;
-    const translation = await chat([
+    const translation = requireNonEmptyTranslation(await chat([
       { role: "system", content: "你是目标语言母语本地化编辑。把机器初译改成可发布译文；按结构化术语、翻译记忆、风格规则和事实锚点做最小必要后编辑。不得漏译、增译或改变数字、日期、平台、地区、URL、占位符和承诺强度。只输出最终译文。" },
       { role: "user", content: `${packPrompt(contextPack)}\n\n机器初译：\n${draft}` }
     ], configForRole("quality", finalModel), {
       temperature: 0.15, timeoutMs: 75_000, requestLabel: "LLM 后编辑", onUsage
-    });
+    }), "", "LLM 后编辑");
     return {
       initial: draft,
       translation,
@@ -2456,7 +2465,8 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
       requestLabel: `候选 ${index + 1}`,
       onUsage
     })));
-    const candidates = uniqueCandidateTexts(generated);
+    const candidates = uniqueCandidateTexts(generated).filter((text) => !translationOutputIssue(text));
+    if (!candidates.length) requireNonEmptyTranslation(generated[0], "", "候选翻译");
     const selectionModel = runtimeConfig.qualityModel || selectedModel;
     const selection = await chooseTranslationCandidate(contextPack, candidates, configForRole("quality", selectionModel), onUsage);
     const translation = candidates[selection.index] || candidates[0] || "";

@@ -97,6 +97,10 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
         if (projectId) await files.bound(context, projectId);
       }
       if (operation.action === "backup") return this.backup();
+      if (operation.action === "model") {
+        if (!modelAdapter?.describe) throw new Error("DSH 模型服务不可用");
+        return withRuntimeCall({ dataDirectory }, () => modelAdapter.describe(context.modelRoute, context.signal));
+      }
       if (operation.action === "workspace") return files.workspace({ ...operation, action: operation.actionType || "status" }, context);
       if (operation.action === "file") return this.importFile(operation, context);
       if (operation.action === "review-final") return files.linkReview(operation, context);

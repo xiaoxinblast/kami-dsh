@@ -3355,13 +3355,14 @@ function startContextAnalysis(batchId) {
     });
     try {
       const brief = await runContextAnalysis(batchId, { taskId: task.id });
+      const complete = brief.status === "ready" && !brief.warning && brief.coverage.covered >= brief.coverage.total;
       await updateBackgroundTaskProgress(task.id, {
-        status: brief.status === "ready" ? "completed" : "failed",
+        status: complete ? "completed" : "failed",
         progress: {
-          phase: brief.status === "ready" ? "completed" : "failed",
-          message: brief.status === "ready"
+          phase: complete ? "completed" : "failed",
+          message: complete
             ? `语境分析完成：${brief.sections.length} 个区间，覆盖 ${brief.coverage.covered} / ${brief.coverage.total} 条`
-            : "语境分析失败，翻译将按通用口径继续",
+            : `语境分析未完成：覆盖 ${brief.coverage.covered} / ${brief.coverage.total} 条，可在工作台重试。${brief.warning || ""}`,
           percent: 100,
           completed: brief.coverage.covered,
           total: brief.coverage.total
@@ -3376,6 +3377,8 @@ function startContextAnalysis(batchId) {
       });
       return { batchId, taskId: task.id, brief };
     } catch (error) {
+      const latest = await getBatchRun(batchId);
+      await saveBatchRun({ ...(latest || run), contextBrief: { ...(latest?.contextBrief || {}), status: "failed", warning: error.message } });
       await updateBackgroundTaskProgress(task.id, {
         status: "failed",
         progress: { phase: "failed", message: error.message, percent: 100 }
@@ -6891,6 +6894,7 @@ async function apiHandler(req, res, url) {
     if (req.method === "POST") {
       // 手动（重新）分析：立即返回，进度走 GET 轮询与任务中心；
       // 已在跑时服务端会复用同一次任务，不重复烧额度。
+      if (batchWorkers.has(batchId) || batchQaWorkers.has(batchId) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId) || reviewFinalLocks.has(batchId)) return json(res, 409, { error: "批次正在翻译、质检或关联人工终稿，请完成后再重试语境分析" });
       const alreadyRunning = contextAnalysisTasks.has(batchId);
       if (!alreadyRunning) startContextAnalysis(batchId).catch((error) => console.error("[Kami] 语境分析任务异常", error));
       return json(res, 202, { batchId, pending: true, alreadyRunning });

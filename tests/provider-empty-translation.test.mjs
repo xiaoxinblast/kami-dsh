@@ -86,3 +86,30 @@ test("修订环节返回空白时退回初译，不会把空串交出去", async
   const result = await translateWithReflection(contextPack, { reflect: true, temperature: 0 });
   assert.equal(result.translation, "星葬王座", "修订空白时用初译兜底");
 });
+
+test("含非译文说明的返回必须重试，连续污染则报错而不保存", async () => {
+  const contaminated = "星葬王座\n\n---\n\n**非译文说明（不属于正文）：** 未能查阅风格指南原件。";
+  replies = [textReply(contaminated), textReply("星葬王座")];
+  requests.length = 0;
+  assert.equal((await translateWithReflection(contextPack, { reflect: false })).translation, "星葬王座");
+  assert.equal(requests.length, 2);
+  replies = [textReply(contaminated), textReply(contaminated)];
+  await assert.rejects(translateWithReflection(contextPack, { reflect: false }), { code: "invalid_translation" });
+});
+
+test("工具轮次耗尽时查阅说明不是最终译文", async () => {
+  const call = toolReply("read"); call.choices[0].message.content = "我先查阅参考资料。";
+  replies = [call, call, textReply("星葬王座")]; requests.length = 0;
+  const result = await translateWithReflection(contextPack, { reflect: false, toolRunner: {
+    tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
+    maxRounds: 1, execute: async () => ({ text: "规则", refs: [] })
+  } });
+  assert.equal(result.translation, "星葬王座"); assert.equal(requests.length, 3);
+});
+
+test("修订不能用非译文说明覆盖合格初译，原文本身的说明文字可以翻译", async () => {
+  replies = [textReply("星葬王座"), textReply("调整措辞"), textReply("星葬王座\n\n**非译文说明：** 未能查阅指南")];
+  assert.equal((await translateWithReflection(contextPack, { reflect: true })).translation, "星葬王座");
+  replies = [textReply("请先阅读翻译说明。")];
+  assert.equal((await translateWithReflection(contextPack, { reflect: false })).translation, "请先阅读翻译说明。");
+});

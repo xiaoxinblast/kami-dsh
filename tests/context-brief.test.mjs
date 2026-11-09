@@ -19,9 +19,9 @@ function segments(count, text = "セーブデータを読み込みます。") {
 
 test("分片按条数与字符数双阈值，只有超出容量才分片", () => {
   const many = splitContextChunks(segments(700));
-  assert.equal(many.length, 3, "700 条按 300 条一片切成 3 片");
+  assert.equal(many.length, 7, "700 条按 100 条一片切成 7 片");
   assert.equal(many[0].indices.length, CONTEXT_BRIEF_CHUNK_MAX_SEGMENTS);
-  assert.equal(many[2].indices.length, 100);
+  assert.equal(many[6].indices.length, 100);
 
   const single = splitContextChunks(segments(40));
   assert.equal(single.length, 1, "普通文件只启动一片");

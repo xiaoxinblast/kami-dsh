@@ -135,12 +135,14 @@ export function buildReferenceToolRunner({ index, projectId = "", settings = {},
   if (!projectId) return null;
   const snapshot = taskResources(projectId), runtime = runtimeOptions();
   const styleGuides = snapshot?.styleGuideMode === "agent-native" ? snapshot.resources.filter((item) => item.purpose === "style-guide") : [];
-  if (!budget.enabled && !styleGuides.length) return null;
-  const references = budget.enabled ? (snapshot?.resources || []).filter((item) => item.purpose === "reference") : [];
-  if (styleGuides.length || snapshot?.referenceMode === "agent-native" || runtime.embedded && references.length) {
+  const native = styleGuides.length || snapshot?.referenceMode === "agent-native" || runtime.embedded && snapshot?.resources?.some((item) => item.purpose === "reference");
+  const enabled = native ? settings.enabled !== false : budget.enabled;
+  if (!enabled && !styleGuides.length) return null;
+  const references = enabled ? (snapshot?.resources || []).filter((item) => item.purpose === "reference") : [];
+  if (native) {
     if (onlyChunkIds !== null) return null;
     if (typeof runtime.referenceTools !== "function") throw new Error("风格指南和参考资料只关联原件；请在原 DSH 会话中运行翻译或审校，以使用 Agent 的原生查阅工具");
-    return runtime.referenceTools({ workspace: snapshot.workspace, references, styleGuides, onActivity, maxRounds: budget.maxRounds });
+    return runtime.referenceTools({ workspace: snapshot.workspace, references, styleGuides, onActivity, maxRounds: Number(settings.nativeMaxRounds) || 6 });
   }
   const runner = createReferenceToolRunner({
     index,

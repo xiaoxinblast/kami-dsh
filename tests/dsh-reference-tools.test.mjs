@@ -82,6 +82,7 @@ test("native guide tools preserve visual results, guide priority, and read failu
   const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: guides });
   assert.match((await tools.execute({ name: "list_style_guide_files" })).text, /翻译或审校前必须直接读取/);
   const read = await tools.execute({ name: "read", arguments: { file_path: "guide.custom" } });
+  assert.doesNotThrow(() => tools.assertReady());
   assert.match(read.text, /人工规范，优先于/);
   assert.match(read.text, /完整规则/);
   const visual = { type: "image", data: "image-bytes", mimeType: "image/png" };
@@ -95,6 +96,7 @@ test("native guide tools preserve visual results, guide priority, and read failu
   deny();
   const result = await failing.execute({ name: "read", arguments: { file_path: "guide.custom" } });
   assert.equal(result.nativeIsError, true); assert.deepEqual(failing.refs(), []);
+  assert.throws(() => failing.assertReady(), { code: "style_guide_unread" });
   assert.doesNotMatch(result.text, /完整规则/);
   withRuntimeCall({ workspaceSnapshot: { projectId: "p", guide: { instruction: "旧批次冻结规则" } } }, () => {
     assert.equal(workspaceStyleGuide("p").instruction, "旧批次冻结规则");
@@ -116,6 +118,32 @@ test("reference lookups use current session tools and original bytes without a c
   switchRoot();
   assert.match((await tools.execute({ name: "read", arguments: '{"file_path":"setting.custom"}' })).text, /工作区已切换/);
   assert.equal(calls.length, 1, "workspace switches must not read through the other session directory");
+}));
+
+test("listing a guide or loading its tools cannot stand in for reading it", async () => fixture(async ({ cwd, ctx, agent }) => {
+  const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.docx" }] });
+  await tools.execute({ name: "list_style_guide_files" });
+  assert.throws(() => tools.assertReady(), { code: "style_guide_unread" });
+  await withRuntimeCall({ modelAdapter: async () => ({ content: "译文\n\n**非译文说明：** 没有读取原件" }) }, async () => {
+    await assert.rejects(translateWithReflection({ source: "原文" }, { reflect: false, toolRunner: tools }), { code: "style_guide_unread" });
+  });
+}));
+
+test("native reference settings control actual rounds and cannot be re-enabled by a learned skill", async () => fixture(async ({ cwd, ctx, agent, calls }) => {
+  await writeFile(join(cwd, "reference.md"), "原件规则");
+  const workspaceSnapshot = { projectId: "p", workspace: cwd, referenceMode: "agent-native", resources: [{ purpose: "reference", path: "reference.md" }] };
+  const referenceTools = (options) => createWorkspaceReferenceTools(ctx, agent, options);
+  await withRuntimeCall({ workspaceSnapshot, referenceTools, modelAdapter: async (_messages, options) => options.requestLabel === "翻译"
+    ? { content: "正在读取", toolCalls: [{ id: "read", function: { name: "read", arguments: '{"file_path":"reference.md"}' } }] }
+    : { content: "合格译文" } }, async () => {
+    assert.equal(buildReferenceToolRunner({ projectId: "p", settings: { enabled: false }, skill: { strategy: { retrieval: { referenceMaterials: { enabled: true, limit: 9 } } } } }), null);
+    for (const rounds of [1, 3]) {
+      calls.length = 0;
+      const toolRunner = buildReferenceToolRunner({ projectId: "p", settings: { nativeMaxRounds: rounds } });
+      const result = await translateWithReflection({ source: "原文" }, { reflect: false, toolRunner });
+      assert.equal(result.translation, "合格译文"); assert.equal(calls.length, rounds);
+    }
+  });
 }));
 
 test("native read denials and cancellation cannot fall back to stored reference text", async () => fixture(async ({ cwd, ctx, agent, calls, deny }) => {
@@ -185,9 +213,9 @@ test("translation calls native tools on demand and receives the current original
 
 test("real DSH filesystem reads execute through the session registry and respect native guards", { skip: !process.env.DSH_TEST_LLM_MODULE }, async () => fixture(async ({ cwd, fs, agent }) => {
   const sdk = process.env.DSH_TEST_LLM_MODULE;
-  const [{ Context }, { default: SystemPrompt }, { default: ToolRuntime }, fileTools] = await Promise.all([
+  const [{ Context }, { default: SystemPrompt }, { default: ToolRuntime }, fileTools, { NativeToolExecutor }] = await Promise.all([
     import(new URL("../../cordis/lib/index.js", sdk)), import(new URL("../../dsh-system-prompt/lib/index.js", sdk)),
-    import(new URL("../../dsh-tools/lib/index.js", sdk)), import(new URL("../../dsh-tool-fs/lib/index.js", sdk))
+    import(new URL("../../dsh-tools/lib/index.js", sdk)), import(new URL("../../dsh-tool-fs/lib/index.js", sdk)), import(new URL("../../dsh-tool-executor-native/lib/index.js", sdk))
   ]);
   const root = new Context();
   root.reflect.provide("fs", fs);
@@ -198,6 +226,8 @@ test("real DSH filesystem reads execute through the session registry and respect
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   root.plugin({ inject: ["tools"], async apply(ctx) {
     try {
+      ctx.tools.setExecutor(new NativeToolExecutor(ctx));
+      agent.model = { current: () => ({ provider: "test", model: "test" }) };
       const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, references: [{ path: "native.md" }] }, new AbortController().signal);
       assert.ok(tools.tools.some((tool) => tool.function.name === "read"));
       const read = await tools.execute({ name: "read", arguments: '{"file_path":"native.md"}' });

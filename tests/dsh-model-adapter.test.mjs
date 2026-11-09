@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createModelAdapter, sessionModelRoute } from "../dsh/model-adapter.mjs";
+import { withRuntimeCall } from "../src/runtime-context.mjs";
+import { invalidateSettingsCache, saveSettings } from "../src/settings-store.mjs";
 
 test("new sessions use the DSH default model and pending selections override previous requests", () => {
   let pending;
@@ -29,6 +34,118 @@ let llm;
 try { llm = await import("@deepseek-ai/dsh-llm"); } catch {
   if (process.env.DSH_TEST_LLM_MODULE) llm = await import(process.env.DSH_TEST_LLM_MODULE);
 }
+
+const testLlm = llm || { BlockAssembler: class {
+  finish = {}; usage; content = [];
+  push(chunk) {
+    if (chunk.type === "finish") this.finish = chunk.reason;
+    if (chunk.type === "usage") this.usage = chunk.usage;
+    if (chunk.type === "text-delta") this.content.push({ type: "text", text: chunk.text });
+  }
+  blocks() { return this.content; }
+} };
+
+async function budgetFixture(callback) {
+  const directory = await mkdtemp(join(tmpdir(), "kami-model-budget-"));
+  try { return await withRuntimeCall({ dataDirectory: directory }, async () => { invalidateSettingsCache(); await callback(); }); }
+  finally { invalidateSettingsCache(); await rm(directory, { recursive: true, force: true }); }
+}
+
+function budgetAdapter(responses, { defaultMaxTokens = 32000, prepare = (config) => config } = {}) {
+  const requests = [];
+  const adapter = createModelAdapter({ llm: { async prepareCall(input) {
+    const config = prepare({ ...input, maxTokens: input.maxTokens ?? defaultMaxTokens });
+    return { config, async *stream(request) {
+      requests.push(request);
+      const response = responses[Math.min(requests.length - 1, responses.length - 1)];
+      request.signal.throwIfAborted();
+      yield { type: "text-delta", index: 0, text: response.content || "" };
+      if (response.usage) yield { type: "usage", usage: response.usage };
+      yield { type: "finish", reason: { kind: response.kind || "stop" } };
+    } };
+  } } }, testLlm);
+  return { adapter, requests };
+}
+const budgetMessages = [{ role: "user", content: "检查译文" }];
+const budgetRoute = { provider: "test", model: "selected-model", reasoningEffort: "high" };
+
+test("DSH budgets inherit the session/provider instead of legacy QA and context constants", () => budgetFixture(async () => {
+  const { adapter, requests } = budgetAdapter([{ content: "complete" }]);
+  await adapter(budgetMessages, { route: { ...budgetRoute, maxTokens: 64000 }, maxTokens: 1800 });
+  await adapter(budgetMessages, { route: budgetRoute, maxTokens: 256000 });
+  assert.deepEqual(requests.map((request) => request.maxTokens), [64000, 32000]);
+}));
+
+test("saved budgets apply immediately to the actual stream and survive settings reload", () => budgetFixture(async () => {
+  const { adapter, requests } = budgetAdapter([{ content: "complete" }]);
+  for (const maxTokens of [12000, 24000]) {
+    saveSettings({ model: { maxTokens } });
+    invalidateSettingsCache();
+    await adapter(budgetMessages, { route: { ...budgetRoute, maxTokens: 64000 }, maxTokens: 1800 });
+    assert.equal((await adapter.describe(budgetRoute)).maxTokens, maxTokens);
+  }
+  assert.deepEqual(requests.map((request) => request.maxTokens), [12000, 24000]);
+  assert.equal(requests[1].reasoningEffort, "high");
+}));
+
+test("truncation retries once with a bounded larger budget and accounts for both attempts", () => budgetFixture(async () => {
+  saveSettings({ model: { maxTokens: 4000, retryMaxTokens: 6000 } });
+  const { adapter, requests } = budgetAdapter([
+    { kind: "max-tokens", content: "partial", usage: { inputTokens: 10, outputTokens: 4000 } },
+    { content: "complete", usage: { inputTokens: 10, outputTokens: 5000 } }
+  ]);
+  const result = await adapter(budgetMessages, { route: budgetRoute, maxTokens: 1800 });
+  assert.equal(result.content, "complete");
+  assert.deepEqual(requests.map((request) => request.maxTokens), [4000, 6000]);
+  assert.equal(result.usage.promptTokens, 20);
+  assert.equal(result.usage.completionTokens, 9000);
+}));
+
+test("persistent truncation reports stage, actual budget and usage, never partial success", () => budgetFixture(async () => {
+  saveSettings({ model: { maxTokens: 4000, retryMaxTokens: 10000 } });
+  const { adapter, requests } = budgetAdapter([{ kind: "max-tokens", content: "partial", usage: { inputTokens: 10, outputTokens: 4000 } }]);
+  await assert.rejects(adapter(budgetMessages, { route: budgetRoute, requestLabel: "语境分析" }), (error) => {
+    assert.equal(error.code, "KAMI_MODEL_TRUNCATED");
+    assert.match(error.message, /语境分析.*8000.*设置.*模型/);
+    assert.equal(error.details.attempts, 2);
+    assert.equal(error.details.usage.completionTokens, 8000);
+    return true;
+  });
+  assert.equal(requests.length, 2);
+}));
+
+test("disabled retry and unchanged provider caps do not repeat the same request", () => budgetFixture(async () => {
+  for (const retryMaxTokens of [0, 16000]) {
+    saveSettings({ model: { maxTokens: 4000, retryMaxTokens } });
+    const { adapter, requests } = budgetAdapter([{ kind: "max-tokens" }], { prepare: (config) => ({ ...config, maxTokens: 4000 }) });
+    await assert.rejects(adapter(budgetMessages, { route: budgetRoute }), /截断/);
+    assert.equal(requests.length, 1);
+  }
+}));
+
+test("cancelled calls do not dispatch or retry", () => budgetFixture(async () => {
+  const { adapter, requests } = budgetAdapter([{ kind: "max-tokens" }]);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(adapter(budgetMessages, { route: budgetRoute, signal: controller.signal }), { name: "AbortError" });
+  assert.equal(requests.length, 0);
+}));
+
+test("in-flight timeouts and cancellation are distinguished from truncation and never retried", () => budgetFixture(async () => {
+  for (const cancel of [false, true]) {
+    let calls = 0;
+    const controller = new AbortController();
+    const adapter = createModelAdapter({ llm: { async prepareCall(config) {
+      return { config, async *stream() {
+        calls += 1;
+        if (cancel) controller.abort();
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        yield { type: "finish", reason: { kind: "aborted" } };
+      } };
+    } } }, testLlm);
+    await assert.rejects(adapter(budgetMessages, { route: budgetRoute, requestLabel: "语境分析", signal: controller.signal, timeoutMs: cancel ? 1000 : 5 }), cancel ? /语境分析已取消/ : /语境分析.*调用超时/);
+    assert.equal(calls, 1);
+  }
+}));
 
 test("installed DSH protocol preserves prepared routes, tools and usage and reports failures", { skip: !llm }, async () => {
   const requests = [];

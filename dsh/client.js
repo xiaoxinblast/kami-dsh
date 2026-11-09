@@ -125,8 +125,9 @@ window.__ModuleLoader__.load({
         pendingSelection: null, operations: {}, sections: {}, loadSerial: 0 };
     }
     class WorkbenchModel {
-      constructor({ sessionId, call, prompt, visible = true }) {
+      constructor({ sessionId, call, prompt, modelCatalog, selectModel, visible = true }) {
         this.sessionId = sessionId; this.call = call; this.prompt = prompt; this.visible = visible; this.connected = false;
+        this.modelCatalog = modelCatalog; this.selectModel = selectModel;
         this.workspace = null; this.projects = []; this.scopes = new Map(); this.view = newView();
         this.epoch = 0; this.refreshSerial = 0; this.listeners = new Set(); this.connection = { pending: false, error: "" };
       }
@@ -414,6 +415,7 @@ window.__ModuleLoader__.load({
       .kami .settings-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}.kami .settings-tabs>button{padding:8px 4px;font-size:12px;border-radius:6px}.kami .settings-tabs>button[aria-selected=true]{background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font-weight:600;box-shadow:inset 0 -2px #82ad98}.kami button.stage{text-align:left;align-items:flex-start;white-space:normal}.kami .settings-heading p{margin-bottom:0}.kami .settings-content{min-width:0}.kami .settings-fields{gap:0;padding:16px}.kami .settings-fields .setting-field{display:grid;grid-template-columns:minmax(0,1fr) 100px;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .settings-fields .setting-field:first-child{padding-top:0}.kami .settings-fields .setting-field:last-child{padding-bottom:0;border-bottom:0}.kami .setting-field strong,.kami .qa-rule strong{font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary)}.kami .setting-field p,.kami .qa-rule p{margin:5px 0 0}.kami .settings-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;bottom:0;z-index:2;padding:12px 0;background:var(--dsw-alias-bg-layer-1);border-top:1px solid var(--dsw-alias-border-l2)}.kami .settings-footer>div{flex:1;min-width:0}.kami .settings-footer p{margin:0}.kami .settings-footer>button{flex:none}.kami .settings-footer .feedback{margin:4px 0 0}
       .kami input.settings-toggle{appearance:none;width:34px;height:20px;min-height:0;padding:2px;border:0;border-radius:999px;background:var(--dsw-alias-label-tertiary);cursor:pointer;justify-self:end;flex:none}.kami input.settings-toggle:before{content:"";display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-bg-layer-2)}.kami input.settings-toggle:checked{background:var(--dsw-alias-brand-primary)}.kami input.settings-toggle:checked:before{transform:translateX(14px)}.kami input.settings-toggle:disabled{opacity:.5;cursor:default}.kami .qa-rule{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .qa-rule:first-child{padding-top:0}.kami .qa-rule:last-child{padding-bottom:0;border-bottom:0}.kami .qa-rule-controls{display:grid;justify-items:end;gap:8px}.kami .qa-rule-controls label{display:flex;align-items:center;gap:7px;font-size:11px;white-space:nowrap}.kami .qa-rule-controls select{width:88px;font-size:12px}.kami .qa-rule[data-disabled=true] strong{color:var(--dsw-alias-label-secondary)}
       @container(min-width:620px){.kami .settings-tabs{grid-template-columns:repeat(6,minmax(0,1fr))}}@container(max-width:400px){.kami .settings-fields .setting-field{grid-template-columns:minmax(0,1fr) 76px;gap:10px}.kami .qa-rule{grid-template-columns:minmax(0,1fr)}.kami .qa-rule-controls{display:flex;align-items:center;justify-content:space-between}.kami .settings-footer{align-items:flex-start}.kami .settings-footer .muted{font-size:11px}}
+      @container(max-width:400px){.kami #kami-settings-panel-model .setting-field{grid-template-columns:minmax(0,1fr) 100px}}
       .kami .file-row[data-selectable=true] .file-title{flex-wrap:wrap;align-items:center}.kami .file-row[data-selectable=true] .file-title>span:not(.badge){min-width:80px}.kami .compilation-badge{display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;margin-left:auto;border-radius:999px;font-size:10px;border:1px solid var(--dsw-alias-border-l2)}.kami .compilation-badge:before{content:"";width:5px;height:5px;border-radius:50%;background:var(--dsw-alias-label-tertiary)}.kami .compilation-badge[data-state=ready]{border-color:#82ad98}.kami .compilation-badge[data-state=ready]:before{background:#5a9273}.kami .compilation-badge[data-state=pending]{border-color:#bd9962}.kami .compilation-badge[data-state=pending]:before{background:#ad7c32}.kami .compilation-badge[data-state=error]:before{background:var(--dsw-alias-state-error-primary)}
       .kami .file-list{container-type:inline-size}@container(max-width:500px){.kami .file-row[data-selectable=true] .file-title{display:grid;grid-template-columns:16px minmax(0,1fr);gap:4px 8px}.kami .file-row[data-selectable=true] .file-title>span:not(.badge){min-width:0}.kami .file-title>.compilation-badge{grid-column:2;justify-self:end}}
       .kami .primary{background:#174d40;border-color:#174d40;color:#f5efdf}.kami .primary:not(:disabled):hover{background:#23654f}.kami .type-tabs button[aria-pressed=true]{box-shadow:inset 0 -2px #82ad98}.kami .learning-steps>button[aria-pressed=true]{border-color:#82ad98;box-shadow:inset 0 2px #82ad98}.kami .segment-row[aria-pressed=true]{box-shadow:inset 3px 0 #82ad98}
@@ -546,6 +548,8 @@ window.__ModuleLoader__.load({
       const translated = selected.filter((segment) => segment.status === "done" && segment.translation?.trim());
       const qaFailed = translated.some((segment) => segment.result?.aiQa?.fallbackReason);
       const qa = qaSummary(run, model.view.operations[`qa:${id}`]?.pending);
+      const brief = run.contextBrief, briefBusy = run.contextBriefPending || model.view.operations[`context-brief:${id}`]?.pending;
+      const briefFailed = brief?.status === "failed" || Boolean(brief?.warning) || (brief?.coverage && brief.coverage.covered < brief.coverage.total);
       const qaDescription = `${qa.model} ${t("段")} ${t("模型 QA")} · ${qa.rules} ${t("段")} ${t("规则检查")} · ${qa.human} ${t("段")} ${t("memoQ 人工终稿")} · ${qa.incomplete} ${t("段")} ${t("QA 未完成")}`;
       const command = (verb) => model.perform(`${verb}:${id}`, async (token) => {
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", scopeArgs(model, token), token);
@@ -563,7 +567,13 @@ window.__ModuleLoader__.load({
           h(Button, { onClick: () => model.save(), disabled: !pending || locked, busy: model.view.operations.save?.pending }, t("保存修改")),
           done > 0 && h(Button, { onClick: exportFile, disabled: locked || pending, quiet: true }, t("工作区导出"))),
         run.workflow?.overall?.status === "in_progress" && h("p", { className: "muted" }, run.workflow.overall.message),
-        run.contextBriefPending && h("p", { className: "muted" }, t("批次需要先完成语境分析，请在主会话中推进。")),
+        (run.requiresBrief || brief || briefBusy) && h("section", { className: "stack", "aria-label": t("语境分析") },
+          h("strong", null, t("语境分析"), " · ", t(briefBusy ? "分析中" : briefFailed ? "分析未完成" : brief?.status === "ready" ? "已完成" : "尚未开始")),
+          brief?.coverage && h("p", { className: "muted" }, `${t("已覆盖")} ${brief.coverage.covered} / ${brief.coverage.total} ${t("段")}`),
+          brief?.warning && h("p", { className: "error", role: "alert" }, brief.warning),
+          h("p", { className: "muted" }, t("重新分析全文，保留现有译文。修改模型设置后可在这里重试。")),
+          h("div", null, h(Button, { onClick: () => command("context-brief"), busy: briefBusy, disabled: locked || pending || briefBusy }, t(briefBusy ? "语境分析中" : briefFailed ? "重试语境分析" : brief?.status === "ready" ? "重新分析语境" : "开始语境分析"))),
+          h(Feedback, { model, name: `context-brief:${id}`, retry: () => command("context-brief"), t })),
         h(Feedback, { model, name: `start:${id}`, retry: () => command("start"), t }), h(Feedback, { model, name: `pause:${id}`, retry: () => command("pause"), t }), h(Feedback, { model, name: `retry-qa:${id}`, retry: () => command("retry-qa"), t }), h(Feedback, { model, name: "save", retry: () => model.save(), t }), h(Snapshot, { run, t }));
     }
     function QaReport({ report, t, label = "质量报告", review }) {
@@ -584,6 +594,11 @@ window.__ModuleLoader__.load({
       const quality = run.qualityReport, report = quality?.report, survey = run.termSurvey;
       const findings = quality?.findings || [], terms = survey?.terms || [];
       const surveyKey = `term-survey:${id}`;
+      const consistencyKey = `consistency-check:${id}`;
+      const consistencyAgain = () => model.perform(consistencyKey, async (token) => {
+        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/consistency-check`, "POST", scopeArgs(model, token), token);
+        await model.loadRun(token, id);
+      });
       const surveyAgain = () => model.perform(surveyKey, async (token) => {
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/term-survey`, "POST", scopeArgs(model, token), token);
         await model.loadRun(token, id);
@@ -591,6 +606,7 @@ window.__ModuleLoader__.load({
       return h("section", { className: "stack", "aria-label": t("质量与复查详情") }, h("div", { className: "type-tabs", "aria-label": t("报告类型") }, ...[["aiQa", "质量报告"], ["qualityReport", "一致性复查"], ["termSurvey", "术语普查"]].map(([value, label]) => h("button", { type: "button", key: value, "aria-pressed": tab === value, onClick: () => { setTab(value); setOffset(0); } }, t(label)))),
         tab === "aiQa" && h(React.Fragment, null, h(Feedback, { model, name: `section:${key}`, retry: () => model.loadSection(key, load), t }), qa && h(QaReport, { report: qa, t, review })),
         tab === "qualityReport" && h("section", { className: "card stack" }, h("h3", null, t("一致性复查")), h("p", { className: "muted" }, run.workflow?.qualityReport?.message || t("尚未开始")), quality?.warning && h("p", { className: "error", role: "alert" }, quality.warning),
+          h("div", null, h(Button, { onClick: consistencyAgain, busy: model.view.operations[consistencyKey]?.pending, disabled: editingLocked(run) || model.dirty() }, t(quality?.warning ? "重试一致性检查" : report ? "重新检查一致性" : "开始一致性检查"))), h(Feedback, { model, name: consistencyKey, retry: consistencyAgain, t }),
           report ? h(React.Fragment, null, h("p", { className: "muted" }, timeText(report.generatedAt)), h("div", { className: "metrics" }, ...[["模型 QA", report.coverage?.modelQa], ["QA 未完成", report.coverage?.qaIncomplete], ["事实问题", report.facts?.issueCount], ["建议人工复查", report.humanReview?.suggested]].map(([label, value]) => h("span", { key: label }, h("strong", null, value ?? "—"), t(label)))),
             h("p", null, `${t("保护标记")} ${report.protectedTokens?.preserved ?? 0} / ${report.protectedTokens?.total ?? 0} · ${t("精确术语采用")} ${report.terms?.applied ?? 0} / ${report.terms?.expectedUses ?? 0}`),
             ...(report.humanReview?.reasons || []).map((item) => h("p", { key: item.reason }, `${item.reason} · ${item.count}`)),
@@ -911,21 +927,63 @@ window.__ModuleLoader__.load({
           return h("article", { className: "resource-row", key }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h("p", { className: "muted" }, stateText(item.status, t)), h("details", null, h("summary", null, t("规范内容")), h("div", { className: "preview-text" }, item.instruction || "")), item.status === "draft" && h("div", { className: "button-row" }, h(Button, { small: true, onClick: () => operation(`evaluate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/evaluate`), busy: model.view.operations[`evaluate:${key}`]?.pending }, t("评测")), h("details", null, h("summary", null, t("激活")), h("p", { className: "muted" }, t("人工激活后才用于后续任务。")), h(Button, { small: true, onClick: () => operation(`activate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/activate`), busy: model.view.operations[`activate:${key}`]?.pending }, t("确认启用")))), h(Feedback, { model, name: `evaluate:${key}`, t }), h(Feedback, { model, name: `activate:${key}`, t }));
         }), !data.styleProfiles?.length && h(Empty, { title: "暂无条目", t }), h(Pager, { offset: styleOffset, total: data.styleProfiles?.length || 0, onChange: setStyleOffset, t }))), h(LearningEvidence, { model, t }));
     }
+    function ModelSettingsStatus({ model, t, selection, setSelection }) {
+      const load = (token) => model.request({ action: "model" }, token);
+      const info = useSection(model, "settings-model", load);
+      const catalog = useSection(model, "settings-model-catalog", () => model.modelCatalog());
+      const operation = model.view.operations["section:settings-model"];
+      const saving = model.view.operations["model-select"]?.pending;
+      useEffect(() => { if (info && !selection) setSelection({ provider: info.provider, model: info.model, reasoningEffort: info.reasoningEffort || "" }); }, [info, selection]);
+      const groups = catalog?.groups || [], group = groups.find((item) => item.id === selection?.provider), selected = group?.models.find((item) => item.id === selection?.model);
+      const choose = (provider, selectedModel) => setSelection({ provider, model: selectedModel?.id || "", reasoningEffort: selectedModel?.reasoning?.defaultEffort || "" });
+      const refresh = async () => { await model.loadSection("settings-model-catalog", () => model.modelCatalog()); const result = await model.loadSection("settings-model", load); if (result.ok) setSelection(null); };
+      const apply = () => model.perform("model-select", async (token) => {
+        if (!model.valid(token)) throw new Error("操作所属的会话或工作区已切换");
+        await model.selectModel(model.sessionId, { provider: selection.provider, model: selection.model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) });
+        token.view.sections["settings-model"] = null;
+        const current = await model.request({ action: "model" }, token);
+        token.view.sections["settings-model"] = current;
+        setSelection({ provider: current.provider, model: current.model, reasoningEffort: current.reasoningEffort || "" });
+        return "模型与思考强度已应用";
+      });
+      return h("section", { className: "card stack", "aria-label": t("当前模型与生效参数") },
+        h("div", { className: "section-heading" }, h("h3", null, t("当前会话模型")), h(Button, { small: true, disabled: saving, busy: operation?.pending, onClick: refresh }, t("刷新模型信息"))),
+        h("p", { className: "muted" }, t("模型与思考强度同步到 DSH 会话，DSH 同时记住默认选择。新任务使用新选择，已运行的任务沿用启动时的模型。")),
+        selection && h("div", { className: "stack" },
+          h("label", null, t("提供商"), h("select", { "aria-label": t("提供商"), value: selection.provider, disabled: saving || !groups.length, onChange: (event) => { const next = groups.find((item) => item.id === event.target.value); choose(next.id, next.models[0]); } },
+            !group && h("option", { value: selection.provider }, selection.provider), ...groups.map((item) => h("option", { key: item.id, value: item.id }, item.name || item.id)))),
+          h("label", null, t("模型"), h("select", { "aria-label": t("模型"), value: selection.model, disabled: saving || !group?.models.length, onChange: (event) => choose(group.id, group.models.find((item) => item.id === event.target.value)) },
+            !selected && h("option", { value: selection.model }, selection.model), ...(group?.models || []).map((item) => h("option", { key: item.id, value: item.id }, item.name || item.id)))),
+          h("label", null, t("思考强度"), h("select", { "aria-label": t("思考强度"), value: selected?.reasoning ? selection.reasoningEffort : "", disabled: saving || !selected?.reasoning, onChange: (event) => setSelection({ ...selection, reasoningEffort: event.target.value }) },
+            h("option", { value: "" }, t(selected?.reasoning ? "提供商默认" : "该模型未提供思考强度选项")), ...(selected?.reasoning?.efforts || []).map((effort) => h("option", { key: effort.id, value: effort.id }, t(({ off: "关闭思考", low: "低", medium: "中", high: "高", max: "最高" })[effort.id] || effort.name || effort.id)))))),
+        h(Feedback, { model, name: "section:settings-model-catalog", retry: refresh, t }),
+        ...(catalog?.failures || []).map((failure) => h("p", { key: failure.id, className: "muted" }, `${failure.name}：${failure.message}`)),
+        h("div", { className: "button-row" }, h(Button, { primary: true, busy: saving, disabled: !selected, onClick: apply }, t("应用模型与思考强度"))),
+        h(Feedback, { model, name: "model-select", t }),
+        info && !operation?.error && h("div", { className: "stack" },
+          h("strong", null, `${info.provider} / ${info.model}`),
+          h("span", null, `${t("思考强度")}：${info.reasoningEffort || t("提供商默认")}`),
+          h("span", null, `${t("实际初始输出上限")}：${info.maxTokens ?? t("提供商未返回数值")} ${info.maxTokens ? "token" : ""}`),
+          h("span", { className: "muted" }, t(info.source === "kami" ? "输出预算来源：Kami 已保存设置" : "输出预算来源：DSH 会话或提供商"))),
+        h(Feedback, { model, name: "section:settings-model", retry: () => model.loadSection("settings-model", load), t }));
+    }
     function SettingsView({ model, t }) {
       const data = useSection(model, "settings", (token) => model.invoke("/api/settings", "GET", undefined, token));
       const loadProject = (token) => model.invoke(model.path(`/api/projects/${encodeURIComponent(token.view.projectId)}`, {}, token), "GET", undefined, token);
       const project = useSection(model, "settings-project", loadProject);
       const [active, setActive] = useState("general"), [settings, setSettings] = useState(null), [projectSettings, setProjectSettings] = useState(null);
+      const [modelSelection, setModelSelection] = useState(null);
       const [directory, setDirectory] = useState(model.workspace?.config?.outputDirectory || "outputs");
       useEffect(() => { if (data) setSettings(data.settings || data); }, [data]);
       useEffect(() => { if (project) setProjectSettings(structuredClone(project.settings)); }, [project]);
       const groups = data?.groups || [], rules = project?.qaRuleMetadata || [];
-      const titles = { quality: "质量参数", reference: "参考资料", learning: "学习与评测", retrieval: "检索", orthography: "标点", performance: "性能" };
+      const titles = { model: "模型", quality: "质量参数", reference: "参考资料", learning: "学习与评测", retrieval: "检索", orthography: "标点", performance: "性能" };
       const tabs = [{ id: "general", title: "常规与备份" }, { id: "qa", title: "QA 规则" }, ...groups.map((group) => ({ id: group.group, title: titles[group.group] || group.fields[0]?.label || group.group }))];
       const group = groups.find((item) => item.group === active), qa = active === "qa", saving = model.view.operations[qa ? "qa-settings-save" : "settings-save"]?.pending;
       const save = () => model.perform("settings-save", async (token) => {
         const result = await model.invoke("/api/settings", "POST", settings, token);
         token.view.sections.settings = { ...data, ...result }; setSettings(result.settings);
+        if (active === "model") await model.loadSection("settings-model", (token) => model.request({ action: "model" }, token));
         return result.notes?.map((item) => `${item.label}：${item.note}`).join("；") || "已保存";
       });
       const saveQa = () => model.perform("qa-settings-save", async (token) => {
@@ -956,12 +1014,18 @@ window.__ModuleLoader__.load({
                 h("select", { "aria-label": `${rule.label}${t("的严重度")}`, value: rule.fixed ? rule.defaultSeverity : value.severity, disabled: rule.fixed || !enabled || saving, onChange: (event) => changeRule(rule, { severity: event.target.value }) }, ...rule.severities.map((severity) => h("option", { key: severity, value: severity }, t(({ error: "阻断", warning: "警告", info: "提示" })[severity] || severity))))));
             })))))
           : h(React.Fragment, null, h("h3", null, t(titles[active] || group?.fields[0]?.label || active)),
-            settings && group && h("div", { className: "card settings-fields" }, ...group.fields.map((field) => {
+            active === "model" && h(React.Fragment, null, h(ModelSettingsStatus, { model, t, selection: modelSelection, setSelection: setModelSelection }), h("p", { className: "muted" }, t("输出预算适用于本机所有 Kami 项目的翻译、语境分析和 QA。保存后从下一次模型调用生效；已发出的请求继续使用原参数。"))),
+            active === "reference" && h("section", { className: "card stack" }, h("h3", null, t("直接查阅工作区原件")),
+              h("p", null, t("在「资产」中关联参考资料与风格指南；翻译和质检使用当前 DSH 会话的文件、搜索及文档工具按需查阅。")),
+              h("p", { className: "muted" }, t("不预先拆分片段或建立全文索引。Office、PDF 和图片由对应工具读取，返回容量由原生工具控制。")),
+              h("p", null, t("人工风格指南是必读规范，关闭参考资料不会跳过指南。指南读取失败时任务报错，不会把查阅说明保存为译文。")),
+              h("p", { className: "muted" }, t("保存后用于后续翻译与质检查阅；已开始的查阅沿用启动时的轮数。"))),
+            settings && group && h("div", { className: "card settings-fields" }, ...group.fields.filter((field) => active !== "reference" || ["reference.enabled", "reference.nativeMaxRounds"].includes(field.path)).map((field) => {
               const keys = field.path.split("."), value = keys.reduce((object, key) => object?.[key], settings), boolean = typeof value === "boolean";
               const change = (next) => { const updated = structuredClone(settings); let object = updated; for (const key of keys.slice(0, -1)) object = object[key] ??= {}; object[keys.at(-1)] = next; setSettings(updated); };
               return h("label", { className: "setting-field", key: field.path }, h("span", null, h("strong", null, field.label), h("p", { className: "muted" }, field.hint)), h("input", { className: boolean ? "settings-toggle" : undefined, type: boolean ? "checkbox" : typeof value === "number" ? "number" : "text", role: boolean ? "switch" : undefined, "aria-label": field.label, disabled: saving, min: field.min, max: field.max, step: field.step, value: boolean ? undefined : value ?? "", checked: boolean ? value : undefined, onChange: (event) => change(boolean ? event.target.checked : typeof value === "number" ? Number(event.target.value) : event.target.value) }));
             })))),
-        active !== "general" && h("footer", { className: "settings-footer" }, h("div", null, h("p", { className: "muted" }, t(qa ? "只保存当前项目的 QA 规则。" : "参数修改会一并保存；切换标签页保留未保存内容。")), h(Feedback, { model, name: qa ? "qa-settings-save" : "settings-save", t })), h(Button, { primary: true, onClick: qa ? saveQa : save, disabled: qa ? !projectSettings : !settings, busy: saving }, t(qa ? "保存 QA 规则" : "保存参数"))));
+        active !== "general" && h("footer", { className: "settings-footer" }, h("div", null, h("p", { className: "muted" }, t(qa ? "只保存当前项目的 QA 规则。" : "参数修改会一并保存；切换标签页保留未保存内容。")), h(Feedback, { model, name: qa ? "qa-settings-save" : "settings-save", t })), h(Button, { primary: true, onClick: qa ? saveQa : save, disabled: qa ? !projectSettings : !settings, busy: saving }, t(qa ? "保存 QA 规则" : active === "model" ? "保存模型设置" : "保存参数"))));
     }
     function WorkspaceBody({ model, t, scrollRef }) {
       const [tab, setTab] = useState("任务"), [binding, setBinding] = useState(false);
@@ -976,7 +1040,7 @@ window.__ModuleLoader__.load({
     }
     function Workbench(props) {
       const [, render] = useState(0), modelRef = useRef(null), scrollRef = useRef(null);
-      if (!modelRef.current) modelRef.current = new WorkbenchModel({ sessionId: props.sessionId, call: props.call, prompt: props.prompt, visible: props.visible !== false });
+      if (!modelRef.current) modelRef.current = new WorkbenchModel({ sessionId: props.sessionId, call: props.call, prompt: props.prompt, modelCatalog: props.modelCatalog, selectModel: props.selectModel, visible: props.visible !== false });
       const model = modelRef.current, t = props.t || ((key) => key);
       useEffect(() => model.subscribe(() => render((value) => value + 1)), [model]);
       useEffect(() => {
@@ -1020,6 +1084,13 @@ window.__ModuleLoader__.load({
             const state = await call(sessionId, { action: "workspace" });
             if (!state.isKamiSession || state.workspace !== workspace) throw new Error("当前会话与工作区的 Kami 预设不匹配，请新建翻译会话");
             const result = await ctx.remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: "queue", content: [{ type: "text", text }] }); if (!result.ok) throw new Error(result.error.message); return result.value; };
+          const modelCatalog = async () => {
+            if (!ctx.remote.session.modelCatalog) throw new Error("当前 DSH 未提供模型目录接口，请升级 DSH 后重试");
+            const result = await ctx.remote.session.modelCatalog(); if (!result.ok) throw new Error(result.error.message); return result.value;
+          };
+          const selectModel = async (sessionId, selection) => {
+            const result = await ctx.remote.session.selectModel({ sessionId, ...selection }); if (!result.ok) throw new Error(result.error.message); return result.value;
+          };
           const openWorkbench = (sessionId) => {
             if (!sessionId || ctx.sidebarRight.mounted.getSnapshot() !== sessionId || ctx.sessions.list.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset !== "kami-translator") return;
             const existing = ctx.sidebarRight.openTabs.getSnapshot().find((tab) => tab.sessionId === sessionId && tab.kind === WORKBENCH_KIND);
@@ -1031,7 +1102,7 @@ window.__ModuleLoader__.load({
             for (const tab of ctx.sidebarRight.openTabs.getSnapshot()) if (tab.sessionId === sessionId && tab.kind === WORKBENCH_KIND) ctx.sidebarRight.close(tab.tabId);
           };
           ctx.effect(() => ctx.sidebarRightTabs.register({ id: WORKBENCH_TYPE, kind: WORKBENCH_KIND, title: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), keepMounted: true }));
-          ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({ name: "sidebar.right.pane.tab", key: WORKBENCH_TYPE, locale: "kami-dsh", inject: () => ({ call, prompt }) }, WorkbenchTab));
+          ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({ name: "sidebar.right.pane.tab", key: WORKBENCH_TYPE, locale: "kami-dsh", inject: () => ({ call, prompt, modelCatalog, selectModel }) }, WorkbenchTab));
           ctx.slots.inject("sidebar.right.pane.tab.title", () => ctx.slots.register({ name: "sidebar.right.pane.tab.title", key: WORKBENCH_TYPE, locale: "kami-dsh" }, WorkbenchTitle));
           ctx.slots.inject("shell.overlay", () => ctx.slots.register({ name: "shell.overlay", id: "kami-session-panel", inject: () => ({ hooks: { kamiMounted: ctx.sidebarRight.mounted }, openWorkbench, closeWorkbench }) }, KamiPanelPresence));
           for (const name of ["conversation.hero.options", "conversation.session.header.utilities"]) ctx.slots.inject(name, () => ctx.slots.register({ name, id: "kami-workbench-open", locale: "kami-dsh", inject: () => ({ openWorkbench }) }, WorkbenchOpener));

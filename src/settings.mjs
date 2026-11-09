@@ -29,6 +29,8 @@ import { LOCALES } from "./config.mjs";
 
 /** 每项都写明区间与含义，界面直接用这份定义渲染，避免说明和校验各写一遍。 */
 export const SETTING_SPECS = Object.freeze({
+  "model.maxTokens": { min: 0, max: 1_000_000, step: 1, default: 0, label: "初始输出上限（token）", hint: "用于 Kami 的所有 DSH 模型任务；0 跟随 DSH 会话或提供商，正数覆盖任务内部的固定预算。保存后从下一次模型调用生效" },
+  "model.retryMaxTokens": { min: 0, max: 1_000_000, step: 1, default: 256_000, label: "截断重试上限（token）", hint: "截断后最多重试一次，预算翻倍但不超过此值；0 关闭重试。小于或等于初始上限时不重试，不会降低初始上限。请勿超过提供商支持的输出容量" },
   "quality.qaPassScore": { min: 60, max: 100, step: 1, default: 90, label: "AIQA 通过分", hint: "低于此分自动进入最小修订重审" },
   "quality.maxRevisionAttempts": { min: 0, max: 4, step: 1, default: 2, label: "最大修订轮数", hint: "0 表示不自动修订，只报告问题" },
   "quality.weightBasic": { min: 0, max: 100, step: 5, default: 20, label: "Auto QA 基本检查权重", hint: "三项权重之和必须为 100" },
@@ -37,7 +39,8 @@ export const SETTING_SPECS = Object.freeze({
   "quality.penaltyCritical": { min: 10, max: 100, step: 5, default: 35, label: "critical 扣分", hint: "事实层面的丢失或捏造" },
   "quality.penaltyMajor": { min: 1, max: 50, step: 1, default: 12, label: "major 扣分", hint: "语义范围有出入但信息点仍在" },
   "quality.penaltyMinor": { min: 1, max: 20, step: 1, default: 3, label: "minor 扣分", hint: "措辞偏好" },
-  "reference.enabled": { type: "boolean", default: true, label: "翻译与质检按需查询参考资料", hint: "模型在需要时通过工具查询角色设定、剧本等资料；关掉则完全不查，资料不会进入提示词" },
+  "reference.enabled": { type: "boolean", default: true, label: "按需查阅参考资料原件", hint: "开启后向翻译与质检提供本批次关联的参考资料路径和查阅工具；关闭后不提供参考资料关联。人工风格指南仍必须查阅" },
+  "reference.nativeMaxRounds": { min: 1, max: 20, step: 1, default: 6, label: "原件查阅最多轮数", hint: "每次翻译或质检的查阅轮数，包括列文件、加载文档工具和读取原件；一轮可执行多个工具。用于参考资料和人工风格指南。到达上限后结束查阅；必读指南未读取则报错，可调高后重试" },
   "reference.maxResults": { min: 1, max: 10, step: 1, default: 4, label: "参考资料：每次返回片段数", hint: "一次查询最多返回几段资料" },
   "reference.maxCalls": { min: 1, max: 10, step: 1, default: 3, label: "参考资料：每次翻译最多查询次数", hint: "达到上限后模型必须按已有信息继续" },
   "reference.maxRounds": { min: 1, max: 4, step: 1, default: 2, label: "参考资料：工具调用轮数", hint: "模型可以连续几轮边查边写" },

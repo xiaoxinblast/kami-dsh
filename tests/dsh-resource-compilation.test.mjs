@@ -15,11 +15,15 @@ async function fixture(run) {
   const { fs, close } = await workspaceFs(), messages = [];
   const modelAdapter = async (input, options) => {
     messages.push(JSON.stringify(input));
+    if (options.tools?.some((tool) => tool.function.name === "list_style_guide_files") && !input.some((message) => message.role === "tool")) return { content: "", toolCalls: [{ id: "guide", function: { name: "read", arguments: '{"file_path":"style.custom"}' } }] };
     return { content: options.requestLabel?.startsWith("Auto QA") ? '{"issues":[]}' : "装备星刃。" };
   };
   let workbench = await createWorkbench({ dataDirectory, modelAdapter });
   const context = { cwd, fs, human: true, signal: new AbortController().signal };
-  context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => cwd }, tools: { schemas: () => [] } }, { session: {} }, options, context.signal);
+  context.referenceTools = (options) => createWorkspaceReferenceTools({ fs, workingDirectory: { get: () => cwd }, tools: {
+    schemas: () => [{ name: "read", parameters: { type: "object", properties: { file_path: { type: "string" } } } }],
+    execute: async ({ arguments: args }) => ({ content: [{ type: "text", text: await readFile(join(cwd, args.file_path), "utf8") }] })
+  } }, { session: {} }, options, context.signal);
   try {
     const state = await workbench.workspace({ action: "bind", name: "资源编译验收" }, context);
     const compile = async (path, purpose, content) => {
@@ -64,7 +68,7 @@ test("linking requests agent compilation and accepts native compilation files wi
   assert.ok(snapshot.resources.filter((resource) => resource.purpose !== "style-guide").every((resource) => resource.reader === "agent"));
   for (const kind of ["term", "tm"]) assert.equal((await workbench.invoke({ path: `/api/library-entries?projectId=${state.project.id}&locale=zh-CN&kind=${kind}` }, context)).total, 0);
   await workbench.invoke({ path: "/api/translate", method: "POST", body: { batchId: prepared.batchId, projectId: state.project.id, locale: "zh-CN", source: "星の剣を装備します。", qualityTier: "fast", reflect: false } }, context);
-  for (const probe of ["星刃_术语探针", "装备名称_备注探针", "TM_句对探针", "style.custom"]) assert.ok(messages.some((message) => message.includes(probe)), `${probe} must reach the translation model`);
+  for (const probe of ["星刃_术语探针", "装备名称_备注探针", "TM_句对探针", "style.custom", "风格末尾探针_8137"]) assert.ok(messages.some((message) => message.includes(probe)), `${probe} must reach the translation model`);
   for (const [path, text] of Object.entries(originals)) assert.equal(await readFile(join(cwd, path), "utf8"), text);
 }));
 

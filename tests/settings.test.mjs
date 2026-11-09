@@ -78,6 +78,17 @@ test("未知字段被丢弃，不会污染设置结构", () => {
   assert.equal(settings.未知分组, undefined);
 });
 
+test("DSH 模型预算只接受有界整数，0 保留跟随与关闭重试语义", () => {
+  const invalid = sanitizeSettings({ model: { maxTokens: -1, retryMaxTokens: Infinity } });
+  assert.equal(invalid.settings.model.maxTokens, 0);
+  assert.equal(invalid.settings.model.retryMaxTokens, SETTING_SPECS["model.retryMaxTokens"].default);
+  assert.equal(invalid.notes.length, 2);
+  const bounded = sanitizeSettings({ model: { maxTokens: 12345.7, retryMaxTokens: 9e9 } });
+  assert.equal(bounded.settings.model.maxTokens, 12346);
+  assert.equal(bounded.settings.model.retryMaxTokens, 1_000_000);
+  assert.equal(sanitizeSettings({ model: { retryMaxTokens: 0 } }).settings.model.retryMaxTokens, 0);
+});
+
 test("分组信息供界面渲染，字段不落在两个分组里", () => {
   const groups = settingGroups();
   const paths = groups.flatMap((group) => group.fields.map((field) => field.path));
