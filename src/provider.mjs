@@ -889,6 +889,7 @@ export async function chatWithTools(messages, config = runtimeConfig, {
   maxRounds = 2,
   onActivity = null,
   onToolsUnsupported = null,
+  assertReady = null,
   ...options
 } = {}) {
   if (typeof executeTool !== "function" || !tools.length) {
@@ -903,6 +904,12 @@ export async function chatWithTools(messages, config = runtimeConfig, {
     const message = await chat(conversation, config, { ...options, tools, tool_choice: "auto", returnMessage: true, onToolsUnsupported });
     const calls = message.toolCalls || [];
     if (!calls.length) {
+      try { assertReady?.(); }
+      catch (error) {
+        if (error.code !== "style_guide_unread" || round === lastRound) throw error;
+        conversation.push({ role: "user", content: `前置检查未通过：${error.message}\n请继续使用已提供的工具，成功查阅关联的人工风格指南后，再按原任务要求输出最终结果。不要把查阅说明写入结果。` });
+        continue;
+      }
       content = message.content || "";
       break;
     }
@@ -1456,6 +1463,7 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
       tools: toolRunner.tools,
       maxRounds: toolRunner.maxRounds ?? 4,
       executeTool: toolRunner.execute,
+      assertReady: toolRunner.assertReady,
       onActivity: toolRunner.onActivity
     });
     toolRunner.assertReady?.();
@@ -2132,6 +2140,7 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
       tools: toolRunner.tools,
       maxRounds: toolRunner.maxRounds ?? 2,
       executeTool: toolRunner.execute,
+      assertReady: toolRunner.assertReady,
       onActivity: toolRunner.onActivity
     })).content
     : await chat(messages, configForRole("main"), requestOptions);
@@ -2331,6 +2340,7 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
       tools: toolRunner.tools,
       maxRounds: toolRunner.maxRounds ?? 2,
       executeTool: toolRunner.execute,
+      assertReady: toolRunner.assertReady,
       onActivity: toolRunner.onActivity
     })
     : { content: await chat(initialMessages, callConfig, initialOptions), exhausted: false };

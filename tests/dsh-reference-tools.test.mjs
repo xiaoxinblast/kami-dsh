@@ -8,7 +8,7 @@ import { createWorkspaceReferenceTools } from "../dsh/reference-tools.mjs";
 import { buildReferenceToolRunner } from "../src/reference-context.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
-import { translateWithReflection } from "../src/provider.mjs";
+import { checkBatchConsistencyWithModel, evaluateAutoQaWithModel, translateWithReflection } from "../src/provider.mjs";
 import { workspaceStyleGuide } from "../src/workspace-resources.mjs";
 
 async function fixture(run) {
@@ -157,6 +157,44 @@ test("listing a guide or loading its tools cannot stand in for reading it", asyn
   await withRuntimeCall({ modelAdapter: async () => ({ content: "译文\n\n**非译文说明：** 没有读取原件" }) }, async () => {
     await assert.rejects(translateWithReflection({ source: "原文" }, { reflect: false, toolRunner: tools }), { code: "style_guide_unread" });
   });
+}));
+
+for (const mode of ["translation", "qa", "consistency"]) {
+test(`premature ${mode} answers must read the guide before they can complete`, async () => fixture(async ({ cwd, ctx, agent, calls }) => {
+  await writeFile(join(cwd, "guide.custom"), "必须使用保存设置；保留句末标点。");
+  const toolRunner = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.custom" }], maxRounds: 3 });
+  let attempts = 0;
+  await withRuntimeCall({ modelAdapter: async (messages) => {
+    attempts++;
+    if (attempts === 1) return { content: "未查阅时的草稿" };
+    assert.doesNotMatch(JSON.stringify(messages), /未查阅时的草稿/);
+    if (attempts === 2) {
+      assert.match(messages.at(-1).content, /前置检查未通过/);
+      return { toolCalls: [{ id: "read-guide", function: { name: "read", arguments: '{"file_path":"guide.custom"}' } }] };
+    }
+    assert.match(JSON.stringify(messages), /必须使用保存设置/);
+    return { content: mode === "translation" ? "保存设置。" : mode === "qa" ? '{"issues":[]}' : '{"findings":[]}' };
+  } }, async () => {
+    if (mode === "translation") assert.equal((await translateWithReflection({ source: "設定を保存します。" }, { reflect: false, toolRunner })).translation, "保存设置。");
+    else if (mode === "qa") assert.deepEqual(await evaluateAutoQaWithModel({ source: "設定を保存します。", translation: "保存设置。", locale: "zh-CN", toolRunner }), []);
+    else assert.deepEqual(await checkBatchConsistencyWithModel({ pairs: [{ id: "s1", source: "設定を保存します。", translation: "保存设置。" }], toolRunner }), { findings: [], dropped: [] });
+  });
+  assert.equal(attempts, 3); assert.equal(calls.length, 1);
+  assert.doesNotThrow(() => toolRunner.assertReady());
+}));
+}
+
+test("guide correction stays within the configured round budget and cannot bypass a failed read", async () => fixture(async ({ cwd, ctx, agent, deny, calls }) => {
+  deny();
+  const toolRunner = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.custom" }], maxRounds: 3 });
+  let attempts = 0;
+  await withRuntimeCall({ modelAdapter: async () => {
+    attempts++;
+    return attempts === 1 ? { toolCalls: [{ id: "denied", function: { name: "read", arguments: '{"file_path":"guide.custom"}' } }] } : { content: "未经指南核对的结果" };
+  } }, async () => {
+    await assert.rejects(translateWithReflection({ source: "原文" }, { reflect: false, toolRunner }), { code: "style_guide_unread" });
+  });
+  assert.equal(attempts, 3); assert.equal(calls.length, 1); assert.deepEqual(toolRunner.refs(), []);
 }));
 
 test("original file lists provide the actual workspace and absolute Unicode paths", async () => fixture(async ({ cwd, ctx, agent, calls }) => {
