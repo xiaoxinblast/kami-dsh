@@ -159,6 +159,19 @@ test("listing a guide or loading its tools cannot stand in for reading it", asyn
   });
 }));
 
+test("original file lists provide the actual workspace and absolute Unicode paths", async () => fixture(async ({ cwd, ctx, agent, calls }) => {
+  const path = "资料/风格指南.docx";
+  for (const [key, name] of [["styleGuides", "list_style_guide_files"], ["references", "list_reference_files"]]) {
+    const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, [key]: [{ path, version: "v1" }] });
+    const listed = await tools.execute({ name });
+    assert.ok(listed.text.includes(cwd));
+    const file = listed.text.split("\n").find((line) => line.startsWith("{"));
+    assert.deepEqual(JSON.parse(file), { path, absolutePath: resolve(cwd, path), version: "v1" });
+    assert.equal(calls.length, 0, "listing paths must not read or cache the original");
+    assert.deepEqual(tools.refs(), []);
+  }
+}));
+
 test("native reference settings control actual rounds and cannot be re-enabled by a learned skill", async () => fixture(async ({ cwd, ctx, agent, calls }) => {
   await writeFile(join(cwd, "reference.md"), "原件规则");
   const workspaceSnapshot = { projectId: "p", workspace: cwd, referenceMode: "agent-native", resources: [{ purpose: "reference", path: "reference.md" }] };

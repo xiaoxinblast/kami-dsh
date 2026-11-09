@@ -23,6 +23,37 @@ const stageCode = block("function startConsistencyCheck(", "/**\n * 翻译期术
 const routeCode = block('  if (req.method === "POST" && /^\\/api\\/batch\\/run\\/[^/]+\\/retry-qa', '  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))')
   + block('  if (req.method === "GET" && url.pathname === "/api/tasks")', '  if (req.method === "POST" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/export"))');
 
+for (const mode of ["success", "partial", "throw"]) {
+test(`一致性修复后的复核结果必须传递到报告和后台任务：${mode}`, async () => {
+  const failure = "人工风格指南尚未成功查阅";
+  let saved, task;
+  const run = { batchId: "verify", segments: [{ id: "s1", source: "原文", translation: "译文", status: "done" }] };
+  const context = vm.createContext({
+    getBatchRun: async () => saved || run, saveBatchRun: async (value) => { saved = value; },
+    taskProgressReporter: () => () => {}, getProviderConfig: () => ({}), getProjectAssets: async () => ({ assets: {} }),
+    mergeWorkingAssets: (assets) => assets, deterministicConsistencyFindings: () => [], getProjectStyleProfile: async () => null,
+    consistencyTermEvidence: () => [], consistencyTmEvidence: async () => [], splitConsistencyChunks: () => [{ index: 0, ids: ["s1"] }],
+    consistencyChunkEvidence: () => ({}), buildReferenceToolRunner: () => null, checkBatchConsistencyWithModel: async () => [],
+    runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 1, mergeConsistencyFindings: () => [],
+    applyConsistencyRepairs: async ({ segments }) => ({ segments, repair: { changed: [{ segmentId: "s1" }] } }),
+    adjudicateRemainingFindings: async ({ segments }) => ({ segments }),
+    recheckConsistencyChunks: async () => {
+      if (mode === "throw") throw new Error(failure);
+      return { checkedChunks: 1, remaining: [], failures: mode === "partial" ? [failure] : [] };
+    },
+    annotateConsistencyFindings: (findings) => findings, buildQualityReport: () => ({ coverage: { percent: 100 } }),
+    consistencyCheckTasks: new Map(), createBackgroundTask: async () => ({ id: "task" }), attachBatchWorkflowTask: async () => {},
+    updateBackgroundTaskProgress: async (_id, value) => { task = value; }
+  });
+  vm.runInContext(block("async function runConsistencyCheck(", "/**\n * 翻译期术语普查"), context);
+  const outcome = await context.startConsistencyCheck(run.batchId);
+  assert.equal(outcome.failures.length, mode === "success" ? 0 : 1);
+  assert.equal(saved.qualityReport.warning, mode === "success" ? "" : failure);
+  assert.equal(task.status, mode === "success" ? "completed" : "needs_attention");
+  if (mode !== "success") assert.match(task.progress.message, /未完整完成/);
+});
+}
+
 test("术语普查在一致性修复后读取批次，不用旧快照覆盖报告和修订译文", async () => {
   let saved = { qualityReport: null, translation: "旧译文" };
   let finishQuality;

@@ -19,8 +19,9 @@ test("real DSH sandbox uses the session file policy for config and binary export
   const workspace = join(directory, "workspace"), fallback = join(directory, "deployment-root");
   await mkdir(workspace); await mkdir(fallback);
   const ctx = new Context();
-  ctx.reflect.provide("sessionProjections", { register() {}, stateOf: (session) => session.mode || null });
-  const policy = new SandboxPolicy(ctx, { mode: "workspace-write", workspaceRoot: fallback });
+  ctx.reflect.provide("sessionProjections", { register: () => ({ stateOf: (session) => session.mode || null }) });
+  ctx.plugin(SandboxPolicy, { mode: "workspace-write", workspaceRoot: fallback });
+  const policy = await new Promise((resolve) => ctx.inject(["sandboxPolicy"], (scope) => { resolve(scope.sandboxPolicy); }));
   const fs = new SandboxedFileSystem(ctx, { cwd: fallback, diffBasisMaxBytes: 1024 * 1024 });
   const context = { cwd: workspace, fs, signal: new AbortController().signal };
   const project = { id: "test-project", name: "test" };

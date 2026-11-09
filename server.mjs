@@ -4020,6 +4020,7 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
       verification = { checkedChunks: 0, remaining: [], failures: [error.message] };
     }
   }
+  failures.push(...(verification?.failures || []));
   const findings = annotateConsistencyFindings(merged, repaired.repair, verification);
   const qualityReport = buildQualityReport({
     segments: repaired.segments, brief: run.contextBrief || null, findings, provider, styleProfile,
@@ -4070,7 +4071,7 @@ function startConsistencyCheck(batchId) {
         status: outcome.failures.length ? "needs_attention" : "completed",
         progress: {
           phase: "completed",
-          message: `一致性核对完成：${outcome.findings.length} 条待核对${repairedCount ? ` · 已按证据自动统一 ${repairedCount} 段` : ""}，质检覆盖率 ${outcome.report.coverage.percent}%`,
+          message: outcome.failures.length ? `一致性核对未完整完成：${outcome.failures[0]}` : `一致性核对完成：${outcome.findings.length} 条待核对${repairedCount ? ` · 已按证据自动统一 ${repairedCount} 段` : ""}，质检覆盖率 ${outcome.report.coverage.percent}%`,
           percent: 100,
           completed: outcome.findings.length,
           total: outcome.findings.length

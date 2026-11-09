@@ -38,7 +38,7 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
         if (name === list.name && references.length || name === guidesList.name && styleGuides.length) {
           const skills = names.has("skill") && ctx.skills?.list ? await ctx.skills.list({ cwd: current, scope: agent, signal }) : [];
           const guide = name === guidesList.name, files = guide ? styleGuides : references;
-          return { text: `${guide ? "人工风格指南只保留关联，翻译或审校前必须直接读取并遵守以下原件中的完整规则、例外和正反例；优先于其他风格规则" : "参考资料只保留关联，请按需直接读取以下原件"}（版本为关联时记录，正文以实际读取的原件为准）：\n${files.map((item) => JSON.stringify({ path: item.path, version: item.version || item.hash })).join("\n")}${skills.length ? `\n当前会话技能目录（按需用 skill 加载）：\n${skills.map((item) => `${item.name}: ${item.description || ""}`).join("\n")}` : ""}`, refs: [] };
+          return { text: `${guide ? "人工风格指南只保留关联，翻译或审校前必须直接读取并遵守以下原件中的完整规则、例外和正反例；优先于其他风格规则" : "参考资料只保留关联，请按需直接读取以下原件"}（版本为关联时记录，正文以实际读取的原件为准）：\n当前工作区：${current}\n请使用以下 absolutePath，或在当前工作区中使用 path；保留路径原文，不要推测用户目录。\n${files.map((item) => JSON.stringify({ path: item.path, absolutePath: resolve(current, item.path), version: item.version || item.hash })).join("\n")}${skills.length ? `\n当前会话技能目录（按需用 skill 加载）：\n${skills.map((item) => `${item.name}: ${item.description || ""}`).join("\n")}` : ""}`, refs: [] };
         }
         if (!names.has(name)) throw new Error("此工具不属于当前会话的参考查阅能力");
         const args = typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
