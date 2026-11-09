@@ -5,6 +5,18 @@ import { withRuntimeCall } from "../src/runtime-context.mjs";
 
 const entries = ["a", "b"].map(id => ({ id, contextPack: { source: `台詞${id}`, sourceLanguage: "日语", targetLanguage: "简体中文", targetLocale: "zh-CN", contentType: "dialogue", userProfile: { instruction: "必须读取 guide.docx" } } }));
 
+test("未确认工作术语在小批提示中只能作为参考", async () => {
+  let prompt;
+  const values = entries.map(entry => ({ ...entry, contextPack: { ...entry.contextPack, workingTerms: [{ source: "より", target: "关系" }] } }));
+  await withRuntimeCall({ modelAdapter: async messages => {
+    prompt = messages.map(message => message.content).join("\n");
+    return { content: JSON.stringify({ translations: values.map(entry => ({ id: entry.id, translation: `译文${entry.id}` })) }) };
+  }, modelRoute: { provider: "test", model: "same-model" } }, () => translateMicroBatchWithModel(values));
+  assert.match(prompt, /仅供语境参考/u);
+  assert.match(prompt, /不得强制套用/u);
+  assert.doesNotMatch(prompt, /同一文件内统一采用/u);
+});
+
 test("小批共享指南但仍执行真实查阅门禁，工具输出不充当译文", async () => {
   const calls = [], trace = { events: [] };
   let read = false;

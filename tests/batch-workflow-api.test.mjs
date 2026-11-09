@@ -7,7 +7,7 @@ import { retryServerBatchQa } from "../src/batch-runner.mjs";
 import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows, summarizeBatchSegments } from "../public/batch-status.js";
 import { runTaskPool } from "../src/task-pool.mjs";
 import { surveyPairs } from "../src/term-survey.mjs";
-import { markedSurveyTerms } from "../src/term-memory-survey.mjs";
+import { markedSurveyTerms, restoreUnverifiedSurveyRepairs } from "../src/term-memory-survey.mjs";
 import { normalizeSource } from "../src/text.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
@@ -24,16 +24,37 @@ const stageCode = block("function startConsistencyCheck(", "/**\n * 翻译期术
 const routeCode = block('  if (req.method === "POST" && /^\\/api\\/batch\\/run\\/[^/]+\\/retry-qa', '  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))')
   + block('  if (req.method === "GET" && url.pathname === "/api/tasks")', '  if (req.method === "POST" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/export"))');
 
+test("全文尚未翻完时 QA 补试不触发整批检查，终轮及翻译失败收尾仍保留", async () => {
+  for (const status of ["pending", "queued", "running", "done", "error"]) {
+    let finalizations = 0;
+    const batchQaWorkers = new Map(), run = { batchId: "retry", segments: [{ status, selected: true }], runnerOptions: {} };
+    const retry = vm.runInNewContext(`(${block("function startBatchQaRetry(", "function startBatchWorker(").trim()})`, {
+      beginBackgroundRun: () => ({ cancelRequested: false }), endBackgroundRun: () => {}, batchWorkers: new Map(), batchQaWorkers,
+      consistencyCheckTasks: new Map(), termSurveyTasks: new Map(), attachBatchWorkflowTask: async () => {},
+      retryServerBatchQa: async () => ({ completed: 1, total: 1, failed: 0 }), translateBatchSegment: async () => {},
+      getBatchRun: async () => run, saveBatchRun: async () => {}, updateBackgroundTaskProgress: async () => {},
+      finalizeBatchWorkflow: async () => { finalizations += 1; }
+    });
+    retry("retry", "task");
+    await batchQaWorkers.get("retry").promise;
+    assert.equal(finalizations, ["done", "error"].includes(status) ? 1 : 0, status);
+    assert.equal(batchQaWorkers.size, 0);
+  }
+});
+
 for (const mode of ["success", "partial", "throw"]) {
 test(`一致性修复后的复核结果必须传递到报告和后台任务：${mode}`, async () => {
   const failure = "人工风格指南尚未成功查阅";
   let saved, task;
-  const run = { batchId: "verify", segments: [{ id: "s1", source: "原文", translation: "译文", status: "done" }] };
+  const working = { source: "より", target: "关系", working: true };
+  const run = { batchId: "verify", runnerOptions: { workingGlossary: { terms: [working] } }, segments: [{ id: "s1", source: "原文", translation: "译文", status: "done", result: { matches: [{ term: working, mode: "exact" }] } }] };
   const context = vm.createContext({
     getBatchRun: async () => saved || run, saveBatchRun: async (value) => { saved = value; },
     taskProgressReporter: () => () => {}, getProviderConfig: () => ({}), getProjectAssets: async () => ({ assets: {} }),
-    mergeWorkingAssets: (assets) => assets, deterministicConsistencyFindings: () => [], getProjectStyleProfile: async () => null,
-    consistencyTermEvidence: () => [], consistencyTmEvidence: async () => [], splitConsistencyChunks: () => [{ index: 0, ids: ["s1"] }],
+    mergeWorkingAssets: assets => ({ ...assets, terms: [working] }),
+    buildPatternKey: (_source, { terms }) => { assert.equal(terms.some(term => term.working), false, "工作术语不能变成一致性修订的强制骨架"); return "pattern"; },
+    deterministicConsistencyFindings: segments => { assert.equal(segments[0].result.matches.length, 0, "未确认工作术语不作为登记术语发起一致性修订"); return []; }, getProjectStyleProfile: async () => null,
+    consistencyTermEvidence: (_run, _segments, assets) => { assert.equal((assets.terms || []).some(term => term.working), false); return []; }, consistencyTmEvidence: async () => [], splitConsistencyChunks: () => [{ index: 0, ids: ["s1"] }],
     consistencyChunkEvidence: () => ({}), buildReferenceToolRunner: () => null, checkBatchConsistencyWithModel: async () => [],
     runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 1, mergeConsistencyFindings: () => [],
     applyConsistencyRepairs: async ({ segments }) => ({ segments, repair: { changed: [{ segmentId: "s1" }] } }),
@@ -48,6 +69,7 @@ test(`一致性修复后的复核结果必须传递到报告和后台任务：${
   });
   vm.runInContext(block("async function runConsistencyCheck(", "/**\n * 翻译期术语普查"), context);
   const outcome = await context.startConsistencyCheck(run.batchId);
+  assert.equal(outcome.failed, undefined, outcome.failed);
   assert.equal(outcome.failures.length, mode === "success" ? 0 : 1);
   assert.equal(saved.qualityReport.warning, mode === "success" ? "" : failure);
   assert.equal(task.status, mode === "success" ? "completed" : "needs_attention");
@@ -77,7 +99,7 @@ test("术语普查部分查询失败时保留标记，不计入成功覆盖", as
   ] };
   const survey = vm.runInNewContext(`(${block("async function runTermSurvey(", "async function termSurveyMemoryEntries(").trim()})`, {
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = value; },
-    surveyPairs, markedSurveyTerms, normalizeSource, runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 2,
+    surveyPairs, markedSurveyTerms, restoreUnverifiedSurveyRepairs, normalizeSource, runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 2,
     getResourceLibraries: async () => [], resolveTermMemoryWithModel: async () => [],
     termSurveyMemoryEntries: async (_run, source) => { if (source === "乙") throw new Error("503"); return []; },
     resolveTermMemory: async () => ({ status: "not_found", target: "", evidence: [] }),

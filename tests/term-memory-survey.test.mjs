@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { textContainsTerm } from "../src/asset-governance.mjs";
 import { digitSequence, extractProtectedTokens, normalizeSource } from "../src/text.mjs";
 import { applyDeterministicReplacement } from "../src/consistency-repair.mjs";
-import { markedSurveyTerms, resolveTermMemory, parseTermMemoryAlignment } from "../src/term-memory-survey.mjs";
+import { markedSurveyTerms, resolveTermMemory, parseTermMemoryAlignment, restoreUnverifiedSurveyRepairs, surveyTermApplies, verifiedSurveyMemory } from "../src/term-memory-survey.mjs";
 
 const term = { source: "星屑結晶", suggestedTarget: "星尘结晶" };
 const entry = (id, role, target, source = term.source) => ({ id, libraryRole: role, libraryName: role, source, target });
@@ -76,7 +76,9 @@ test("统一文件译法保护人工终稿、标记和数字，失败仍保留�
   const start = source.indexOf("async function repairSurveyTerms("), end = source.indexOf("/** 起一个术语普查后台任务", start);
   const repair = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
     textContainsTerm, normalizeSource, digitSequence, extractProtectedTokens, applyDeterministicReplacement,
+    surveyTermApplies, verifiedSurveyMemory,
     matchTerms: () => [], consistencySegmentIssues: () => [], syncConsistencyRepairRecords: async () => {},
+    translateBatchSegment: async body => ({ translation: body.translation, aiQa: { used: true, status: "passed", score: 100, fallbackReason: "" } }),
     reviseSegmentForConsistency: async () => "得到星晶。"
   });
   const segments = [
@@ -84,10 +86,103 @@ test("统一文件译法保护人工终稿、标记和数字，失败仍保留�
     { id: "human", source: term.source, translation: "人工决定的译法", accepted: true },
     { id: "safe", source: term.source, translation: "使用星尘结晶。" }
   ];
-  const result = await repair({ segments }, [{ ...term, initialTarget: term.suggestedTarget, tm: { status: "matched", target: "星晶" } }], {});
+  const result = await repair({ segments }, [{ ...term, initialTarget: term.suggestedTarget, tm: verifiedTm(term.source, "星晶") }], {});
   assert.equal(result.segments[0].translation, segments[0].translation);
   assert.equal(result.segments[1].translation, segments[1].translation);
   assert.equal(result.segments[2].translation, "使用星晶。");
   assert.equal(result.repair.changed.length, 1);
   assert.match(result.repair.skipped[0].reason, /保护标记或数字/);
+});
+
+async function surveyRepairHarness(overrides = {}) {
+  const source = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("async function repairSurveyTerms("), end = source.indexOf("/** 起一个术语普查后台任务", start);
+  return vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    textContainsTerm, normalizeSource, digitSequence, extractProtectedTokens, applyDeterministicReplacement,
+    surveyTermApplies, verifiedSurveyMemory,
+    matchTerms: () => [], consistencySegmentIssues: () => [], syncConsistencyRepairRecords: async () => {},
+    translateBatchSegment: async body => ({ translation: body.translation, aiQa: { used: true, status: "passed", score: 100, fallbackReason: "" } }),
+    ...overrides
+  });
+}
+
+const verifiedTm = (source, target) => ({ status: "matched", role: "master", target, evidence: [{ source, translation: target, target, role: "master", libraryId: "master" }] });
+
+test("未经 TM 核实的工作术语不能强改助词或跨语境词义", async () => {
+  let calls = 0;
+  const repair = await surveyRepairHarness({ reviseSegmentForConsistency: async ({ target }) => { calls += 1; return target === "关系" ? "研究所关系通知" : "船员已经弹射"; } });
+  const segments = [{ id: "a", source: "研究所より通知", translation: "研究所发来通知" }, { id: "b", source: "船員は脱出した", translation: "船员已经撤离" }];
+  const result = await repair({ segments }, [{ source: "より", suggestedTarget: "关系", tm: { status: "not_found" } }, { source: "脱出", suggestedTarget: "弹射", tm: { status: "conflict" } }], {});
+  assert.deepEqual(result.segments.map(s => s.translation), segments.map(s => s.translation));
+  assert.equal(calls, 0);
+  assert.equal(result.repair.changed.length, 0);
+});
+
+test("长词中的短词不能覆盖整词译法，即使短词有 TM 命中", async () => {
+  const repair = await surveyRepairHarness({ reviseSegmentForConsistency: async () => "已被洛克" });
+  const segments = [{ id: "a", source: "ロックオンされた", translation: "已被锁定" }];
+  const result = await repair({ segments }, [{ source: "ロック", suggestedTarget: "洛克", tm: verifiedTm("ロック", "洛克") }, { source: "ロックオン", suggestedTarget: "锁定", tm: { status: "not_found" } }], {});
+  assert.equal(result.segments[0].translation, "已被锁定");
+  assert.equal(result.repair.changed.length, 0);
+});
+
+test("TM 统一仍须通过逐段模型 QA，未通过时保留原译文", async () => {
+  let qaCalls = 0;
+  const repair = await surveyRepairHarness({ translateBatchSegment: async body => { qaCalls += 1; return { translation: body.translation, aiQa: { used: true, status: "needs_review", score: 50, fallbackReason: "" } }; } });
+  const segments = [{ id: "a", source: "星屑結晶を使う", translation: "使用星尘结晶" }];
+  const result = await repair({ segments }, [{ ...term, tm: verifiedTm(term.source, "星晶") }], {});
+  assert.equal(qaCalls, 1);
+  assert.equal(result.segments[0].translation, "使用星尘结晶");
+  assert.equal(result.repair.changed.length, 0);
+});
+
+test("只凭 matched 标记或不对应的 TM 证据不能自动统一", () => {
+  assert.equal(verifiedSurveyMemory({ source: "星屑結晶", tm: { status: "matched", target: "星晶" } }), false);
+  assert.equal(verifiedSurveyMemory({ source: "星屑結晶", tm: verifiedTm("別の品", "星晶") }), false);
+  assert.equal(verifiedSurveyMemory({ source: "星屑結晶", tm: verifiedTm("星屑結晶", "星晶") }), true);
+});
+
+test("术语边界保护片假名、英文单词、较长汉字词以及混合出现", () => {
+  assert.equal(surveyTermApplies("レインバンド", "レイ"), false);
+  assert.equal(surveyTermApplies("レイより通知", "レイ"), true);
+  assert.equal(surveyTermApplies("Rocketeer", "Rock"), false);
+  assert.equal(surveyTermApplies("Rock arrives", "Rock"), true);
+  assert.equal(surveyTermApplies("護衛機", "護衛", [{ source: "護衛機" }]), false);
+  assert.equal(surveyTermApplies("護衛と護衛機", "護衛", [{ source: "護衛機" }]), false);
+});
+
+test("恢复旧版无证据修订使用完整链起点，保护人工编辑且可重复执行", () => {
+  const change = (id, before, after, kind = "file_working_term") => ({ segmentId: id, source: "候補", before, after, evidence: { kind } });
+  const run = { segments: [
+    { id: "restore", source: "例", translation: "最终误改", status: "done", result: { aiQa: { used: true, status: "passed" } } },
+    { id: "edited", translation: "人工新译文" }, { id: "accepted", translation: "错误", accepted: true },
+    { id: "mixed", translation: "已核实" }, { id: "unchanged", translation: "原译文" }
+  ], runnerOptions: { termSurvey: { repair: { changed: [
+    change("restore", "原译文", "首次误改"), change("restore", "首次误改", "最终误改"),
+    change("edited", "原译文", "错误"), change("accepted", "原译文", "错误"),
+    change("mixed", "原译文", "错误"), change("mixed", "错误", "已核实", "tm"),
+    change("unchanged", "原译文", "错误"), change("unchanged", "错误", "原译文")
+  ] } } } };
+  const restored = restoreUnverifiedSurveyRepairs(run);
+  assert.equal(restored.changed.length, 1);
+  assert.equal(restored.skipped.length, 3);
+  assert.deepEqual(restored.segments.map(s => s.translation), ["原译文", "人工新译文", "错误", "已核实", "原译文"]);
+  assert.match(restored.segments[0].result.aiQa.fallbackReason, /等待重新质检/);
+  assert.equal(run.segments[0].translation, "最终误改");
+  assert.equal(restoreUnverifiedSurveyRepairs({ ...run, segments: restored.segments }).changed.length, 0);
+  assert.equal(restoreUnverifiedSurveyRepairs({ ...run, runnerOptions: { termSurvey: { repair: { ...run.runnerOptions.termSurvey.repair, verifiedMemoryOnly: true } } } }).changed.length, 0);
+});
+
+test("术语修订 QA 中断或改坏保护标记时不得覆盖原译文", async () => {
+  for (const result of [
+    { translation: "使用星晶<ph id='1'/>", aiQa: { used: true, status: "passed", fallbackReason: "transport failed" } },
+    { translation: "使用星晶", aiQa: { used: true, status: "passed", fallbackReason: "" } }
+  ]) {
+    const repair = await surveyRepairHarness({ translateBatchSegment: async () => result });
+    const segments = [{ id: "a", source: "星屑結晶を使う<ph id='1'/>", translation: "使用星尘结晶<ph id='1'/>" }];
+    const outcome = await repair({ segments }, [{ ...term, tm: verifiedTm(term.source, "星晶") }], {});
+    assert.equal(outcome.segments[0].translation, segments[0].translation);
+    assert.equal(outcome.repair.changed.length, 0);
+    assert.equal(outcome.repair.skipped.length, 1);
+  }
 });

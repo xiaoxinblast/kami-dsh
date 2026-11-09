@@ -392,7 +392,7 @@ export function contextPackText(contextPack = {}, purpose = "review") {
   if (briefText) lines.push(`文件语境：\n${briefText}`);
   if (pack.requiredTerms?.length) lines.push(`强制术语（必须逐字采用）：${JSON.stringify(pack.requiredTerms)}`);
   if (pack.preferredTerms?.length) lines.push(`参考术语（结合句义判断，不得仅凭字面强制替换）：${JSON.stringify(pack.preferredTerms)}`);
-  if (pack.workingTerms?.length) lines.push(`本文件工作术语（优先级低于主术语库；同一文件内统一采用，不得逐段更换译法）：${JSON.stringify(pack.workingTerms)}`);
+  if (pack.workingTerms?.length) lines.push(`本文件工作术语（优先级低于主术语库；未经人工或主 / 参考 TM 核实，仅供语境参考；不得强制套用，也不得用短词覆盖长词、改变词义或遗漏信息）：${JSON.stringify(pack.workingTerms)}`);
   if (pack.patternReferences?.length) lines.push(`同句式参考（固定部分沿用参考译法，只替换当前原文的变量部分）：${JSON.stringify(pack.patternReferences)}`);
   if (pack.protectedTokens?.length) lines.push(`必须原样保留：${JSON.stringify(pack.protectedTokens)}`);
   if (pack.factSchema?.facts?.length || pack.factSchema?.limits?.length) lines.push(`事实锚点：${JSON.stringify(pack.factSchema)}`);
@@ -457,7 +457,7 @@ export function packPrompt(contextPack, { includeStable = true, batch = false } 
     variable.push(`⚠️ 以下原文在术语库里存在多个登记译法，本次译文只能采用其中一个，不得在同一条里混用，也不得自行造第三种译法：\n${conflictedTerms.map((term) => `· ${term.source}：${term.target}`).join("\n")}`);
   }
   if (pack.workingTerms?.length) {
-    variable.push(`本文件工作术语（优先级低于主术语库；同一文件内统一采用，除非当前句义明确不适用）：\n${termsSummary(pack.workingTerms)}`);
+    variable.push(`本文件工作术语（优先级低于主术语库；未经人工或主 / 参考 TM 核实，仅供语境参考；不得强制套用，也不得用短词覆盖长词、改变词义或遗漏信息）：\n${termsSummary(pack.workingTerms)}`);
   }
   if (pack.patternReferences?.length) {
     variable.push(`同句式参考（这些句子共用同一固定框架；固定部分必须沿用参考译法，只替换当前原文的变量内容，变量不得照抄）：\n${pack.patternReferences.map((item) => `· ${item.source} → ${item.target}`).join("\n")}`);

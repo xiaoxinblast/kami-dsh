@@ -17,6 +17,63 @@ export function markedSurveyTerms(glossary = {}, existingTerms = []) {
   }));
 }
 
+/** 工作术语只是候选；只有可追溯到主 / 参考 TM 原文的对应译法才能自动修订。 */
+export function verifiedSurveyMemory(term) {
+  const tm = term?.tm;
+  return tm?.status === "matched" && ["master", "reference"].includes(tm.role) && Boolean(tm.target)
+    && Array.isArray(tm.evidence) && tm.evidence.length > 0
+    && tm.evidence.every(item => item.role === tm.role && normalizeSource(item.target) === normalizeSource(tm.target)
+      && textContainsTerm(item.source, term.source) && textContainsTerm(item.translation, item.target));
+}
+
+/** 不把较长术语或片假名单词中的一部分当作独立术语；混合出现也留待核对。 */
+export function surveyTermApplies(source, phrase, terms = []) {
+  const text = normalizeSource(source), needle = normalizeSource(phrase);
+  if (!needle || !text.includes(needle)) return false;
+  const longer = terms.flatMap(term => [term.source, ...(term.aliases || [])]).map(normalizeSource).filter(value => value.length > needle.length && value.includes(needle));
+  for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) {
+    const left = text[at - 1] || "", right = text[at + needle.length] || "";
+    if (/[\p{Script=Katakana}ー]/u.test(needle[0]) && /[\p{Script=Katakana}ー]/u.test(left)
+      || /[\p{Script=Katakana}ー]/u.test(needle.at(-1)) && /[\p{Script=Katakana}ー]/u.test(right)
+      || /[a-z0-9_]/u.test(needle[0]) && /[a-z0-9_]/u.test(left)
+      || /[a-z0-9_]/u.test(needle.at(-1)) && /[a-z0-9_]/u.test(right)) return false;
+    for (const value of longer) {
+      for (let start = text.indexOf(value); start >= 0; start = text.indexOf(value, start + 1)) {
+        if (start <= at && start + value.length >= at + needle.length) return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** 重跑普查时撤销旧版未经核实的自动统一；只恢复完整修订链且仍与末次结果相同的机器稿。 */
+export function restoreUnverifiedSurveyRepairs(run) {
+  const previous = run.runnerOptions?.termSurvey?.repair;
+  const segments = run.segments.map(segment => ({ ...segment })), changed = [], skipped = [];
+  if (previous?.verifiedMemoryOnly) return { segments, changed, skipped };
+  const chains = new Map();
+  for (const change of previous?.changed || []) {
+    const chain = chains.get(String(change.segmentId)) || [];
+    chain.push(change);
+    chains.set(String(change.segmentId), chain);
+  }
+  for (const [id, chain] of chains) {
+    if (!chain.some(change => change.evidence?.kind === "file_working_term")) continue;
+    const segment = segments.find(item => String(item.id) === id), first = chain[0], last = chain.at(-1);
+    if (!segment || first.before === last.after) continue;
+    if (segment.accepted || segment.selected === false || segment.translation !== last.after || chain.some((change, index) => !String(change.before || "").trim() || typeof change.after !== "string" || change.evidence?.kind !== "file_working_term" || index > 0 && change.before !== chain[index - 1].after)) {
+      skipped.push({ segmentId: id, reason: "译文已被修改、人工采纳或修订链含其他证据，未自动恢复" });
+      continue;
+    }
+    const change = { segmentId: id, source: first.source, before: last.after, after: first.before, evidence: { kind: "restore_unverified_survey" } };
+    segment.translation = first.before;
+    segment.result = { ...segment.result, translation: first.before, aiQa: { ...segment.result?.aiQa, used: false, score: null, status: "review", fallbackReason: "已撤销未经核实的术语统一，等待重新质检" } };
+    delete segment.result.termSurveyRepair;
+    changed.push(change);
+  }
+  return { segments, changed, skipped };
+}
+
 export function termMemoryMessages(items = []) {
   return [
     { role: "system", content: [
