@@ -11,7 +11,8 @@ test("Kami equips the active shell executor and skill tools for Office originals
   for (const bash of [true, false]) {
     const plugins = [];
     await agent.apply({
-      get: () => true, shell: bash ? Object.create(LocalBashExecutor.prototype) : {},
+      get: (name) => name === "shell" ? (bash ? Object.create(LocalBashExecutor.prototype) : {}) : true,
+      get shell() { throw new Error('cannot get property "shell" without inject'); },
       plugin: (plugin, config) => plugins.push({ plugin, config }),
       tools: { presentAs: () => () => {}, register: () => {} }, effect: (run) => run(), systemPrompt: { section: () => {} }
     });
