@@ -353,6 +353,8 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
       && Number.isFinite(Number(result.qaScore));
     if (hasScore && !result.aiQa?.fallbackReason) {
       scores.push(Number(result.qaScore));
+    }
+    if (!result.aiQa?.fallbackReason && (hasScore || result.aiQa?.used && result.aiQa.status === "revised")) {
       modelQa += 1;
     }
     const issues = Array.isArray(result.issues) ? result.issues : [];

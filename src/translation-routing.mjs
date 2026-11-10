@@ -133,8 +133,13 @@ export function qualityThresholdForRisk(riskTier = "medium") {
   return { low: 88, medium: 90, high: 93, critical: 96 }[riskTier] || 90;
 }
 
-export function decideQualityRoute({ qaScore = null, hardErrorCount = 0, riskTier = "medium", hasQualityUpgrade = false, alreadyEscalated = false, aiQaUsed = true, passScore = 0 } = {}) {
+export function decideQualityRoute({ qaScore = null, qaStatus = "", hardErrorCount = 0, riskTier = "medium", hasQualityUpgrade = false, alreadyEscalated = false, aiQaUsed = true, passScore = 0 } = {}) {
   const threshold = Math.max(qualityThresholdForRisk(riskTier), Number(passScore) || 0);
+  if (aiQaUsed && qaStatus === "revised") {
+    if (Number(hardErrorCount) > 0) return { decision: "human_review", threshold, reason: `修订后规则检查仍有 ${hardErrorCount} 个阻断问题` };
+    if (riskTier === "critical") return { decision: "human_review", threshold, reason: "已按 QA 意见修订，关键发布风险内容仍需人工确认" };
+    return { decision: "auto_pass", threshold, reason: "已按 QA 意见修订，规则检查通过；修订后不做模型复检" };
+  }
   if (!aiQaUsed || !Number.isFinite(Number(qaScore))) {
     return { decision: "human_review", threshold, reason: "AIQA 未完成，不能自动放行" };
   }

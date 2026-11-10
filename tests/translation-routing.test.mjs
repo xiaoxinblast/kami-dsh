@@ -31,3 +31,12 @@ test("AIQA 未完成永不自动放行，低分可升级一次", () => {
   assert.equal(decideQualityRoute({ qaScore: 96, riskTier: "high" }).decision, "auto_pass");
   assert.equal(decideQualityRoute({ qaScore: 99, riskTier: "critical" }).decision, "human_review");
 });
+
+test("取消模型复检后按最终规则结果结束，阻断和关键发布风险仍需处理", () => {
+  const args = { qaStatus: "revised", qaScore: null, aiQaUsed: true, hasQualityUpgrade: true };
+  assert.equal(decideQualityRoute(args).decision, "auto_pass");
+  assert.match(decideQualityRoute(args).reason, /规则检查通过/);
+  assert.equal(decideQualityRoute({ ...args, hardErrorCount: 1 }).decision, "human_review");
+  assert.equal(decideQualityRoute({ ...args, riskTier: "critical" }).decision, "human_review");
+  assert.equal(decideQualityRoute({ ...args, aiQaUsed: false }).decision, "human_review");
+});

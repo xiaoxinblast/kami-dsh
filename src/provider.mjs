@@ -935,6 +935,27 @@ export async function chatWithTools(messages, config = runtimeConfig, {
   } finally { await disposeTools?.(); }
 }
 
+/** 同一段 QA 与修订只复用本轮真实工具证据，不保留旧审校结论或跨段缓存。 */
+async function chatWithQaReferences(messages, options, session) {
+  const runner = session?.toolRunner;
+  if (!runner?.tools?.length) return chat(messages, runtimeConfig, options);
+  const evidence = session.messages?.length ? [{ role: "user", content: "以下工具证据已在当前这一段的本轮 QA 中实际读取，可直接用于当前审校或修订，无需重复读取；有新的疑点时仍可按需查阅原件。" }, ...session.messages] : [];
+  const result = await chatWithTools([messages[0], ...evidence, ...messages.slice(1)], runtimeConfig, {
+    ...options,
+    tools: runner.tools,
+    maxRounds: runner.maxRounds ?? 4,
+    executeTool: runner.execute,
+    assertReady: runner.assertReady,
+    disposeTools: runner.dispose,
+    onActivity: runner.onActivity
+  });
+  runner.assertReady?.();
+  session.messages = (result.messages || []).filter(message => message.role === "tool" || message.role === "assistant" && message.tool_calls?.length)
+    .map(message => message.role === "assistant" ? { ...message, content: "" } : message);
+  if (!result.exhausted) return result.content;
+  return chat([...result.messages, { role: "user", content: "工具轮次已用完。请根据已返回的原件证据完成当前任务，只输出要求的最终结果，不要再调用工具。" }], runtimeConfig, options);
+}
+
 export function isEmbeddingConfigured() {
   return Boolean(runtimeConfig.embeddingModel);
 }
@@ -1343,7 +1364,8 @@ export async function proposeSkillPatchFromGateReview({ locale, contentType = "g
   };
 }
 
-export async function evaluateTranslationWithModel({ contextPack, translation, references = [], machineDrafts = [], qaCases = [], onUsage = null, temperature = 0.1, seed = undefined, onSeedUnsupported = null }) {
+export async function evaluateTranslationWithModel({ contextPack, translation, references = [], machineDrafts = [], qaCases = [], onUsage = null, temperature = 0.1, seed = undefined, onSeedUnsupported = null, toolRunner = null, referenceSession = null }) {
+  const session = referenceSession || { toolRunner };
   const strictFocus = contextPack.qualityTier === "strict"
     ? "严苛审查重点：逐项核对原文的否定、条件、范围、承诺强度、指代、术语冲突和任务约束，结合文件语境检查漏译与歧义。只报告有原文或规则证据的问题，不为文风偏好反复改写。"
     : "";
@@ -1364,7 +1386,7 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
       ].join("\n\n")
     }
   ];
-  let content = await chat(messages, runtimeConfig, { temperature, seed, onSeedUnsupported, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "AIQA", responseFormat: { type: "json_object" }, onUsage });
+  let content = await chatWithQaReferences(messages, { temperature, seed, onSeedUnsupported, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "AIQA", responseFormat: { type: "json_object" }, onUsage }, session);
   let payload;
   let lastFormatError = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1374,15 +1396,15 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
     } catch (error) {
       lastFormatError = error.message;
       if (attempt === 1) break;
-      content = await chat([
+      content = await chatWithQaReferences([
         ...messages,
         { role: "assistant", content: content.slice(0, 4000) },
         { role: "user", content: "上一个回答不是可解析的严格 JSON。请只重新输出一个紧凑 JSON 对象，根字段必须是 issues 数组，不要 Markdown、解释或代码围栏。" }
-      ], runtimeConfig, { temperature: 0, seed, onSeedUnsupported, timeoutMs: 45_000, maxTokens: 1800, requestLabel: "AIQA 格式重试", responseFormat: { type: "json_object" }, onUsage });
+      ], { temperature: 0, seed, onSeedUnsupported, timeoutMs: 45_000, maxTokens: 1800, requestLabel: "AIQA 格式重试", responseFormat: { type: "json_object" }, onUsage }, session);
     }
   }
   if (!payload) {
-    const lineContent = await chat([
+    const lineContent = await chatWithQaReferences([
       {
         role: "system",
         content: "你是本地化 QA。不要输出 JSON。若没有问题只输出 PASS；若有问题，每个问题单独一行，严格使用：ISSUE|critical/major/minor|英文类别代码|原文片段|译文片段|简体中文问题原因|简体中文修订建议。问题原因和修订建议禁止使用目标语言。不得输出其他内容。"
@@ -1396,7 +1418,7 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
           `历史反例：${JSON.stringify(qaCases.slice(0, 2))}`
         ].join("\n\n")
       }
-    ], runtimeConfig, { temperature: 0, seed, onSeedUnsupported, timeoutMs: 60_000, maxTokens: 1600, requestLabel: "AIQA 行式降级", onUsage });
+    ], { temperature: 0, seed, onSeedUnsupported, timeoutMs: 60_000, maxTokens: 1600, requestLabel: "AIQA 行式降级", onUsage }, session);
     try {
       payload = { issues: parseAiQaLineResponse(lineContent) };
     } catch (error) {
@@ -1873,8 +1895,8 @@ export function parseAiQaLineResponse(content) {
   }];
 }
 
-export async function reviseTranslationWithQa({ contextPack, translation, issues, references = [], qaCases = [], onUsage = null }) {
-  const revised = await chat([
+export async function reviseTranslationWithQa({ contextPack, translation, issues, references = [], qaCases = [], onUsage = null, toolRunner = null, referenceSession = null }) {
+  const revised = await chatWithQaReferences([
     { role: "system", content: "你是最终修订译者。只修复 QA 明确指出的问题，保留正确内容、数字、格式、占位符、术语的语境判断结果、明确硬约束和原有信息边界；若问题涉及表达不地道，就用更地道的说法改写，不要退回逐字直译；若原文或文件语境显示韵律结构，修订必须同时重现节奏与押韵。只输出完整修订译文，不要解释。" },
     {
       role: "user",
@@ -1886,18 +1908,18 @@ export async function reviseTranslationWithQa({ contextPack, translation, issues
         `历史反例：${JSON.stringify(qaCases.slice(0, 3))}`
       ].join("\n\n")
     }
-  ], runtimeConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "AIQA 修订", onUsage });
+  ], { temperature: 0.15, timeoutMs: 75_000, requestLabel: "AIQA 修订", onUsage }, referenceSession || { toolRunner });
   return requireNonEmptyTranslation(revised, translation, "AIQA 修订");
 }
 
-export async function adjudicatePotentialTermsWithModel({ contextPack, translation, issues, onUsage = null }) {
+export async function adjudicatePotentialTermsWithModel({ contextPack, translation, issues, onUsage = null, referenceSession = null }) {
   const candidates = issues.slice(0, 12).map((issue) => ({
     matchedSource: issue.matchedSource || "",
     officialSource: issue.sourceTerm || "",
     officialTarget: issue.targetTerm || "",
     currentTranslation: translation
   }));
-  const content = await chat([
+  const content = await chatWithQaReferences([
     {
       role: "system",
       content: "你是游戏本地化术语裁决译者。逐项判断当前原文中的疑似表达是否与术语库正式源词表示同一概念。若是，必须在完整译文中自然地采用 officialTarget；若不是，不得强行替换。保留全部事实、格式、数字和其他正确内容。reason 必须使用简体中文，便于中文项目成员审核。输出严格 JSON：{\"translation\":\"裁决后的完整译文\",\"decisions\":[{\"officialSource\":\"正式源词\",\"matchedSource\":\"当前表达\",\"officialTarget\":\"正式译法\",\"decision\":\"apply|not_applicable\",\"reason\":\"简体中文简短理由\"}]}"
@@ -1910,7 +1932,7 @@ export async function adjudicatePotentialTermsWithModel({ contextPack, translati
         `待裁决术语：${JSON.stringify(candidates)}`
       ].join("\n\n")
     }
-  ], runtimeConfig, { temperature: 0.05, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "术语自动裁决", responseFormat: { type: "json_object" }, onUsage });
+  ], { temperature: 0.05, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "术语自动裁决", responseFormat: { type: "json_object" }, onUsage }, referenceSession);
   const start = content.indexOf("{");
   const end = content.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("术语裁决模型未返回 JSON");

@@ -742,7 +742,7 @@ function renderMatches(matches) {
 
 function renderQa(result) {
   const errors = result.issues.filter((issue) => issue.severity === "error");
-  $("#issueCount").textContent = result.aiQa?.fallbackReason ? "AIQA 未完成" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分 · ${result.aiQa?.iterations || 0} 次修订` : errors.length ? `${errors.length} 个阻断项` : result.issues.length ? `${result.issues.length} 条建议` : "硬校验通过";
+  $("#issueCount").textContent = result.aiQa?.fallbackReason ? "AIQA 未完成" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分 · ${result.aiQa?.iterations || 0} 次修订` : errors.length ? `${errors.length} 个阻断项` : result.issues.length ? `${result.issues.length} 条建议` : result.aiQa?.status === "revised" ? "已修订 · 规则检查通过" : "硬校验通过";
   const reflection = result.reflection ? `<div class="reflection-box"><strong>模型反思</strong>\n${escapeHtml(result.reflection)}</div>` : "";
   const retrieval = result.aiQa?.references?.length ? `<div class="reflection-box"><strong>相似译例检索</strong>\n${result.aiQa.references.map((item) => {
     const tags = contentTagLabels(item.contentType || "general", item.contentTags);
@@ -762,7 +762,8 @@ function renderQa(result) {
   const factSummary = result.factSchema?.facts?.length || result.factSchema?.limits?.length ? `<div class="reflection-box"><strong>事实与交付约束</strong>\n${escapeHtml(`${result.factSchema.facts?.length || 0} 个事实锚点 · ${result.factSchema.limits?.length || 0} 项交付限制`)}</div>` : "";
   $("#qaList").className = "qa-list";
   const fallback = result.aiQa?.fallbackReason ? `<div class="qa-item warning">AIQA 暂未完成：${escapeHtml(result.aiQa.fallbackReason)}</div>` : "";
-  $("#qaList").innerHTML = `${routing}${qualityRoute}${factSummary}${referenceBox}${reflection}${retrieval}${qaCases}${humanDecisions}${receipt}${fallback}${issues || (!fallback ? '<div class="qa-item">硬规则与检索式 AIQA 均通过</div>' : '')}`;
+  const revisionNote = result.aiQa?.status === "revised" ? '<div class="qa-item">已按 QA 意见修订；修订后只做规则检查，未进行模型复检或重新评分。</div>' : "";
+  $("#qaList").innerHTML = `${routing}${qualityRoute}${factSummary}${referenceBox}${reflection}${retrieval}${qaCases}${humanDecisions}${receipt}${fallback}${revisionNote}${issues || (!fallback && !revisionNote ? '<div class="qa-item">硬规则与检索式 AIQA 均通过</div>' : '')}`;
   $$(".single-qa-action").forEach((button) => button.addEventListener("click", () => resolveSingleQaIssue(Number(button.dataset.issueIndex), button.dataset.action, button)));
 }
 
@@ -938,7 +939,7 @@ function renderQaSegments() {
   container.innerHTML = visible.length ? visible.map((segment) => {
     const status = qaSegmentState(segment);
     const issues = segment.issues || [];
-    const meta = [segment.entryKey || segment.entryId, segment.sourceRow ? `第 ${segment.sourceRow} 行` : "", segment.sheet].filter(Boolean).join(" · ");
+    const meta = [segment.entryKey || segment.entryId, segment.sourceRow ? `第 ${segment.sourceRow} 行` : "", segment.sheet, segment.aiQaStatus === "revised" ? "已修订 · 未做模型复检" : ""].filter(Boolean).join(" · ");
     return `<article class="qa-segment ${status}" data-qa-index="${segment.index}">
       <div class="qa-segment-head"><span class="qa-segment-index">${segment.index}</span><span class="qa-segment-state ${status}">${QA_STATE_LABELS[status]}</span>${Number.isFinite(segment.qaScore) ? `<span class="qa-segment-score">${Math.round(segment.qaScore)} 分</span>` : ""}${meta ? `<span class="qa-segment-meta">${escapeHtml(meta)}</span>` : ""}</div>
       <div class="qa-segment-pair"><p><span>原文</span>${escapeHtml(segment.source || "")}</p><p><span>译文</span>${escapeHtml(segment.translation || "（无译文）")}</p></div>
@@ -969,7 +970,8 @@ function applyQaResult(payload) {
     index: Number(segment.index) || index + 1,
     source: segment.source || "",
     translation: segment.translation || "",
-    qaScore: Number.isFinite(Number(segment.qaScore)) ? Number(segment.qaScore) : null,
+    qaScore: segment.qaScore != null && Number.isFinite(Number(segment.qaScore)) ? Number(segment.qaScore) : null,
+    aiQaStatus: segment.aiQaStatus || "",
     issues: Array.isArray(segment.issues) ? segment.issues : [],
     aiQaFallbackReason: segment.aiQaFallbackReason || segment.fallbackReason || "",
     entryId: segment.entryId || "", entryKey: segment.entryKey || "",
@@ -991,7 +993,7 @@ function applyQaResult(payload) {
       const value = key === "overall" ? scores.overall : scores.dimensions?.[key];
       const stats = key === "overall" ? null : summary[key];
       const detail = key === "overall" ? caption : stats?.total ? `${stats.total} 条问题 · 阻断 ${stats.error || 0} · 主要 ${stats.major || 0} · 轻微 ${stats.minor || 0}` : "未发现问题";
-      return `<div class="autoqa-score-card ${autoQaScoreTone(value)}"><strong>${Number.isFinite(Number(value)) ? Math.round(Number(value)) : "—"}</strong><span>${escapeHtml(label)}</span><small>${escapeHtml(detail || "")}</small></div>`;
+      return `<div class="autoqa-score-card ${value == null ? "" : autoQaScoreTone(value)}"><strong>${value != null && Number.isFinite(Number(value)) ? Math.round(Number(value)) : "—"}</strong><span>${escapeHtml(label)}</span><small>${escapeHtml(detail || "")}</small></div>`;
     }).join("");
   renderQaSegments();
 }
@@ -1272,7 +1274,7 @@ async function resolveSingleQaIssue(issueIndex, action, button) {
     renderTranslationOutput();
     renderQa(state.lastResult);
     setResultStatus(state.lastResult.issues, state.lastResult.aiQa);
-    toast(["accept", "partial", "revise"].includes(action) ? `AI 已按决定修订并重新 QA：${resolved.qaScore} 分` : "已拒绝该条建议并生成处理回执");
+    toast(["accept", "partial", "revise"].includes(action) ? Number.isFinite(resolved.qaScore) ? `AI 已按决定修订并重新 QA：${resolved.qaScore} 分` : "AI 已修订；最终译文仅完成规则检查" : "已拒绝该条建议并生成处理回执");
   } catch (error) {
     button.disabled = false;
     button.textContent = action === "accept" ? "采纳并让 AI 修订" : action === "partial" ? "部分采纳" : "拒绝意见";
@@ -1285,6 +1287,7 @@ function setResultStatus(issues = [], aiQa = null) {
   if (Number.isFinite(aiQa?.score) && aiQa.score < 90) return setTranslationStatus("error", "AIQA 待复核");
   if (issues.some((issue) => issue.severity === "error")) setTranslationStatus("error", "需要处理");
   else if (issues.length) setTranslationStatus("warning", "建议确认");
+  else if (aiQa?.status === "revised") setTranslationStatus("success", "已修订 · 规则检查通过");
   else setTranslationStatus("success", "QA 通过");
 }
 
@@ -2072,6 +2075,7 @@ function batchStatus(segment) {
     const errors = issues.filter((issue) => issue.severity === "error").length;
     if (errors) return ["warning", "需要复核", `${errors} 个阻断项`];
     if (issues.length) return ["warning", "建议确认", `${issues.length} 条建议`];
+    if (segment.result?.aiQa?.status === "revised") return ["success", "已修订", "规则检查通过 · 未做模型复检"];
     return ["success", "QA 通过", `${Number.isFinite(segment.result?.qaScore) ? `${segment.result.qaScore} 分 · ` : ""}${segment.result?.matches?.length || 0} 条术语`];
   }
   return ["pending", "待翻译", "等待队列"];
@@ -2155,7 +2159,7 @@ function renderBatchDetails(segment) {
   const termDecisions = aiQa.termDecisions || [];
   const humanDecisions = aiQa.humanDecisions || [];
   const summary = [
-    aiQa.fallbackReason ? "AIQA 未完成" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分` : "规则 QA",
+    aiQa.fallbackReason ? "AIQA 未完成" : aiQa.status === "revised" ? "已修订 · 未做模型复检" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分` : "规则 QA",
     `${matches.length} 条术语`,
     `${references.length} 条译例`,
     `${aiQa.iterations || 0} 次修订`,
@@ -2165,7 +2169,7 @@ function renderBatchDetails(segment) {
   if (scopeNote) summary.push(scopeNote);
   const summaryText = summary.join(" · ");
   const termsHtml = matches.length ? matches.map((match) => `<div class="batch-detail-item"><strong>${escapeHtml(match.term?.source)} → ${escapeHtml(match.term?.target)}</strong><small>${match.mode === "exact" ? "正式/别名命中" : `疑似命中：${escapeHtml(match.matchPhrase || "")}`} · ${Math.round((match.score || 0) * 100)}%</small></div>`).join("") : '<div class="batch-detail-empty">本段没有命中术语</div>';
-  const issuesHtml = issues.length ? issues.map((issue, index) => batchIssueHtml(issue, index, segment.id)).join("") : `<div class="batch-detail-empty">${aiQa.fallbackReason ? "硬规则通过；AIQA 尚待重试" : "硬规则与 AIQA 均未发现问题"}</div>`;
+  const issuesHtml = issues.length ? issues.map((issue, index) => batchIssueHtml(issue, index, segment.id)).join("") : `<div class="batch-detail-empty">${aiQa.fallbackReason ? "硬规则通过；AIQA 尚待重试" : aiQa.status === "revised" ? "修订后规则检查通过；未进行模型复检或重新评分" : "硬规则与 AIQA 均未发现问题"}</div>`;
   const referencesHtml = references.length ? references.map((item) => {
     const type = contentTypeLabel(item.contentType || "general");
     const tags = contentTagLabels(item.contentType || "general", item.contentTags);
@@ -2310,13 +2314,13 @@ function renderBatchWorkflow() {
   const summary = workflow.summary;
   $("#batchWorkflowSummary").textContent = `${workflow.overall?.message || workflow.translation.message}${summary.qaIncomplete ? ` · AIQA 未完成 ${summary.qaIncomplete} 段` : ""}`;
   $("#batchWorkflowNote").textContent = summary.failed || summary.qaIncomplete
-    ? `报告与普查继续使用已有译文，覆盖缺口会保留提示：${summary.failed ? `翻译失败 ${summary.failed} 段` : ""}${summary.failed && summary.qaIncomplete ? "；" : ""}${summary.qaIncomplete ? `AIQA 未完成 ${summary.qaIncomplete} 段` : ""}。重试后会自动刷新收尾结果。`
+    ? `报告与普查继续使用已有译文，覆盖缺口会保留提示：${summary.failed ? `翻译失败 ${summary.failed} 段` : ""}${summary.failed && summary.qaIncomplete ? "；" : ""}${summary.qaIncomplete ? `AIQA 未完成 ${summary.qaIncomplete} 段` : ""}。重试翻译会刷新报告与普查；重试 QA 仅更新 QA 结果。`
     : "质量报告与术语普查的执行状态分别显示；本轮翻译结束后，后续检查仍可能进行中。";
   const retry = $("#batchRetryQa");
   const qaRunning = ["waiting", "in_progress"].includes(workflow.aiQa.status) || workflow.qaRetryBusy;
   retry.hidden = !summary.qaIncomplete && !qaRunning;
   retry.disabled = state.batchRunning || qaRunning;
-  retry.textContent = qaRunning ? workflow.aiQa.status === "completed" || workflow.aiQa.status === "needs_attention" ? "QA 重试收尾中…" : "AIQA 重试中…" : `重试未完成 AIQA（${summary.qaIncomplete}）`;
+  retry.textContent = qaRunning ? workflow.aiQa.status === "completed" || workflow.aiQa.status === "needs_attention" ? "QA 结果保存中…" : "AIQA 重试中…" : `重试未完成 AIQA（${summary.qaIncomplete}）`;
   if (state.translationMode === "batch" && state.view === "workbench" && (workflow.qaRetryBusy || Object.keys(BATCH_STAGE_LABELS).some((key) => ["waiting", "in_progress"].includes(workflow[key]?.status))) && !batchWorkflowTimer) startBatchWorkflowWatch();
 }
 
@@ -2365,7 +2369,7 @@ async function retryBatchQa(batchId = state.batchPreview?.batchId, button = $("#
   if (button) { button.disabled = true; button.textContent = "提交 QA 重试…"; }
   try {
     const result = await api(`/api/batch/run/${encodeURIComponent(batchId)}/retry-qa`, { method: "POST", body: JSON.stringify({ ...projectPayload(), segmentIds }) });
-    toast(result.alreadyRunning ? "这条 QA 重试或收尾已在执行，进度见阶段状态" : result.total === 0 ? result.message : result.waiting ? "QA 重试已排队，等当前报告 / 普查结束后自动执行" : "已开始仅重试未完成的 AIQA，完成后自动刷新报告与普查");
+    toast(result.alreadyRunning ? "这条 QA 重试已在执行，进度见阶段状态" : result.total === 0 ? result.message : result.waiting ? "QA 重试已排队，等当前报告 / 普查结束后自动执行" : "已开始补查未完成的 AIQA，保存 QA 结果后结束");
     if (state.batchPreview?.batchId === batchId && result.total !== 0 && !result.alreadyRunning) {
       state.batchWorkflow = { ...currentBatchWorkflow(), aiQa: { status: "waiting", message: "QA 重试已排队" } };
       renderBatchWorkflow();
@@ -2540,7 +2544,7 @@ async function resolveBatchQaIssue(segmentId, issueIndex, action, button) {
     segment.accepted = false;
     await saveBatchProgress();
     renderBatchSegments();
-    toast(["accept", "partial", "revise"].includes(action) ? `第 ${segment.index} 段已由 AI 修订并重新 QA：${resolved.qaScore} 分` : `第 ${segment.index} 段已记录拒绝意见`);
+    toast(["accept", "partial", "revise"].includes(action) ? Number.isFinite(resolved.qaScore) ? `第 ${segment.index} 段已由 AI 修订并重新 QA：${resolved.qaScore} 分` : `第 ${segment.index} 段已修订；最终译文仅完成规则检查` : `第 ${segment.index} 段已记录拒绝意见`);
   } catch (error) {
     button.disabled = false;
     button.textContent = action === "accept" ? "采纳并让 AI 修订" : action === "partial" ? "部分采纳" : "拒绝意见";
@@ -5571,7 +5575,7 @@ function renderStyleProfiles(drafts, active, pending) {
   `).join("");
   const pendingHtml = pending.length ? `<div class="qa-case-pending"><strong>AIQA 待复核案例（${pending.length}）</strong>${pending.map((item) => `
     <div class="qa-case-row" data-case-id="${escapeHtml(item.id)}">
-      <div><small>${Math.round(item.scoreBefore)} → ${Math.round(item.scoreAfter)} · ${escapeHtml(item.source.slice(0, 40))}</small><p><s>${escapeHtml((item.rejectedTranslation || "").slice(0, 60))}</s> → <strong>${escapeHtml((item.correctedTranslation || "").slice(0, 60))}</strong></p></div>
+      <div><small>${Math.round(item.scoreBefore)} → ${Number.isFinite(item.scoreAfter) ? Math.round(item.scoreAfter) : "未复检"} · ${escapeHtml(item.source.slice(0, 40))}</small><p><s>${escapeHtml((item.rejectedTranslation || "").slice(0, 60))}</s> → <strong>${escapeHtml((item.correctedTranslation || "").slice(0, 60))}</strong></p></div>
       <div class="qa-case-actions"><button class="button ghost small" data-action="approve-case">采纳为反例</button><button class="button ghost small" data-action="dispose-case">作废</button></div>
     </div>
   `).join("")}</div>` : "";
@@ -5919,7 +5923,7 @@ function renderStyleGuidance() {
     </article>`;
   }).join("") : '<div class="empty-list">当前筛选条件下没有自动蒸馏的规则条目；人工导入的风格指南在上面的「人工风格指南」模块里单独展示（它是一整篇文档，不按条计）。</div>';
   $("#styleQaCount").textContent = `${pending.length} 条`;
-  $("#styleQaList").innerHTML = pending.length ? pending.map((item) => `<div class="qa-case-row" data-case-id="${escapeHtml(item.id)}"><div><small>${Math.round(item.scoreBefore)} → ${Math.round(item.scoreAfter)} · ${escapeHtml(item.source.slice(0, 55))}</small><p><s>${escapeHtml((item.rejectedTranslation || "").slice(0, 90))}</s> → <strong>${escapeHtml((item.correctedTranslation || "").slice(0, 90))}</strong></p></div><div class="qa-case-actions"><button class="button secondary small" data-action="approve-case">采纳为反例</button><button class="button ghost small" data-action="dispose-case">作废</button></div></div>`).join("") : '<div class="empty-list">当前没有待审核案例</div>';
+  $("#styleQaList").innerHTML = pending.length ? pending.map((item) => `<div class="qa-case-row" data-case-id="${escapeHtml(item.id)}"><div><small>${Math.round(item.scoreBefore)} → ${Number.isFinite(item.scoreAfter) ? Math.round(item.scoreAfter) : "未复检"} · ${escapeHtml(item.source.slice(0, 55))}</small><p><s>${escapeHtml((item.rejectedTranslation || "").slice(0, 90))}</s> → <strong>${escapeHtml((item.correctedTranslation || "").slice(0, 90))}</strong></p></div><div class="qa-case-actions"><button class="button secondary small" data-action="approve-case">采纳为反例</button><button class="button ghost small" data-action="dispose-case">作废</button></div></div>`).join("") : '<div class="empty-list">当前没有待审核案例</div>';
 
   $$(".style-guidance-card [data-action], #manualGuideStatus [data-action]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.closest("[data-profile-id]").dataset.profileId;

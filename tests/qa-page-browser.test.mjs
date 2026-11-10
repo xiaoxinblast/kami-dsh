@@ -28,14 +28,14 @@ test("译文质检：批次回放、文件质检、筛选与跳转", { skip: !pr
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   const calls = [];
-  const batchScores = { overall: 88, dimensions: { basic: 82, fidelity: 90, nuance: 92 } };
+  const batchScores = { overall: null, dimensions: { basic: null, fidelity: null, nuance: null } };
   const batchSummary = {
     basic: { total: 2, error: 1, major: 0, minor: 1 },
     fidelity: { total: 1, error: 0, major: 1, minor: 0 },
     nuance: { total: 0, error: 0, major: 0, minor: 0 }
   };
   const segments = [
-    { index: 1, source: "メンテナンスは明日開始します。", translation: "维护明天开始。", qaScore: 97, issues: [], entryKey: "CARD_1_a", sourceRow: 2 },
+    { index: 1, source: "メンテナンスは明日開始します。", translation: "维护明天开始。", qaScore: null, aiQaStatus: "revised", issues: [], entryKey: "CARD_1_a", sourceRow: 2 },
     {
       index: 2, source: "クエスト　ヤマスキー絶壁：入口前", translation: "任务 亚马斯基绝壁：入口前", qaScore: 84,
       issues: [{ severity: "error", category: "platform_placeholder", message: "半角空格与源文全角空格不一致", suggestion: "任务：亚马斯基绝壁：入口前" }],
@@ -124,6 +124,9 @@ test("译文质检：批次回放、文件质检、筛选与跳转", { skip: !pr
     assert.match(await page.locator("#qaSegments .qa-segment.attention").first().textContent(), /需要复核/u);
     assert.match(await page.locator("#qaFilters").textContent(), /全部 3/u);
     assert.match(await page.locator("#qaFilters").textContent(), /需要复核 1/u);
+    assert.equal(await page.locator('#qaSegments .qa-segment[data-qa-index="1"] .qa-segment-score').count(), 0);
+    assert.match(await page.locator('#qaSegments .qa-segment[data-qa-index="1"]').textContent(), /已修订 · 未做模型复检/u);
+    assert.equal(await page.locator('#autoQaScores strong').first().textContent(), "—");
 
     // ③ 筛选 + 跳到下一条
     await page.locator('#qaFilters .qa-filter-chip[data-qa-filter="suggest"]').click();

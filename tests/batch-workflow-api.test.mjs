@@ -24,7 +24,7 @@ const stageCode = block("function startConsistencyCheck(", "/**\n * 翻译期术
 const routeCode = block('  if (req.method === "POST" && /^\\/api\\/batch\\/run\\/[^/]+\\/retry-qa', '  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))')
   + block('  if (req.method === "GET" && url.pathname === "/api/tasks")', '  if (req.method === "POST" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/export"))');
 
-test("全文尚未翻完时 QA 补试不触发整批检查，终轮及翻译失败收尾仍保留", async () => {
+test("QA 补试在任意翻译状态下都不触发一致性检查或术语普查", async () => {
   for (const status of ["pending", "queued", "running", "done", "error"]) {
     let finalizations = 0;
     const batchQaWorkers = new Map(), run = { batchId: "retry", segments: [{ status, selected: true }], runnerOptions: {} };
@@ -37,7 +37,7 @@ test("全文尚未翻完时 QA 补试不触发整批检查，终轮及翻译失�
     });
     retry("retry", "task");
     await batchQaWorkers.get("retry").promise;
-    assert.equal(finalizations, ["done", "error"].includes(status) ? 1 : 0, status);
+    assert.equal(finalizations, 0, status);
     assert.equal(batchQaWorkers.size, 0);
   }
 });
@@ -170,7 +170,7 @@ test("没有在执行的收尾不会误显示为持续排队，旧任务也有�
 });
 
 for (const reviewInFlight of [false, true]) {
-test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight ? "，不被风格复盘挡住" : ""}`, { timeout: 15000 }, async () => {
+test(`QA 重试沿用译文、合并重复请求并保留已有收尾结果${reviewInFlight ? "，正常翻译仍先执行收尾" : ""}`, { timeout: 15000 }, async () => {
   let run = { batchId: "api-batch", projectId: "project-test", locale: "zh-CN", filename: "story.mqxliff", runState: "needs_attention", runnerOptions: {},
     segments: [
       { id: "ok", source: "a", translation: "甲", status: "done", selected: true, result: { qaScore: 97, aiQa: { used: true, status: "passed" } } },
@@ -237,6 +237,9 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
   const post = () => fetch(`${base}/api/batch/run/api-batch/retry-qa`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: "project-test" }) }).then((res) => res.json());
   try {
     if (reviewInFlight) { context.startBatchWorker(run.batchId); await reviewStarted; }
+    else await context.finalizeBatchWorkflow(run.batchId);
+    const priorFollowups = structuredClone({ report: run.qualityReport, survey: run.runnerOptions.termSurvey, tasks: run.runnerOptions.workflowTasks });
+    for (const type of ["consistency_check", "term_survey"]) assert.equal([...tasks.values()].filter(task => task.type === type).length, 1, "正常翻译收尾仍执行两个阶段");
     const [first, duplicate] = await Promise.all([post(), post()]);
     assert.ok(first.backgroundTaskId);
     assert.equal(first.backgroundTaskId, duplicate.backgroundTaskId);
@@ -254,6 +257,11 @@ test(`QA 重试沿用译文、合并重复请求并自动收尾${reviewInFlight 
     assert.equal(requests[0].translation, "乙");
     assert.equal(requests[0].aiQa, true);
     assert.deepEqual([run.segments[0], run.segments[2]], untouched);
+    assert.deepEqual(run.qualityReport, priorFollowups.report, "QA 重试保留已有报告");
+    assert.deepEqual(run.runnerOptions.termSurvey, priorFollowups.survey, "QA 重试保留已有普查结果");
+    for (const type of ["consistency_check", "term_survey"]) assert.equal([...tasks.values()].filter(task => task.type === type).length, 1, "QA 重试不得新增收尾任务");
+    assert.equal(run.runnerOptions.workflowTasks.qualityReport, priorFollowups.tasks.qualityReport);
+    assert.equal(run.runnerOptions.workflowTasks.termSurvey, priorFollowups.tasks.termSurvey);
     assert.ok(run.runnerOptions.workflowTasks.qualityReport);
     assert.ok(run.runnerOptions.workflowTasks.termSurvey, "两个阶段的任务号都必须完整保存");
     assert.equal(controls.size, 0);

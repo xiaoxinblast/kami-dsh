@@ -126,6 +126,19 @@ test("没有分数的快速档段落不计入平均分与质检覆盖率", () =>
   assert.equal(report.humanReview.suggested, 0, "快速档没有分数不等于待人工复核");
 });
 
+test("已修订未复检计入 QA 执行覆盖率，最终空分数不进入平均分", () => {
+  const report = buildQualityReport({ segments: [
+    { source: "設定", translation: "设置", status: "done", result: { qaScore: null, aiQa: { used: true, status: "revised" }, issues: [] } },
+    { source: "保存", translation: "保存", status: "done", result: { qaScore: 96, aiQa: { used: true, status: "passed" }, issues: [] } }
+  ] });
+  assert.equal(report.coverage.modelQa, 2);
+  assert.equal(report.coverage.percent, 100);
+  assert.equal(report.coverage.qaIncomplete, 0);
+  assert.equal(report.coverage.deterministicOnly, 0);
+  assert.equal(report.scores.average, 96);
+  assert.equal(report.scores.distribution.unscored, 1);
+});
+
 test("保护标记按原文重算，译文丢失即计入未保留", () => {
   const report = buildQualityReport({
     segments: [

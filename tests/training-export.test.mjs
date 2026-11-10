@@ -116,6 +116,15 @@ test("未经人工批准的 QA 案例不能进入偏好数据", () => {
   assert.equal(dataset.audit.droppedByReason[DROP_REASONS.NOT_HUMAN_ACCEPTED], 1);
 });
 
+test("人工批准的未复检案例导出时不把空分数转成零分", () => {
+  const dataset = buildDpoDataset({ qaCases: [{
+    id: "qa-unscored", ...SCOPE, status: "human_approved", source: "テスト原文です。",
+    rejectedTranslation: "誤訳。", correctedTranslation: "正しい訳。", scoreBefore: 70, scoreAfter: null
+  }] }, { scope: SCOPE });
+  assert.equal(dataset.records.length, 1);
+  assert.equal(dataset.records[0].metadata.scoreAfter, null);
+});
+
 test("JSONL 按训练器实际消费的形状序列化", () => {
   const sft = buildSftDataset([trajectory()], { scope: SCOPE });
   const sftLine = JSON.parse(datasetToJsonl(sft));

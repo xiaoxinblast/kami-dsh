@@ -18,7 +18,7 @@ export const QUALITY_TIERS = Object.freeze({
   },
   strict: {
     label: "严苛",
-    description: "初译 + 加强模型质检，有问题才定向修订，最多两轮；事实与标记仍执行硬校验。"
+    description: "初译 + 一次加强模型质检，有问题才定向修订；修订后只做规则检查。"
   }
 });
 

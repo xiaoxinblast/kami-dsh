@@ -8,7 +8,7 @@ import { createWorkspaceReferenceTools } from "../dsh/reference-tools.mjs";
 import { buildReferenceToolRunner } from "../src/reference-context.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
-import { checkBatchConsistencyWithModel, evaluateAutoQaWithModel, translateWithReflection } from "../src/provider.mjs";
+import { checkBatchConsistencyWithModel, evaluateAutoQaWithModel, evaluateTranslationWithModel, reviseTranslationWithQa, translateWithReflection } from "../src/provider.mjs";
 import { workspaceStyleGuide } from "../src/workspace-resources.mjs";
 
 async function fixture(run) {
@@ -230,6 +230,94 @@ test("style guides are read from current originals for translation and QA, even 
     await assert.rejects(readFile(join(directory, "data/runtime/workspace-resources")), /ENOENT/);
     await assert.rejects(readFile(join(directory, "data/runtime/compiled-resources")), /ENOENT/);
   } finally { await workbench.close(); }
+}));
+
+test("segment QA shares actual original reads with revision without rechecking, while new QA reads current guides", async () => fixture(async ({ directory, cwd, fs, ctx, agent, calls, deny }) => {
+  let guideText = "qa_guide_v1", mode = "repair";
+  const labels = [];
+  const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
+    labels.push(options.requestLabel);
+    if (!["翻译", "AIQA", "AIQA 修订"].includes(options.requestLabel)) return { content: '{"issues":[]}' };
+    assert.ok(options.tools.some(tool => tool.function.name === "list_style_guide_files"));
+    assert.ok(options.tools.some(tool => tool.function.name === "list_reference_files"));
+    const evidence = messages.filter(message => message.role === "tool");
+    if (!evidence.length) return { toolCalls: [{ id: "qa-guide", function: { name: "read", arguments: '{"file_path":"guide.custom"}' } }] };
+    if (mode === "denied") return { content: '{"issues":[]}' };
+    assert.ok(JSON.stringify(evidence).includes(guideText), "each new QA must see the current guide");
+    assert.ok(evidence.some(message => message.nativeContent), "native evidence blocks survive reuse");
+    if (options.requestLabel === "翻译") return { content: "存储设定。" };
+    if (options.requestLabel === "AIQA 修订") {
+      if (!JSON.stringify(evidence).includes("qa_reference_probe")) return { toolCalls: [{ id: "qa-reference", function: { name: "read", arguments: '{"file_path":"reference.custom"}' } }] };
+      return { content: "保存设置。" };
+    }
+    const revised = messages.at(-1).content.includes("待审译文：\n保存设置。");
+    if (mode === "repair" && revised) assert.match(JSON.stringify(evidence), /qa_reference_probe/);
+    return { content: JSON.stringify({ issues: mode === "repair" && !revised ? [{ severity: "major", category: "fluency_naturalness", sourceSpan: "保存", targetSpan: "存储", message: "按指南采用自然按钮用语", suggestion: "使用保存设置", confidence: 1 }] : [] }) };
+  } });
+  const signal = new AbortController().signal;
+  const context = { cwd, fs, human: true, signal, referenceTools: options => createWorkspaceReferenceTools(ctx, agent, options, signal) };
+  try {
+    const state = await workbench.workspace({ action: "bind", name: "逐段 QA 原件" }, context);
+    await writeFile(join(cwd, "guide.custom"), guideText);
+    await writeFile(join(cwd, "reference.custom"), "qa_reference_probe：保存设置。");
+    await writeFile(join(cwd, "source.txt"), "設定を保存します。");
+    await workbench.importFile({ path: "guide.custom", purpose: "style-guide" }, context);
+    await workbench.importFile({ path: "reference.custom", purpose: "reference" }, context);
+    const prepared = await workbench.importFile({ path: "source.txt" }, context);
+    const body = { projectId: state.project.id, batchId: prepared.batchId, locale: "zh-CN", source: "設定を保存します。", segmentPurpose: "ui", qualityTier: "standard", useModelClassification: false };
+    const result = await workbench.invoke({ path: "/api/translate", method: "POST", body }, context);
+    assert.equal(result.translation, "保存设置。");
+    assert.equal(result.aiQa.status, "revised");
+    assert.equal(result.qaScore, null);
+    assert.equal(result.aiQa.iterations, 1);
+    assert.equal(calls.filter(call => call.arguments.file_path.endsWith("guide.custom")).length, 2, "初译与本段 QA 各读一次；修订复用本轮证据");
+    assert.equal(calls.filter(call => call.arguments.file_path.endsWith("reference.custom")).length, 1, "修订仍能按需查阅新资料");
+    assert.equal(labels.filter(label => label === "AIQA").length, 2, "QA 读指南、出结论，不做修订后复检");
+    assert.equal(labels.filter(label => label === "AIQA 修订").length, 2, "修订查资料、输出修订稿");
+    mode = "pass";
+    for (const batchId of [prepared.batchId, undefined]) {
+      guideText += "_updated";
+      await writeFile(join(cwd, "guide.custom"), guideText);
+      const qa = await workbench.invoke({ path: "/api/qa", method: "POST", body: { ...body, batchId, translation: "保存设置。", aiQa: true } }, context);
+      assert.equal(qa.aiQa.status, "passed");
+      assert.equal(qa.translation, "保存设置。");
+      assert.equal(qa.aiQa.iterations, 0);
+    }
+    assert.equal(calls.filter(call => call.arguments.file_path.endsWith("guide.custom")).length, 4, "重试和独立 QA 均重新读取原件");
+    const resolved = await workbench.invoke({ path: "/api/qa/resolve", method: "POST", body: { ...body, batchId: undefined, translation: "存储设定。", action: "revise", issueIndex: 0,
+      issues: [{ severity: "error", category: "fluency_naturalness", message: "按指南修订", suggestion: "保存设置。" }] } }, context);
+    assert.equal(resolved.translation, "保存设置。");
+    assert.equal(resolved.aiQa.status, "passed");
+    assert.equal(calls.filter(call => call.arguments.file_path.endsWith("guide.custom")).length, 5, "人工触发修订与后续 QA 共享本轮指南");
+    mode = "denied"; deny();
+    const failed = await workbench.invoke({ path: "/api/qa", method: "POST", body: { ...body, translation: "保存设置。", aiQa: true } }, context);
+    assert.equal(failed.aiQa.status, "review");
+    assert.equal(failed.aiQa.used, false);
+    assert.match(failed.aiQa.fallbackReason, /尚未成功查阅/);
+    assert.equal(failed.translation, "保存设置。");
+  } finally { await workbench.close(); }
+}));
+
+test("segment QA format recovery and standalone revision retain original evidence and reject unread guides", async () => fixture(async ({ cwd, ctx, agent, calls }) => {
+  await writeFile(join(cwd, "guide.custom"), "qa_format_guide_probe");
+  for (const mode of ["qa", "line", "exhausted", "revision", "unread"]) {
+    const toolRunner = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.custom" }], maxRounds: mode === "exhausted" ? 1 : 2 });
+    await withRuntimeCall({ modelAdapter: async (messages, options) => {
+      if (mode === "unread") return { content: "保存设置。" };
+      if (!messages.some(message => message.role === "tool")) return { toolCalls: [{ id: "read-format-guide", function: { name: "read", arguments: '{"file_path":"guide.custom"}' } }] };
+      assert.match(JSON.stringify(messages), /qa_format_guide_probe/);
+      if (mode === "revision") return { content: "保存设置。" };
+      if (mode === "exhausted") return { content: '{"issues":[]}' };
+      if (mode === "line") return { content: options.requestLabel === "AIQA 行式降级" ? "PASS" : "invalid response" };
+      return { content: options.requestLabel === "AIQA" ? "invalid response" : '{"issues":[]}' };
+    } }, async () => {
+      const args = { contextPack: { source: "設定を保存します。" }, translation: "保存设置。", issues: [], toolRunner };
+      if (["qa", "line", "exhausted"].includes(mode)) assert.deepEqual(await evaluateTranslationWithModel(args), []);
+      else if (mode === "revision") assert.equal(await reviseTranslationWithQa(args), "保存设置。");
+      else await assert.rejects(reviseTranslationWithQa(args), { code: "style_guide_unread" });
+    });
+  }
+  assert.equal(calls.length, 4, "格式修复和轮次收尾不重复读取指南，也不丢失证据");
 }));
 
 test("native guide tools preserve visual results, guide priority, and read failures without using old compiled text", async () => fixture(async ({ cwd, ctx, agent, deny }) => {

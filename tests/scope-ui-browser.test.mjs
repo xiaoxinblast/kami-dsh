@@ -30,6 +30,7 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     const distillCalls = [];
     const errors = [];
+    let revised = false;
     page.on("pageerror", (error) => errors.push(error.message));
     await page.route("**/api/**", async (route) => {
       const request = route.request();
@@ -44,8 +45,8 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
             matches: [],
             translation: "走吧。",
             issues: [],
-            qaScore: 94,
-            aiQa: { translation: "走吧。", score: 94, issues: [], references: [], iterations: 0 },
+            qaScore: revised ? null : 94,
+            aiQa: { translation: "走吧。", score: revised ? null : 94, status: revised ? "revised" : "passed", issues: [], references: [], iterations: revised ? 1 : 0 },
             styleProfile: { id: "sp-general", name: "通用规范", contentType: "general", domain: "general" },
             qualityTier: "standard",
             qualityTierLabel: "标准",
@@ -92,7 +93,7 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
       else if (url.pathname === "/api/assets") payload = { locale: "zh-CN", revision: 0, terms: [] };
       else if (url.pathname === "/api/memories") payload = { memories: [], total: 0 };
       else if (url.pathname === "/api/feedback/pending" || url.pathname === "/api/feedback") payload = [];
-      else if (url.pathname === "/api/qa-cases/pending") payload = [];
+      else if (url.pathname === "/api/qa-cases/pending") payload = [{ id: "revised-case", source: "行こう。", rejectedTranslation: "去吧。", correctedTranslation: "走吧。", scoreBefore: 88, scoreAfter: null }];
       else if (url.pathname === "/api/style-profiles") payload = {
         userProfiles: [], styleProfiles: [], learningRuns: [],
         evidencePools: [
@@ -136,6 +137,12 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/scope-advanced-collapsed.png`, animations: "disabled" });
     }
+    revised = true;
+    await page.locator("#primaryAction").click();
+    await page.waitForFunction(() => document.querySelector("#issueCount")?.textContent === "已修订 · 规则检查通过");
+    assert.match(await page.locator("#qaList").textContent(), /未进行模型复检或重新评分/u);
+    assert.doesNotMatch(await page.locator("#qaList").textContent(), /硬规则与检索式 AIQA 均通过/u);
+    if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/qa-revised-single.png`, fullPage: true, animations: "disabled" });
     // ③ 译文质检页也不再有语体 / 领域下拉
     await page.locator('.nav-item[data-view="autoqa"]').click();
     assert.equal(await page.locator("#view-autoqa #autoQaContentType").count(), 0);
@@ -144,6 +151,7 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     // ④ 证据池：项目级只有一个池子，语体分布折起来
     await page.locator('.nav-item[data-view="styles"]').click();
     await page.waitForSelector(".style-pool.is-total");
+    assert.match(await page.locator("#styleQaList").textContent(), /88 → 未复检/u);
     const poolText = await page.locator("#styleEvidencePools").textContent();
     assert.match(poolText, /全部证据（项目级）/u);
     assert.match(poolText, /8134 \/ 8/u, `总进度要合并显示：${poolText}`);

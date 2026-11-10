@@ -289,7 +289,7 @@ export function createRegressionCandidateFromQaCase(qaCase = {}, options = {}) {
     requiredTerms: (qaCase.requiredTerms || []).map(normalizeRequiredTerm),
     facts: (qaCase.facts || []).map(normalizeFact),
     scoreBefore: Number.isFinite(Number(qaCase.scoreBefore)) ? Number(qaCase.scoreBefore) : null,
-    scoreAfter: Number.isFinite(Number(qaCase.scoreAfter)) ? Number(qaCase.scoreAfter) : null,
+    scoreAfter: qaCase.scoreAfter != null && Number.isFinite(Number(qaCase.scoreAfter)) ? Number(qaCase.scoreAfter) : null,
     createdAt: optionalText(options.createdAt),
     createdBy: optionalText(options.createdBy),
     approval: null,

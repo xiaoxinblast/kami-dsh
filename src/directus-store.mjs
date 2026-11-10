@@ -1318,7 +1318,7 @@ export async function getDirectusQaCases(locale, { contentType = "general", doma
     ...(scopeFallback ? { scopeRank: scopeRankOf({ contentType: item.content_type, domain: item.domain }, { contentType, domain }) } : {}),
     id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type, domain: item.domain || "general", source: item.source,
     rejectedTranslation: item.rejected_translation, correctedTranslation: item.corrected_translation, issues: arrayValue(item.issues),
-    scoreBefore: Number(item.score_before) || 0, scoreAfter: Number(item.score_after) || 0, status: item.status, embedding: item.embedding || null, createdAt: item.date_created
+    scoreBefore: Number(item.score_before) || 0, scoreAfter: item.score_after == null ? null : Number(item.score_after) || 0, status: item.status, embedding: item.embedding || null, createdAt: item.date_created
   }));
 }
 
@@ -1336,7 +1336,7 @@ export async function findDirectusQaCase(id) {
       contentType: item.content_type || "general", domain: item.domain || "general", source: item.source,
       rejectedTranslation: item.rejected_translation, correctedTranslation: item.corrected_translation,
       issues: arrayValue(item.issues),
-      scoreBefore: Number(item.score_before) || 0, scoreAfter: Number(item.score_after) || 0,
+      scoreBefore: Number(item.score_before) || 0, scoreAfter: item.score_after == null ? null : Number(item.score_after) || 0,
       status: item.status, createdAt: item.date_created
     };
   } catch (error) {
@@ -2457,7 +2457,7 @@ export async function listDirectusPendingQaCases(locale, { projectId = "" } = {}
   return items.map((item) => ({
     id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type, domain: item.domain || "general", source: item.source,
     rejectedTranslation: item.rejected_translation, correctedTranslation: item.corrected_translation, issues: arrayValue(item.issues),
-    scoreBefore: Number(item.score_before) || 0, scoreAfter: Number(item.score_after) || 0, status: item.status, createdAt: item.date_created
+    scoreBefore: Number(item.score_before) || 0, scoreAfter: item.score_after == null ? null : Number(item.score_after) || 0, status: item.status, createdAt: item.date_created
   }));
 }
 

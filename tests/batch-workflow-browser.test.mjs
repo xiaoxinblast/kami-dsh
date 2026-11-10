@@ -23,7 +23,7 @@ test("翻译与任务中心展示阶段进度、失败原因和 QA 批量重试�
   const run = { batchId: "workflow-browser", projectId: "project-1", filename: "合并1_zho-CN.mqxliff", format: "mqxliff", locale: "zh-CN", contentType: "dialogue", domain: "game",
     runState: "needs_attention", runnerOptions: {}, contextBrief: { status: "ready", documentType: { purpose: "dialogue" }, sections: [] },
     segments: [
-      { id: "ok", source: "こんにちは", translation: "你好", selected: true, status: "done", result: { qaScore: 97, aiQa: { used: true, status: "passed" } } },
+      { id: "ok", source: "こんにちは", translation: "你好", selected: true, status: "done", result: { qaScore: null, aiQa: { used: true, status: "revised", iterations: 1 } } },
       { id: "qa", source: "また明日", translation: "明天见", selected: true, status: "done", result: { aiQa: { used: false, fallbackReason: "terminated" } } },
       { id: "failed", source: "おやすみ", translation: "", selected: true, status: "error", error: "模型没有返回译文" }
     ] };
@@ -59,9 +59,9 @@ test("翻译与任务中心展示阶段进度、失败原因和 QA 批量重试�
       else if (url.pathname === `/api/batch/run/${run.batchId}/retry-qa`) {
         calls.push(JSON.parse(route.request().postData()));
         run.segments[1].result = { qaScore: 97, aiQa: { used: true, status: "passed", fallbackReason: "" } };
-        run.runnerOptions.qaCompletedAt = "2026-10-03T01:00:00Z";
-        qualityTask = { status: "failed", progress: { message: "质量报告未完成：模型服务 503" } };
-        termTask = { status: "completed", progress: { message: "术语普查已完成，没有发现需要新增的术语" } };
+        run.runnerOptions.qaCompletedAt = "2026-10-03T04:00:00Z";
+        qualityTask = { status: "failed", updatedAt: "2026-10-03T02:00:00Z", progress: { message: "质量报告未完成：模型服务 503" } };
+        termTask = { status: "completed", updatedAt: "2026-10-03T02:00:00Z", progress: { message: "术语普查已完成，没有发现需要新增的术语" } };
         run.runnerOptions.termSurvey = { generatedAt: "2026-10-03T02:00:00Z", terms: [], coverage: { analyzedPairs: 2, totalSegments: 3 } };
         payload = { backgroundTaskId: "qa-retry", total: 1 };
       } else if (url.pathname === `/api/batch/run/${run.batchId}/status`) payload = { workflow: workflow(), qualityReportAt: run.qualityReport?.report?.generatedAt || "", termSurveyAt: run.runnerOptions.termSurvey?.generatedAt || "", qaCompletedAt: run.runnerOptions.qaCompletedAt || "" };
@@ -91,6 +91,8 @@ test("翻译与任务中心展示阶段进度、失败原因和 QA 批量重试�
     await shot(page, "task-workflow-progress");
     await task.locator('[data-action="open-task"]').click();
     await page.waitForSelector("#batchWorkflow:not([hidden])");
+    assert.match(await page.locator("#batchSegments").textContent(), /已修订/u);
+    assert.match(await page.locator("#batchSegments").textContent(), /规则检查通过 · 未做模型复检/u);
     assert.match(await page.locator("#primaryAction").textContent(), /重试失败句段（1）/u);
     assert.match(await page.locator("#batchProgressText").textContent(), /正在生成质量报告/u);
     assert.match(await page.locator("#batchWorkflowStages").textContent(), /1 \/ 4 片/u);
@@ -101,6 +103,11 @@ test("翻译与任务中心展示阶段进度、失败原因和 QA 批量重试�
     assert.equal(calls[0].projectId, "project-1");
     assert.equal(calls[0].segmentIds, null, "一键 QA 重试应交给服务端筛选失败 QA");
     assert.match(await page.locator("#batchWorkflowStages").textContent(), /模型服务 503/u);
+    assert.doesNotMatch(await page.locator("#batchWorkflowStages").textContent(), /等待启动|等待质量报告/u);
+    assert.doesNotMatch(await page.locator("#batchProgressText").textContent(), /正在生成质量报告/u);
+    assert.match(await page.locator("#batchWorkflowNote").textContent(), /重试 QA 仅更新 QA 结果/u);
+    assert.match(await page.locator("#toast").textContent(), /保存 QA 结果后结束/u);
+    await shot(page, "qa-retry-finished");
     await page.locator('[data-batch-tab="report"]').click();
     await page.waitForSelector("#batchReportPanel:not([hidden])");
     assert.match(await page.locator("#batchReportSummary").textContent(), /模型服务 503/u);

@@ -309,7 +309,7 @@ export function buildDpoDataset({ trajectories = [], qaCases = [] } = {}, { scop
         model: text(entry.record.model),
         promptVersion: text(entry.record.promptVersion),
         scoreBefore: Number.isFinite(Number(entry.record.scoreBefore)) ? Number(entry.record.scoreBefore) : null,
-        scoreAfter: Number.isFinite(Number(entry.record.scoreAfter)) ? Number(entry.record.scoreAfter) : null,
+        scoreAfter: entry.record.scoreAfter != null && Number.isFinite(Number(entry.record.scoreAfter)) ? Number(entry.record.scoreAfter) : null,
         createdAt: text(entry.record.createdAt)
       }
     });

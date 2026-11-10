@@ -12,9 +12,10 @@ test("统一质检减少严苛档调用，保留语境，失败与不收敛均�
     calls.push({ label: options.requestLabel, text: JSON.stringify(messages) });
     if (options.requestLabel === "AIQA") {
       if (mode === "failure") throw new Error("QA unavailable probe");
-      return { content: JSON.stringify({ issues: mode === "stalled" ? [{ severity: "major", category: "accuracy_mistranslation", message: "测试误译", suggestion: "修正测试误译", sourceSpan: "保存", targetSpan: "保存", confidence: 1 }] : [] }) };
+      return { content: JSON.stringify({ issues: ["stalled", "repair"].includes(mode) ? [{ severity: "major", category: "accuracy_mistranslation", message: "测试误译", suggestion: "修正测试误译", sourceSpan: "保存", targetSpan: "保存", confidence: 1 }] : [] }) };
     }
     if (options.requestLabel === "翻译自检") return { content: "PASS" };
+    if (mode === "repair" && options.requestLabel === "翻译") return { content: "存储设定。" };
     return { content: "保存设置。" };
   } });
   const context = { human: true };
@@ -40,6 +41,29 @@ test("统一质检减少严苛档调用，保留语境，失败与不收敛均�
     const stalled = await translate("standard");
     assert.equal(calls.filter((call) => call.label === "翻译").length, 1, "升档继续审查已有译文");
     assert.notEqual(stalled.qualityRoute.decision, "auto_pass");
-    assert.ok(calls.length <= 6, "相同译文不反复修订");
+    assert.equal(calls.length, 3, "初译、QA、无变化修订后停止，不重复升档检查");
+    assert.equal(stalled.aiQa.revisionStalled, true);
+    mode = "repair";
+    for (const tier of ["standard", "strict"]) {
+      calls = [];
+      const revised = await translate(tier);
+      assert.deepEqual(calls.map(call => call.label), ["翻译", "AIQA", "AIQA 修订"], "只审一次、修订一次，不复检或升档重审");
+      assert.equal(revised.translation, "保存设置。");
+      assert.equal(revised.aiQa.status, "revised");
+      assert.equal(revised.aiQa.used, true);
+      assert.equal(revised.aiQa.iterations, 1);
+      assert.equal(revised.qaScore, null, "修订前分数不能当作最终译文分数");
+      assert.equal(revised.aiQa.memoryCandidate, null);
+      assert.deepEqual(revised.issues, [], "修订前的问题不能继续挂在最终译文上");
+      assert.equal(revised.qualityRoute.decision, "auto_pass");
+      assert.match(revised.qualityRoute.reason, /规则检查通过/);
+    }
+    const pending = await workbench.invoke({ path: `/api/qa-cases/pending?locale=zh-CN&projectId=${project.id}` }, context);
+    const revisedCases = pending.filter(item => item.rejectedTranslation === "存储设定。");
+    assert.equal(revisedCases.length, 2);
+    assert.ok(revisedCases.every(item => item.scoreAfter === null && item.scoreBefore === 88));
+    const approved = await workbench.invoke({ method: "POST", path: `/api/qa-cases/${revisedCases[0].id}/approve` }, context);
+    assert.equal(approved.status, "human_approved");
+    assert.ok(!approved.regression?.error, "人工采纳后可以正常并入回归集");
   } finally { await workbench.close(); await rm(directory, { recursive: true, force: true }); }
 });

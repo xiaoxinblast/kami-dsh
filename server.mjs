@@ -1322,7 +1322,7 @@ function trajectoryToEvaluationSample(trajectory, { variant = "champion" } = {})
     requiredTermHits: Number(metrics.requiredTermHits) || 0,
     requiredTermTotal: Number(metrics.requiredTermTotal) || 0,
     hardErrorCount: Number(metrics.hardErrorCount) || 0,
-    qaScore: Number.isFinite(Number(metrics.qaScore)) ? Number(metrics.qaScore) : 0,
+    qaScore: metrics.qaScore != null && Number.isFinite(Number(metrics.qaScore)) ? Number(metrics.qaScore) : undefined,
     humanEditDistance: Number.isFinite(Number(human.editDistance)) ? Number(human.editDistance) : 0,
     humanAccepted: human.accepted === true || trajectory.status === "completed",
     cost: Number.isFinite(Number(trajectory.costUsd)) ? Number(trajectory.costUsd) : undefined,
@@ -1541,10 +1541,10 @@ async function loadProjectAssets(locale, projectId = "") {
 }
 
 
-async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, contentType, domain, batchId, providedReferences = null, humanDecisions = [], passScore = 90, maxRevisions = 2, projectSettings = null, projectId = "" }) {
-  const queryEmbedding = await embedSource(contextPack.source);
+async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, contentType, domain, batchId, providedReferences = null, humanDecisions = [], passScore = 90, maxRevisions = 2, projectSettings = null, projectId = "", referenceSession = null }) {
   let references = providedReferences;
   if (!references) {
+    const queryEmbedding = await embedSource(contextPack.source);
     const libraries = projectId ? await getResourceLibraries(projectId, { kind: "translation_memory" }) : [];
     // 先粗筛候选再精排：整库打分在 8 万条时每段要十几秒（见 src/memory-index.mjs）。
     const memories = await getMemoryCandidates(locale, {
@@ -1589,15 +1589,20 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   let used = false;
   let fallbackReason = "";
   let termDecisions = [];
+  let revisionStalled = false;
+  let revised = false;
+  let issuesBeforeRevision = [];
 
   try {
+    referenceSession ||= { toolRunner: buildReferenceToolRunner({ projectId, skill: contextPack.translationSkill }) };
     const potentialIssues = hardIssues.filter((issue) => issue.type === "potential_term");
     if (potentialIssues.length && maxRevisions > 0) {
       try {
-        const adjudication = await adjudicatePotentialTermsWithModel({ contextPack, translation, issues: potentialIssues });
+        const adjudication = await adjudicatePotentialTermsWithModel({ contextPack, translation, issues: potentialIssues, referenceSession });
         translation = adjudication.translation;
         termDecisions = adjudication.decisions;
-      } catch {
+      } catch (error) {
+        if (error.code === "style_guide_unread") throw error;
         translation = await reviseTranslationWithQa({
           contextPack,
           translation,
@@ -1607,7 +1612,7 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
             message: `${issue.message}。请结合原文语义判断：若为同一概念则自然采用正式译法；若不是同一概念则保持原译，不得强行替换。`
           })),
           references,
-          qaCases
+          qaCases, referenceSession
         });
         termDecisions = potentialIssues.map((issue) => ({
           officialSource: issue.sourceTerm,
@@ -1630,28 +1635,33 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
         }
       }
     }
-    aiIssues = await evaluateTranslationWithModel({ contextPack, translation, references: approvedReferences, machineDrafts, qaCases });
+    aiIssues = await evaluateTranslationWithModel({ contextPack, translation, references: approvedReferences, machineDrafts, qaCases, referenceSession });
     used = true;
     score = calculateQaScore({ hardIssues, aiIssues });
     initialScore = score;
-    while (score < passScore && iterations < maxRevisions) {
+    if (score < passScore && iterations < maxRevisions) {
+      issuesBeforeRevision = [...hardIssues.map(issue => ({ ...issue, severity: issue.severity === "error" ? "critical" : "minor" })), ...aiIssues];
       const actionable = [...hardIssues.map((issue) => ({ severity: "critical", category: issue.type, message: issue.message })), ...aiIssues];
       const previousTranslation = translation;
-      translation = await reviseTranslationWithQa({ contextPack, translation, issues: actionable, references, qaCases });
+      translation = await reviseTranslationWithQa({ contextPack, translation, issues: actionable, references, qaCases, referenceSession });
       iterations += 1;
-      if (translation.trim() === previousTranslation.trim()) break;
-      hardIssues = deterministicIssues(translation);
-      aiIssues = await evaluateTranslationWithModel({ contextPack, translation, references: approvedReferences, machineDrafts, qaCases });
-      score = calculateQaScore({ hardIssues, aiIssues });
+      revisionStalled = translation.trim() === previousTranslation.trim();
+      if (!revisionStalled) {
+        // 修订后只检查本地规则；旧模型意见与分数留在案例中，不冒充最终译文的结论。
+        revised = true;
+        score = null;
+        aiIssues = [];
+        hardIssues = deterministicIssues(translation);
+      }
     }
   } catch (error) {
     fallbackReason = error.message;
   }
 
   if (!used) score = null;
-  const passed = used && score >= passScore && !hardIssues.some((issue) => issue.severity === "error");
+  const passed = !fallbackReason && used && Number.isFinite(score) && score >= passScore && !hardIssues.some((issue) => issue.severity === "error");
   const issues = [...hardIssues, ...presentAiQaIssues(aiIssues)];
-  const status = passed ? "passed" : "review";
+  const status = revised && !fallbackReason ? "revised" : passed ? "passed" : "review";
   const provider = getProviderConfig();
   await saveQaRun({
     projectId, locale, contentType, domain, source: contextPack.source, initialTranslation, finalTranslation: translation,
@@ -1662,14 +1672,14 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   if (used && (translationChanged || !passed)) {
     await saveQaCase({
       projectId, project: projectId, locale, contentType, domain, source: contextPack.source, rejectedTranslation: initialTranslation,
-      correctedTranslation: translation, issues, scoreBefore: initialScore, scoreAfter: score,
+      correctedTranslation: translation, issues: revised ? issuesBeforeRevision : issues, scoreBefore: initialScore, scoreAfter: score,
       status: passed ? "machine_verified" : "review"
     });
   }
   // 机器结果只留在 QA 运行、学习轨迹和待审批 QA 案例中。即使达到分数门槛，
   // 也不能直接进入正式 TM；正式翻译记忆只由 /api/feedback/accept 的人工采纳产生。
   return {
-    translation, issues, score, status, iterations, used, fallbackReason, references, qaCases, termDecisions, humanDecisions,
+    translation, issues, score, status, iterations, used, fallbackReason, references, qaCases, termDecisions, humanDecisions, revisionStalled,
     memoryCandidate: passed ? {
       source: contextPack.source,
       target: translation,
@@ -3571,7 +3581,10 @@ async function reviseSegmentForConsistency({ run, segment, assets, source, targe
     matches,
     domain: run.domain,
     styleProfile,
-    qaGuidance
+    qaGuidance,
+    userProfile: workspaceStyleGuide(run.projectId),
+    neighborContext: batchNeighborContext(run, segment),
+    documentBrief: contextBriefSlice(run.contextBrief, run.segments.indexOf(segment), segment.id)
   });
   const revised = await reviseTranslationWithQa({
     contextPack,
@@ -3582,7 +3595,8 @@ async function reviseSegmentForConsistency({ run, segment, assets, source, targe
       message: `本文件要求统一：${source} 统一译为「${target}」（依据：${reason}）。只改这一处，其余内容、格式与信息保持不变。`
     }],
     references: [],
-    qaCases: qaGuidance
+    qaCases: qaGuidance,
+    toolRunner: buildReferenceToolRunner({ projectId: run.projectId })
   });
   return String(revised || "").trim();
 }
@@ -4351,7 +4365,7 @@ async function loadBatchWorkflow(run, knownTasks = new Map()) {
   if (!batchWorkers.has(run.batchId) && !batchQaWorkers.has(run.batchId)) {
     for (const [index, stage, running] of [[0, "qualityReport", consistencyCheckTasks], [1, "termSurvey", termSurveyTasks]]) {
       if (workflow[stage].status === "waiting" && !running.has(run.batchId) && tasks[index]?.status !== "in_progress") {
-        workflow[stage] = { status: "not_started", message: `${stage === "qualityReport" ? "质量报告" : "术语普查"}尚未执行，可手动运行；补跑翻译或 QA 后也会自动触发` };
+        workflow[stage] = { status: "not_started", message: `${stage === "qualityReport" ? "质量报告" : "术语普查"}尚未执行，可手动运行；补跑翻译后也会自动触发` };
       }
     }
   }
@@ -4395,7 +4409,6 @@ function startBatchQaRetry(batchId, taskId, segmentIds) {
         message: outcome.cancelled ? "AIQA 重试已中断，已完成结果保留" : `AIQA 重试已结束：成功 ${outcome.completed - outcome.failed} 段${outcome.failed ? ` · ${outcome.failed} 段仍未完成` : ""}` },
       payload: { batchId }
     });
-    if (latest && !outcome.cancelled && !latest.segments.some(segment => segment.selected !== false && !["done", "error"].includes(segment.status))) await finalizeBatchWorkflow(batchId);
   })().catch(async (error) => {
     await updateBackgroundTaskProgress(taskId, { status: "failed", progress: { phase: "failed", message: `AIQA 重试失败：${error.message}` }, payload: { batchId } }).catch(() => {});
   }).finally(() => { endBackgroundRun(taskId); batchQaWorkers.delete(batchId); });
@@ -6964,7 +6977,7 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req).catch(() => ({}));
     const run = await getBatchRun(batchId);
     if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
-    if (batchQaWorkers.has(batchId) || batchQaStarts.has(batchId) || batchTranslationStarts.has(batchId)) return json(res, 409, { error: "翻译重试或 AIQA 收尾正在运行，请在当前阶段结束后继续翻译" });
+    if (batchQaWorkers.has(batchId) || batchQaStarts.has(batchId) || batchTranslationStarts.has(batchId)) return json(res, 409, { error: "翻译重试或 AIQA 重试正在运行，请在当前阶段结束后继续翻译" });
     if (batchWorkers.has(batchId)) return json(res, 200, { batchId, runState: "running", alreadyRunning: true });
     // 语境分析是翻译的前置条件：还没跑完就先把分析跑起来，让前端等在原地，
     // 而不是用"猜出来的语体"先把整批翻掉。
@@ -7086,7 +7099,7 @@ async function apiHandler(req, res, url) {
     const batchId = decodeURIComponent(url.pathname.split("/")[4]);
     const run = await getBatchRun(batchId);
     if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
-    if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后会自动重新做术语普查" });
+    if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后可手动运行术语普查" });
     if (batchWorkers.has(batchId) || reviewFinalLocks.has(batchId) || consistencyCheckTasks.has(batchId)) return json(res, 409, { error: "批次正在翻译、核对或关联人工终稿，请完成后再做术语普查" });
     const alreadyRunning = termSurveyTasks.has(batchId);
     if (!alreadyRunning) startTermSurvey(batchId).catch((error) => console.error("[Kami] 术语普查任务异常", error));
@@ -7648,7 +7661,7 @@ async function apiHandler(req, res, url) {
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project }));
     const qaGuidance = rankQaCases(source, await getQaCases(locale, { projectId: project, contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(source) });
     const contextPack = buildContextPack({
-      titleOverrides: getSettings().orthography.titleBrackets, source, locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance });
+      titleOverrides: getSettings().orthography.titleBrackets, source, locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance, userProfile: workspaceStyleGuide(project) });
     const priorDecisions = Array.isArray(body.humanDecisions) ? body.humanDecisions.slice(0, 30) : [];
     const decidedAt = new Date().toISOString();
     let decision = normalizeReviewDecision({
@@ -7672,6 +7685,7 @@ async function apiHandler(req, res, url) {
     const humanDecisions = [...priorDecisions, decision];
 
     if (["accept", "partial", "revise"].includes(reviewAction)) {
+      const referenceSession = { toolRunner: buildReferenceToolRunner({ projectId: project, skill: translationSkill }) };
       const revisedTranslation = await reviseTranslationWithQa({
         contextPack, translation, issues: [{
           ...issue,
@@ -7679,12 +7693,12 @@ async function apiHandler(req, res, url) {
             ? `仅修订人工接受的部分：${decision.acceptedParts.join("；")}。不得采纳这些部分：${decision.rejectedParts.join("；")}。${decision.revisionInstruction}`
             : decision.revisionInstruction
         }],
-        references: Array.isArray(body.references) ? body.references : [], qaCases: qaGuidance
+        references: Array.isArray(body.references) ? body.references : [], qaCases: qaGuidance, referenceSession
       });
       decision = normalizeReviewDecision({ ...decision, afterTranslation: revisedTranslation });
       humanDecisions[humanDecisions.length - 1] = decision;
       const aiQa = await runAiQaLoop({
-        contextPack, initialTranslation: revisedTranslation, matches, locale, contentType, domain, batchId, humanDecisions, projectId: body.projectId || ""
+        contextPack, initialTranslation: revisedTranslation, matches, locale, contentType, domain, batchId, humanDecisions, projectId: body.projectId || "", referenceSession
       });
       const receipt = buildReviewReceipt({
         id: randomUUID(), taskId: body.trajectoryId || batchId, taskName: body.taskName || "翻译 QA",
@@ -7763,6 +7777,7 @@ async function apiHandler(req, res, url) {
     const segment = candidates.length === 1 ? candidates[0] : null;
     const contextPack = buildContextPack({
       titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance,
+      userProfile: workspaceStyleGuide(projectId),
       neighborContext: segment ? batchNeighborContext(batch, segment) : body.neighborContext,
       documentBrief: segment ? contextBriefSlice(batch.contextBrief, batch.segments.indexOf(segment), segment.id) : body.documentBrief });
     const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", maxRevisions: 0, projectSettings, projectId: body.projectId || "" });
@@ -7926,7 +7941,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     segments,
     scores: calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length), incomplete: !segments.length || segments.some((segment) => segment.aiQaFallbackReason || !Number.isFinite(segment.qaScore)) }),
     summary: summarizeIssues(allIssues),
-    alignmentNote: `直接回放这条批次翻译时的逐段检查结果（${segments.length} 段），没有重新调用模型。`
+    alignmentNote: `直接回放这条批次翻译时的逐段检查结果（${segments.length} 段），没有重新调用模型。${segments.some(segment => segment.aiQaStatus === "revised") ? "其中已修订的句段仅做了修订后规则检查，未生成最终模型分数。" : ""}`
   };
 }
 
@@ -8717,14 +8732,17 @@ async function evaluateQaBatch(batchId, projectId = "") {
       let aiQa = executed.aiQa;
       let qualityRoute = decideQualityRoute({
         qaScore: aiQa.score,
+        qaStatus: aiQa.status,
         hardErrorCount: hardErrorCount(aiQa.issues),
         riskTier: risk.tier,
         passScore: Math.max(routedPassScore, routing.tier === "strict" ? 93 : 0),
-        hasQualityUpgrade: Boolean(routing.upgradeTier),
+        hasQualityUpgrade: !aiQa.used && Boolean(routing.upgradeTier),
         aiQaUsed: aiQa.used
       });
       if (aiQa.fallbackReason) {
         qualityRoute = { decision: "human_review", threshold: routedPassScore, reason: `模型质检未完成：${aiQa.fallbackReason}` };
+      } else if (aiQa.revisionStalled) {
+        qualityRoute = { decision: "human_review", threshold: qualityRoute.threshold, reason: "修订未改变译文，停止重复调用，请人工核对剩余问题" };
       } else if (!aiQa.used && (!routing.modelQa || !aiQaEnabled)) {
         // 没跑模型质检时"AIQA 未完成"不构成阻断：确定性检查干净就放行，
         // 出现阻断问题则升档重做，而不是把整批快速档段落都推给人工。
@@ -8753,6 +8771,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
         routingDescription = `${qualityRoute.reason}，已自动升级到${QUALITY_TIERS[qualityTier]?.label || qualityTier}档重做。`;
         qualityRoute = decideQualityRoute({
           qaScore: aiQa.score,
+          qaStatus: aiQa.status,
           hardErrorCount: hardErrorCount(aiQa.issues),
           riskTier: risk.tier,
           passScore: Math.max(routedPassScore, routing.tier === "strict" ? 93 : 0),
@@ -8774,7 +8793,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
         }
       }
       const termSuggestions = resolveTermSuggestions(aiQa.translation, suggestionCandidates, modelSuggestions);
-      if (projectId && aiQa.translation && !(aiQa.issues || []).some((issue) => ["error", "critical"].includes(issue.severity))) {
+      if (projectId && aiQa.translation && aiQa.status !== "revised" && !(aiQa.issues || []).some((issue) => ["error", "critical"].includes(issue.severity))) {
         const workingLibrary = projectLibraries.find((library) => library.role === "working" && library.enabled);
         if (workingLibrary) {
           try {

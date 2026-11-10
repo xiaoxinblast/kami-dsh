@@ -201,3 +201,8 @@ test("回归套件禁止混入其他语言或项目的案例", () => {
     status: "active", enabled: true, candidates: [foreign]
   }), /作用域不一致/u);
 });
+
+test("未复检案例由人工批准后仍保持最终分数为空", () => {
+  const candidate = createRegressionCandidateFromQaCase(approvedQaCase({ scoreAfter: null }));
+  assert.equal(candidate.scoreAfter, null);
+});

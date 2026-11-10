@@ -42,6 +42,7 @@ test("QA 重试只检查现有译文，保留成功段与翻译失败段", async
   assert.equal(typeof retryServerBatchQa, "function");
   const run = fixture();
   run.runnerOptions.workingGlossary = { terms: [{ source: "b", target: "机器候选" }] };
+  run.segments[0].result = { qaScore: null, aiQa: { used: true, status: "revised", score: null, iterations: 1 } };
   const untouched = structuredClone([run.segments[0], run.segments[2], run.segments[3]]);
   const requests = [];
   const progress = [];
@@ -158,4 +159,26 @@ test("任务中心合并同批次的执行记录，不重复计数；其他后�
   const result = mergeBatchTaskRows(batches, background);
   assert.deepEqual(result.map((item) => item.batchId || item.id), ["b1", "import", "orphan"]);
   assert.equal(result.reduce((sum, item) => sum + (item.totalSegments || 0), 0), 979);
+});
+
+test("QA 重试不使已有报告和普查过期，新一轮翻译仍需收尾", async () => {
+  const { buildBatchWorkflow, batchQualityReportPending } = await import("../public/batch-status.js");
+  const run = fixture();
+  run.runnerOptions.translationCompletedAt = "2026-10-03T01:00:00Z";
+  run.runnerOptions.qaCompletedAt = "2026-10-03T03:00:00Z";
+  run.runnerOptions.workflowTasks = { qualityReport: "report", termSurvey: "survey" };
+  run.qualityReport = { report: { generatedAt: "2026-10-03T02:00:00Z" } };
+  run.runnerOptions.termSurvey = { generatedAt: "2026-10-03T02:00:00Z" };
+  const completed = { status: "completed", updatedAt: "2026-10-03T02:00:00Z" };
+  const workflow = buildBatchWorkflow(run, { qualityTask: completed, termTask: completed });
+  assert.equal(workflow.qualityReport.status, "completed");
+  assert.equal(workflow.termSurvey.status, "completed");
+  assert.equal(batchQualityReportPending(run, workflow), false);
+  const failed = buildBatchWorkflow(run, { qualityTask: { ...completed, status: "failed", progress: { message: "原报告失败" } }, termTask: completed });
+  assert.equal(failed.qualityReport.status, "needs_attention", "失败报告继续保留失败状态，不因重试 QA 重新排队");
+  run.runnerOptions.translationCompletedAt = "2026-10-03T04:00:00Z";
+  const translated = buildBatchWorkflow(run, { qualityTask: completed, termTask: completed });
+  assert.equal(translated.qualityReport.status, "waiting");
+  assert.equal(translated.termSurvey.status, "waiting");
+  assert.equal(batchQualityReportPending(run, translated), true);
 });

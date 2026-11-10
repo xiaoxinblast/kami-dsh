@@ -24,7 +24,7 @@ export function buildBatchWorkflow(run, { qualityTask = null, termTask = null, q
   const running = ["queued", "running"].includes(run.runState);
   const paused = run.runState === "paused";
   const ended = ["completed", "needs_attention"].includes(run.runState);
-  const changedAt = Math.max(Date.parse(run.runnerOptions?.translationCompletedAt || "") || 0, Date.parse(run.runnerOptions?.qaCompletedAt || "") || 0);
+  const changedAt = Date.parse(run.runnerOptions?.translationCompletedAt || "") || 0;
   const taskStage = (task) => {
     if (!task) return null;
     const warning = task.payload?.warning || "";

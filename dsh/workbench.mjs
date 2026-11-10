@@ -46,7 +46,7 @@ export async function createWorkbench({ dataDirectory, modelAdapter }) {
       if (url.pathname === "/api/batch/export") Object.assign(body, { ...savedRun, ...body, segments: body.segments || savedRun.segments, structure: savedRun.structure });
       delete body.base64;
     }
-    if (!context.workspaceSnapshot && context.cwd && context.fs && method === "POST" && /^\/api\/(?:translate|auto-qa)$/u.test(url.pathname)) {
+    if (!context.workspaceSnapshot && context.cwd && context.fs && method === "POST" && /^\/api\/(?:translate|auto-qa|qa(?:\/resolve)?)$/u.test(url.pathname)) {
       const state = await files.bound(context, body.projectId);
       context = { ...context, workspaceSnapshot: await withRuntimeCall(context, () => files.snapshot(state, body.resources || {}, context, body.resourceContext)) };
     }
