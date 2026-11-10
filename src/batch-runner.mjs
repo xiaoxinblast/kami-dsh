@@ -352,8 +352,9 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
         const qa = await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
           locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
           domain: run.domain || "auto", batchId, segmentId: segment.id,
-          workingTerms: run.runnerOptions?.workingGlossary?.terms || [],
+          workingTerms: [],
           aiQa: true });
+        if (qa.translation != null && qa.translation !== originalTranslation) throw new Error("QA 返回的译文与待检查译文不一致，评分未保存，请重试 QA");
         const translation = qa.translation || originalTranslation;
         update = { ...segment, translation, accepted: translation === originalTranslation ? segment.accepted : false,
           result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation }) } };

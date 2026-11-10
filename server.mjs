@@ -1592,7 +1592,7 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
 
   try {
     const potentialIssues = hardIssues.filter((issue) => issue.type === "potential_term");
-    if (potentialIssues.length) {
+    if (potentialIssues.length && maxRevisions > 0) {
       try {
         const adjudication = await adjudicatePotentialTermsWithModel({ contextPack, translation, issues: potentialIssues });
         translation = adjudication.translation;
@@ -7765,7 +7765,7 @@ async function apiHandler(req, res, url) {
       titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance,
       neighborContext: segment ? batchNeighborContext(batch, segment) : body.neighborContext,
       documentBrief: segment ? contextBriefSlice(batch.contextBrief, batch.segments.indexOf(segment), segment.id) : body.documentBrief });
-    const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", projectSettings, projectId: body.projectId || "" });
+    const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", maxRevisions: 0, projectSettings, projectId: body.projectId || "" });
     return json(res, 200, { matches, translation: aiQa.translation, issues: aiQa.issues, qaScore: aiQa.score, aiQa, styleProfile: contextPack.styleProfile });
   }
 /**

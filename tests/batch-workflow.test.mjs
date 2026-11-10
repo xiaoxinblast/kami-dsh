@@ -37,16 +37,17 @@ test("部分翻译失败也为已有译文执行报告和术语普查；重试�
   assert.deepEqual(finalized, [2, 3], "补齐失败段后要重新生成收尾结果");
 });
 
-test("QA 重试只处理未完成 QA，保存修订并保留成功段与翻译失败段", async () => {
+test("QA 重试只检查现有译文，保留成功段与翻译失败段", async () => {
   const { retryServerBatchQa } = await import("../src/batch-runner.mjs");
   assert.equal(typeof retryServerBatchQa, "function");
   const run = fixture();
+  run.runnerOptions.workingGlossary = { terms: [{ source: "b", target: "机器候选" }] };
   const untouched = structuredClone([run.segments[0], run.segments[2], run.segments[3]]);
   const requests = [];
   const progress = [];
   await retryServerBatchQa(run.batchId, {
     loadRun: async () => run, saveRun: async (value) => Object.assign(run, value),
-    recheckSegment: async (body) => { requests.push(body); return { translation: "乙（修订）", qaScore: 95, issues: [], aiQa: { used: true, status: "passed", score: 95, fallbackReason: "" } }; },
+    recheckSegment: async (body) => { requests.push(body); return { translation: body.translation, qaScore: 95, issues: [], aiQa: { used: true, status: "passed", score: 95, fallbackReason: "" } }; },
     report: async (value) => progress.push(value)
   });
   assert.equal(requests.length, 1);
@@ -54,12 +55,26 @@ test("QA 重试只处理未完成 QA，保存修订并保留成功段与翻译�
   assert.equal(requests[0].segmentId, run.segments[1].id, "重复原文须用句段 ID 取回对应语境");
   assert.equal(requests[0].translation, "乙");
   assert.equal(requests[0].aiQa, true);
-  assert.equal(run.segments[1].translation, "乙（修订）");
+  assert.deepEqual(requests[0].workingTerms, [], "未确认工作术语不能强制覆盖现有译文");
+  assert.equal(run.segments[1].translation, "乙");
   assert.equal(run.segments[1].result.qualityTier, "standard");
   assert.equal(run.segments[1].result.aiQa.fallbackReason, "");
   assert.deepEqual([run.segments[0], run.segments[2], run.segments[3]], untouched);
   assert.equal(progress.at(-1).completed, 1);
   assert.equal(progress.at(-1).failed, 0);
+});
+
+test("QA 返回其他译文时不改写原译，也不套用其他译文的评分", async () => {
+  const { retryServerBatchQa } = await import("../src/batch-runner.mjs");
+  const run = fixture();
+  const outcome = await retryServerBatchQa(run.batchId, {
+    loadRun: async () => run, saveRun: async value => Object.assign(run, value),
+    recheckSegment: async () => ({ translation: "改写后的乙", qaScore: 100, aiQa: { used: true, score: 100, status: "passed" } })
+  });
+  assert.equal(run.segments[1].translation, "乙");
+  assert.notEqual(run.segments[1].result.qaScore, 100);
+  assert.match(run.segments[1].result.aiQa.fallbackReason, /译文不一致/u);
+  assert.equal(outcome.failed, 1);
 });
 
 test("QA 再次失败保留译文并报告未完成，不能误报通过", async () => {
