@@ -11,11 +11,11 @@ import { saveBatchRun, saveLearningTrajectory, saveTranslationSkill } from "../s
 import { createDefaultTranslationSkill } from "../src/learning-engine.mjs";
 import { createModelAdapter } from "../dsh/model-adapter.mjs";
 
-test("DSH reports open details and trajectories; settings retain drafts, padding and saved switches", { skip: !process.env.KAMI_BROWSER_TEST_MODULE || !process.env.KAMI_REACT_DIRECTORY, timeout: 60000 }, async () => {
+test("DSH pages share responsive themes; context retries, reports and settings preserve their behavior", { skip: !process.env.KAMI_BROWSER_TEST_MODULE || !process.env.KAMI_REACT_DIRECTORY, timeout: 180000 }, async () => {
   const { chromium } = createRequire(import.meta.url)(process.env.KAMI_BROWSER_TEST_MODULE);
   const directory = await mkdtemp(join(tmpdir(), "kami-settings-browser-")), cwd = join(directory, "workspace");
   await mkdir(cwd);
-  const modelRequests = [];
+  const modelRequests = [], mutations = [];
   let holdContext = false, releaseContext;
   const contextGate = new Promise((resolve) => { releaseContext = resolve; });
   const modelAdapter = createModelAdapter({ llm: { async prepareCall(config) {
@@ -27,8 +27,8 @@ test("DSH reports open details and trajectories; settings retain drafts, padding
   const { fs, close } = await workspaceFs(), workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter });
   const context = { cwd, fs, human: true, isKamiSession: true, modelRoute: { provider: "dsh-test", model: "selected-model", reasoningEffort: "high" } };
   const state = await workbench.workspace({ action: "bind", name: "设置界面验收" }, context);
-  await writeFile(join(cwd, "source.txt"), "星の剣を装備します。");
-  const prepared = await workbench.importFile({ path: "source.txt" }, context);
+  await writeFile(join(cwd, "source.mqxliff"), '<?xml version="1.0" encoding="UTF-8"?><xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2"><file original="story"><body><trans-unit id="1"><source>星の剣を装備します。</source><target></target></trans-unit></body></file></xliff>');
+  const prepared = await workbench.importFile({ path: "source.mqxliff" }, context);
   const run = await workbench.invoke({ path: `/api/batch/run/${prepared.batchId}?projectId=${state.project.id}` }, context);
   run.contextBrief = { status: "failed", coverage: { covered: 0, total: 1 }, warning: "语境分析：模型输出被截断，请调整模型输出上限后重试。" };
   const segment = { ...run.segments[0], translation: "装备星之剑。", status: "done", result: { qaScore: 85, aiQa: { status: "review", used: true }, issues: [{ message: "请核对登记译法", suggestion: "使用星刃", severity: "major" }] } };
@@ -70,6 +70,7 @@ test("DSH reports open details and trajectories; settings retain drafts, padding
       if (req.url === "/invoke") {
         const chunks = []; for await (const chunk of req) chunks.push(chunk);
         const operation = JSON.parse(Buffer.concat(chunks).toString());
+        if (operation.method === "POST") mutations.push(operation.path);
         if (failQa && operation.method === "PATCH" && operation.body?.settings?.qa) throw new Error("模拟 QA 保存失败");
         if (failSettings && operation.path === "/api/settings" && operation.method === "GET") throw new Error("模拟参数加载失败");
         if (failModelSave && operation.path === "/api/settings" && operation.method === "POST") throw new Error("模拟模型设置保存失败");
@@ -91,6 +92,9 @@ test("DSH reports open details and trajectories; settings retain drafts, padding
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     const contextPanel = page.getByRole("region", { name: "语境分析", exact: true });
     await contextPanel.getByRole("button", { name: "重试语境分析", exact: true }).waitFor();
+    assert.equal(await page.getByRole("region", { name: "翻译流程", exact: true }).getByRole("region", { name: "语境分析", exact: true }).count(), 1);
+    assert.equal(await contextPanel.getAttribute("data-status"), "needs_attention");
+    assert.equal(await page.getByRole("button", { name: "查看本地 QA详情", exact: true }).getAttribute("data-status"), "legacy", "old QA records must not imply completion of a new per-segment phase");
     for (const width of [960, 330]) {
       await page.setViewportSize({ width, height: 1000 });
       assert.equal(await page.locator(".kami").evaluate((element) => element.scrollWidth > element.clientWidth), false);
@@ -101,12 +105,16 @@ test("DSH reports open details and trajectories; settings retain drafts, padding
     failContextSubmit = false; holdContext = true;
     await contextPanel.getByRole("alert").filter({ hasText: "模拟语境重试提交失败" }).getByRole("button", { name: "重试", exact: true }).click();
     await contextPanel.getByRole("button", { name: "语境分析中", exact: true }).waitFor();
+    assert.equal(await contextPanel.getAttribute("data-status"), "in_progress");
     assert.equal(await contextPanel.getByRole("button", { name: "语境分析中", exact: true }).isDisabled(), true);
     releaseContext(); holdContext = false;
     await contextPanel.getByRole("button", { name: "重新分析语境", exact: true }).waitFor({ timeout: 10000 });
     await contextPanel.getByText("已覆盖 1 / 1 段", { exact: true }).waitFor();
+    assert.equal(await contextPanel.getAttribute("data-status"), "completed");
+    assert.ok(mutations.length >= 2 && mutations.every((path) => path.endsWith("/context-brief")), "context retry must not request any downstream stage");
+    assert.equal((await workbench.invoke({ path: `/api/batch/run/${run.batchId}` }, context)).segments[0].translation, "装备星之剑。");
     await page.setViewportSize({ width: 960, height: 1000 });
-    await page.getByRole("button", { name: "查看质量检查详情", exact: true }).click();
+    await page.getByRole("button", { name: "查看本地 QA详情", exact: true }).click();
     await page.getByText("请核对登记译法", { exact: true }).waitFor();
     await page.getByRole("button", { name: "查看译段", exact: true }).click();
     assert.equal(await page.getByRole("textbox", { name: "译文 1", exact: true }).inputValue(), "装备星之剑。");
@@ -277,6 +285,95 @@ test("DSH reports open details and trajectories; settings retain drafts, padding
     assert.equal(await page.getByRole("tab", { name: "常规与备份", exact: true }).getAttribute("aria-selected"), "true");
     await page.getByRole("tab", { name: "常规与备份", exact: true }).press("ArrowRight");
     assert.equal(await page.getByRole("tab", { name: "QA 规则", exact: true }).getAttribute("aria-selected"), "true");
+    const currentRun = await workbench.invoke({ path: `/api/batch/run/${run.batchId}` }, context);
+    await saveBatchRun({ ...currentRun, segments: currentRun.segments.map((item) => ({ ...item, result: { ...item.result, stages: { translation: { status: "completed" }, proofreading: { status: "completed" }, localQa: { status: "completed" } } } })) });
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await page.addStyleTag({ content: `:root[data-theme=dark]{color-scheme:dark;--dsw-alias-label-primary:#e4ece7;--dsw-alias-label-secondary:#b2c1b8;--dsw-alias-label-tertiary:#94a79b;--dsw-alias-bg-layer-1:#151c18;--dsw-alias-bg-layer-2:#202a24;--dsw-alias-bg-layer-3:#2e3b32;--dsw-alias-border-l2:#3b4a40;--dsw-alias-interactive-bg-hover:#303f35;--dsw-alias-brand-primary:#91bfa5;--dsw-alias-state-error-primary:#ff9b91}` });
+    const capture = async (name, width, theme) => {
+      await page.locator("main").evaluate((element) => { element.scrollTop = 0; });
+      assert.equal(await page.locator("main").evaluate((element) => element.scrollWidth > element.clientWidth), false, `${name} fits ${width}px in ${theme}`);
+      if (process.env.KAMI_UI_SCREENSHOTS) {
+        await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+        await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `${name}-${theme}-${width}.png`), animations: "disabled" });
+        if (name === "task-overview" || name.startsWith("settings-category-")) {
+          const height = await page.locator("main").evaluate((element) => Math.ceil(element.scrollHeight) + 1);
+          await page.setViewportSize({ width, height: Math.max(1100, height) });
+          await page.locator("main").evaluate((element) => { element.scrollTop = 0; });
+          try {
+            if (name === "task-overview") await page.locator(".workflow-graph").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `full-flow-${theme}-${width}.png`), animations: "disabled" });
+            else await page.getByRole("tabpanel").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `${name}-fields-${theme}-${width}.png`), animations: "disabled" });
+          } finally { await page.setViewportSize({ width, height: 1100 }); }
+        }
+        const longPage = await page.locator("main").evaluate((element) => element.scrollHeight > element.clientHeight + 100);
+        if (longPage) {
+          await page.locator("main").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+          await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `${name}-tail-${theme}-${width}.png`), animations: "disabled" });
+        }
+      }
+    };
+    const navigate = (name) => page.getByRole("navigation", { name: "Kami", exact: true }).getByRole("button", { name, exact: true }).click();
+    const subpage = (region, name) => page.locator(`[aria-label="${region}"]`).getByRole("button", { name, exact: true }).click();
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+      for (const width of [960, 330]) {
+        await page.setViewportSize({ width, height: 1100 });
+        await navigate("任务");
+        for (const [name, slug] of [["任务概览", "overview"], ["译文检查", "review"], ["工作区导出", "export"], ["终稿与学习", "final"]]) {
+          await subpage("当前任务分区", name);
+          if (slug === "overview") {
+            await page.locator('.flow-node[data-status="completed"]').filter({ hasText: "校对润色" }).waitFor();
+            assert.match(await page.getByRole("button", { name: "查看本地 QA详情", exact: true }).innerText(), /1\s*\/\s*1/);
+          }
+          if (slug === "review") {
+            await page.locator(".segment-row").first().click();
+            assert.equal(await page.getByRole("textbox", { name: "译文 1", exact: true }).inputValue(), "装备星之剑。");
+          }
+          if (slug === "final") assert.equal(await page.getByRole("button", { name: "关联人工终稿", exact: true }).isDisabled(), true);
+          await capture(`task-${slug}`, width, theme);
+        }
+        await subpage("当前任务分区", "质量与复查");
+        for (const [name, slug] of [["质量报告", "qa"], ["一致性复查", "consistency"], ["术语普查", "terms"]]) {
+          await subpage("报告类型", name);
+          await capture(`report-${slug}`, width, theme);
+        }
+        await navigate("资产");
+        for (const [name, slug] of [["术语库", "terms"], ["记忆库 TM", "memory"], ["风格指南", "style"], ["参考资料", "reference"]]) {
+          await subpage("资产分类", name);
+          if (["terms", "memory"].includes(slug)) await page.locator(".library-row").first().waitFor();
+          else await page.getByText("关联工作区文件", { exact: true }).click();
+          await capture(`assets-${slug}`, width, theme);
+        }
+        await subpage("资产分类", "术语库");
+        await page.locator(".library-row").first().getByRole("button", { name: "打开", exact: true }).click();
+        await capture("assets-entries", width, theme);
+        await page.getByRole("button", { name: "全部库", exact: true }).click();
+        await page.locator(".library-row").last().getByRole("button", { name: "打开", exact: true }).click();
+        await capture("assets-library-files", width, theme);
+        await navigate("学习");
+        for (const [name, slug] of [["生效版本", "champion"], ["候选", "candidate"], ["评测", "evaluation"], ["门禁", "gate"], ["启用", "activation"]]) {
+          await page.locator(".learning-steps").getByRole("button").filter({ has: page.getByText(name, { exact: true }) }).click();
+          if (slug === "activation") assert.equal(await page.getByRole("button", { name: "确认启用候选", exact: true }).isDisabled(), true);
+          await capture(`learning-${slug}`, width, theme);
+        }
+        await page.getByText("学习轨迹与修改记录", { exact: true }).click();
+        await page.getByRole("searchbox", { name: "搜索学习证据", exact: true }).fill("reviewed.mqxliff");
+        await page.getByText("装备星刃。", { exact: true }).waitFor();
+        if (process.env.KAMI_UI_SCREENSHOTS) await page.locator("details").filter({ has: page.getByRole("searchbox", { name: "搜索学习证据", exact: true }) }).screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `learning-evidence-${theme}-${width}.png`) });
+        await navigate("审校");
+        assert.equal(await page.getByRole("button", { name: "运行 QA", exact: true }).isDisabled(), true);
+        await page.getByRole("textbox", { name: "原文", exact: true }).fill("星の剣を装備します。");
+        await page.getByRole("textbox", { name: "译文", exact: true }).fill("装备星之剑。");
+        assert.equal(await page.getByRole("button", { name: "运行 QA", exact: true }).isEnabled(), true);
+        await capture("standalone-review", width, theme);
+        await navigate("设置");
+        const settingNames = await page.getByRole("tab").allTextContents();
+        for (let index = 0; index < settingNames.length; index++) {
+          await page.getByRole("tab").nth(index).click();
+          assert.equal(await page.getByRole("tabpanel").count(), 1);
+          await capture(`settings-category-${index}`, width, theme);
+        }
+      }
+    }
     failSettings = true;
     await page.reload();
     await page.getByRole("button", { name: "设置", exact: true }).click();

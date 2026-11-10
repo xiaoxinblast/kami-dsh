@@ -11,6 +11,7 @@ import { parseModelJsonObject } from "./text.mjs";
 import { translationOutputIssue } from "./translation-output.mjs";
 import { parseMicroBatchTranslations } from "./micro-batch.mjs";
 import { measureStage } from "./performance.mjs";
+import { jaZhGuidance, VERIFICATION_GUIDANCE } from "./ja-zh-guidance.mjs";
 
 const loadedProvider = runtimeOptions().embedded ? { config: {}, persistence: { mode: "dsh", persisted: false } } : loadProviderConfig();
 let persistence = loadedProvider.persistence;
@@ -433,6 +434,9 @@ export function packPrompt(contextPack, { includeStable = true, batch = false } 
     `你是资深游戏本地化写手。你的任务不是逐字翻译，而是把${pack.sourceLanguage}文案用 ${pack.targetLanguage} 玩家最自然的方式重新表达：先读懂这句话在游戏场景里的意图、情绪与角色，再用目标语言母语者会用的说法写出来。只改变表达方式，不改变信息。`,
     `硬规则（任何其它说明与它冲突时以硬规则为准）：\n1. 不得使用其他目标语言的表达。\n2. 信息保真：数字、日期、名称、占位符、强制术语和事实必须完整保留；除此之外，语序、句式、用词、修辞都可以自由改写为地道说法——换一种地道表达不等于漏译或增译。\n3. 强制术语必须逐字采用指定目标译法。\n4. 上下文与语境档案只用于消歧和保持一致，不得把上文、下文或说明文字混入译文。\n5. 数字与日期：数值必须等价，格式按目标语言习惯改写；不得为了保留字面而在译文里额外塞入原样数字。\n6. 拒绝翻译腔：成语、习语、重复、语气词、客套话一律换成目标语言中语义与语气对等的自然说法；译文读起来必须像目标语言原生文案，而不是日语的逐字影子。\n7. 原文含押韵、对仗、重复或口号结构时，必须在目标语言中重现节奏与韵律，允许换用地道表达；语气要与原句一致（如闲散自嘲不得译成命令口吻）。\n8. 只翻译“当前原文”，只输出译文，不解释。`
   ];
+  stable.push(VERIFICATION_GUIDANCE);
+  const languageGuidance = jaZhGuidance(pack);
+  if (languageGuidance) stable.push(languageGuidance);
   const guide = formatStyleGuide(pack.userProfile);
   if (guide) stable.push(`人工风格指南（版本 ${pack.userProfile?.version || "无"}，跨语体全局；优先级最高，与下面任何风格规则冲突时以它为准）：\n${guide}`);
   if (pack.styleProfile) {
@@ -936,11 +940,11 @@ export async function chatWithTools(messages, config = runtimeConfig, {
 }
 
 /** 同一段 QA 与修订只复用本轮真实工具证据，不保留旧审校结论或跨段缓存。 */
-async function chatWithQaReferences(messages, options, session) {
+async function chatWithQaReferences(messages, options, session, config = runtimeConfig) {
   const runner = session?.toolRunner;
-  if (!runner?.tools?.length) return chat(messages, runtimeConfig, options);
-  const evidence = session.messages?.length ? [{ role: "user", content: "以下工具证据已在当前这一段的本轮 QA 中实际读取，可直接用于当前审校或修订，无需重复读取；有新的疑点时仍可按需查阅原件。" }, ...session.messages] : [];
-  const result = await chatWithTools([messages[0], ...evidence, ...messages.slice(1)], runtimeConfig, {
+  if (!runner?.tools?.length) return chat(messages, config, options);
+  const evidence = session.messages?.length ? [{ role: "user", content: "以下工具证据已在当前这一段的本轮处理中实际读取，可直接用于当前校对或修订，无需重复读取；有新的疑点时仍可按需查阅原件或联网查证。" }, ...session.messages] : [];
+  const result = await chatWithTools([messages[0], ...evidence, ...messages.slice(1)], config, {
     ...options,
     tools: runner.tools,
     maxRounds: runner.maxRounds ?? 4,
@@ -953,7 +957,7 @@ async function chatWithQaReferences(messages, options, session) {
   session.messages = (result.messages || []).filter(message => message.role === "tool" || message.role === "assistant" && message.tool_calls?.length)
     .map(message => message.role === "assistant" ? { ...message, content: "" } : message);
   if (!result.exhausted) return result.content;
-  return chat([...result.messages, { role: "user", content: "工具轮次已用完。请根据已返回的原件证据完成当前任务，只输出要求的最终结果，不要再调用工具。" }], runtimeConfig, options);
+  return chat([...result.messages, { role: "user", content: "工具轮次已用完。请根据已返回的原件证据完成当前任务，只输出要求的最终结果，不要再调用工具。" }], config, options);
 }
 
 export function isEmbeddingConfigured() {
@@ -1895,6 +1899,14 @@ export function parseAiQaLineResponse(content) {
   }];
 }
 
+export async function proofreadTranslationWithModel({ contextPack, translation, toolRunner = null, referenceSession = null, onUsage = null, model = "", modelRole = "main" }) {
+  const revised = await chatWithQaReferences([
+    { role: "system", content: "你是日中本地化校对编辑。本阶段同时负责准确性校对、项目规范检查和自然流畅的语言润色。对照原文、上下文、人工风格指南、术语和参考资料，修正误译、漏译、指代、语气、格式等问题；即使没有硬错误，也须检查并改善生硬的日式语序、词语搭配、句间衔接和节奏，使中文自然易读、符合角色口吻和文本用途。保留信息、事实确定性、情绪强度、数字、占位符与标签；不增添原文没有的内容，不为了变化而改掉已自然准确的表达。原文带韵律时在这一次校对中完善韵律。直接输出完整校对后的译文，不输出问题列表、评分、解释或查证报告。" },
+    { role: "user", content: `${packPrompt(contextPack)}\n\n待校对译文（仅作编辑对象）：\n${translation}\n\n请完成校对与润色，只输出完整译文。` }
+  ], { temperature: 0.15, timeoutMs: 75_000, requestLabel: "模型校对", onUsage }, referenceSession || { toolRunner }, configForRole(modelRole, model));
+  return requireNonEmptyTranslation(revised, "", "模型校对");
+}
+
 export async function reviseTranslationWithQa({ contextPack, translation, issues, references = [], qaCases = [], onUsage = null, toolRunner = null, referenceSession = null }) {
   const revised = await chatWithQaReferences([
     { role: "system", content: "你是最终修订译者。只修复 QA 明确指出的问题，保留正确内容、数字、格式、占位符、术语的语境判断结果、明确硬约束和原有信息边界；若问题涉及表达不地道，就用更地道的说法改写，不要退回逐字直译；若原文或文件语境显示韵律结构，修订必须同时重现节奏与押韵。只输出完整修订译文，不要解释。" },
@@ -2357,7 +2369,7 @@ export async function reviewGateFailuresWithModel({ locale = "zh-CN", scope = {}
   }
 }
 
-export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "", modelRole = "main", toolRunner = null } = {}) {
+export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "", modelRole = "main", toolRunner = null, referenceSession = null, singlePass = false } = {}) {
   const rhymeLike = contextPack?.rhymeLike === true;
   const batchVerse = contextPack?.batchVerse?.active === true;
   const callConfig = configForRole(modelRole, model);
@@ -2378,6 +2390,8 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
     })
     : { content: await chat(initialMessages, callConfig, initialOptions), exhausted: false };
   toolRunner?.assertReady?.();
+  if (referenceSession) referenceSession.messages = (firstPass.messages || []).filter(message => message.role === "tool" || message.role === "assistant" && message.tool_calls?.length)
+    .map(message => message.role === "assistant" ? { ...message, content: "" } : message);
   let initial = String(firstPass.content || "").trim();
   const nativeMessages = firstPass.nativeMessages || [];
   if (translationOutputIssue(initial)) {
@@ -2392,7 +2406,7 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
     ], callConfig, { ...initialOptions, requestLabel: initial ? "翻译（非译文重试）" : "翻译（空译文重试）", tools: undefined })).trim();
   }
   initial = requireNonEmptyTranslation(initial, "", "模型");
-  if (!reflect && !rhymeLike) return { initial, translation: initial, reflection: "" };
+  if (singlePass || !reflect && !rhymeLike) return { initial, translation: initial, reflection: "" };
   if (rhymeLike) {
     // 韵文本地化专用通道：初译只作参考，要求模型以目标语言玩家视角再创作，
     // 而不是修补字对字直译。
@@ -2475,7 +2489,7 @@ export async function translateMicroBatchWithModel(entries, { routePlan, toolRun
   return parseMicroBatchTranslations(response.content, entries.map(entry => ({ id: entry.id, source: entry.contextPack.source })));
 }
 
-export async function translateWithRoute(contextPack, { routePlan = null, reflect = true, onUsage = null, toolRunner = null } = {}) {
+export async function translateWithRoute(contextPack, { routePlan = null, reflect = true, onUsage = null, toolRunner = null, referenceSession = null, singlePass = false } = {}) {
   const plan = routePlan || { route: "reflective", candidateCount: 1, model: runtimeConfig.model, modelRole: "main" };
   const selectedModel = String(plan.model || runtimeConfig.model);
   const selectedConfig = configForRole(plan.modelRole, selectedModel);
@@ -2531,7 +2545,7 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
   }
 
   const forceReflection = plan.reflect === false ? false : (plan.route === "fact_guarded" ? true : (plan.route === "direct" ? false : reflect));
-  const result = await translateWithReflection(contextPack, { reflect: forceReflection, onUsage, model: selectedModel, modelRole: plan.modelRole, toolRunner });
+  const result = await translateWithReflection(contextPack, { reflect: forceReflection, onUsage, model: selectedModel, modelRole: plan.modelRole, toolRunner, referenceSession, singlePass });
   return {
     ...result,
     candidates: [{ index: 0, translation: result.translation, recommended: true, reason: plan.label || "系统推荐" }],

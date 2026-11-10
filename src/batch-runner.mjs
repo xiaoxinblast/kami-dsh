@@ -5,7 +5,7 @@ import { isTransientConnectionError, retryTransient } from "./transient-errors.m
 import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
-import { isIncompleteBatchQa } from "../public/batch-status.js";
+import { isIncompleteBatchQa, isIncompleteBatchStage } from "../public/batch-status.js";
 import { translationRetryReason } from "./translation-output.mjs";
 import { microBatchSegments } from "./micro-batch.mjs";
 import { measureStage } from "./performance.mjs";
@@ -19,6 +19,8 @@ function compactResult(result) {
   const clip = (value, limit = 800) => String(value || "").slice(0, limit);
   return {
     translation: clip(result.translation, 10_000),
+    ...(result.stages ? { stages: result.stages, draft: clip(result.draft, 10_000) } : {}),
+    ...(result.referenceUsage ? { referenceUsage: result.referenceUsage } : {}),
     qaScore: Number.isFinite(result.qaScore) ? result.qaScore : null,
     matches: (result.matches || []).slice(0, 20),
     issues: (result.issues || []).slice(0, 30),
@@ -193,7 +195,8 @@ export async function runServerBatch(batchId, {
         batchGroupEntries: (groupById.get(segment.id) || []).map(item => ({ id: item.id, source: item.source, context: item.context })),
         qualityTier: options.qualityTier || "auto",
         reflect: options.reflect !== false,
-        useModelClassification: false
+        useModelClassification: false,
+        ...(retryIds ? { workflowStage: "translation" } : {})
       }
     };
   };
@@ -243,7 +246,7 @@ export async function runServerBatch(batchId, {
         return run;
       }
       const segment = run.segments.find((item) => item.id === segmentId);
-      if (!segment || segment.selected === false || segment.status === "done") continue;
+      if (!segment || segment.selected === false || segment.status === "done" || !retryIds && segment.status === "error") continue;
       segment.status = "running";
       segment.error = "";
       // "这段正在翻"只更新内存：每段都整行写一次会把 Directus 压出压力保护，
@@ -296,9 +299,9 @@ export async function runServerBatch(batchId, {
         segment.accepted = false;
         // 本段翻完立刻学本文件术语：下一次请求就能用上；失败不影响本段。
         // 小批初译已共享组内上下文，统一在本组最终译文保存后学习，供下一组使用。
-        if (drafts.has(segment.id) && learnGroupTerms) {
+        if (!retryIds && drafts.has(segment.id) && learnGroupTerms) {
           pendingTerms.push(segment);
-        } else if (learnTerms) {
+        } else if (!retryIds && learnTerms && (!result.stages || result.stages.localQa?.status === "completed")) {
           try {
             const learned = await withRuntimeCall({ performanceTrace: segment.result?.performance }, () => measureStage("workingTerms", () => learnTerms({ run, segment, translation: segment.translation })));
             applyLearned(learned, segment);
@@ -320,23 +323,25 @@ export async function runServerBatch(batchId, {
   }
 
   const failed = selected.filter((segment) => segment.status === "error").length;
-  run.runState = failed ? "needs_attention" : retryIds && run.segments.some((segment) => segment.selected !== false && segment.status !== "done") ? "paused" : "completed";
-  run.runnerOptions = { ...run.runnerOptions, translationCompletedAt: new Date().toISOString() };
+  const incomplete = selected.some(segment => segment.result?.stages && segment.result.stages.localQa?.status !== "completed");
+  run.runState = failed || incomplete ? "needs_attention" : retryIds && run.segments.some((segment) => segment.selected !== false && segment.status !== "done") ? "paused" : "completed";
+  run.runnerOptions = { ...run.runnerOptions, translationCompletedAt: new Date().toISOString(), stageRetryOnly: Boolean(retryIds) };
   run.subBatches = checkpointSubBatches(subBatches, run.segments);
   await checkpoint.commit();
   // 交付前闭环先跑：一致性核对 + 质量报告是用户翻完立刻要看的结论；
   // 风格学习与复盘（review）会调多次模型，排在后面免得把报告拖到几分钟后。
-  if (!retryIds && selected.some((segment) => segment.status === "done" && segment.translation)) await finalize(run);
-  if (!retryIds && !failed) await review(run);
+  if (!retryIds && !failed && !incomplete && selected.some((segment) => segment.status === "done" && segment.translation)) await finalize(run);
+  if (!retryIds && !failed && !incomplete) await review(run);
   return run;
 }
 
 /** 只重跑已有译文中未完成的 AIQA，逐段保存；成功段与翻译失败段不改。 */
-export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSegment, segmentIds = null, shouldCancel = () => false, report = async () => {} } = {}) {
+export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSegment, stage = null, segmentIds = null, shouldCancel = () => false, report = async () => {} } = {}) {
   let run = await loadRun(batchId);
   if (!run) throw new Error("未找到批次任务");
   const ids = segmentIds ? new Set(segmentIds.map(String)) : null;
-  const targets = run.segments.filter((segment) => isIncompleteBatchQa(segment) && !segment.accepted && !translationRetryReason(segment) && (!ids || ids.has(String(segment.id))));
+  const incomplete = (segment) => stage ? isIncompleteBatchStage(segment, stage) : isIncompleteBatchQa(segment);
+  const targets = run.segments.filter((segment) => incomplete(segment) && !segment.accepted && !translationRetryReason(segment) && (!ids || ids.has(String(segment.id))));
   let completed = 0;
   let failed = 0;
   await report({ completed, failed, total: targets.length });
@@ -345,30 +350,37 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
     run = await loadRun(batchId);
     const segment = run?.segments.find((item) => item.id === target.id);
     if (!segment) break;
-    if (isIncompleteBatchQa(segment)) {
+    if (!segment.accepted && incomplete(segment)) {
       const originalTranslation = segment.translation;
       let update;
       try {
         const qa = await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
           locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
           domain: run.domain || "auto", batchId, segmentId: segment.id,
+          ...(stage ? { workflowStage: stage, stages: segment.result.stages,
+            neighborContext: batchNeighborContext(run, segment), documentBrief: contextBriefSlice(run.contextBrief, run.segments.indexOf(segment), segment.id),
+            useModelClassification: false, qualityTier: segment.result.qualityTier } : {}),
           workingTerms: [],
           aiQa: true });
-        if (qa.translation != null && qa.translation !== originalTranslation) throw new Error("QA 返回的译文与待检查译文不一致，评分未保存，请重试 QA");
+        if (stage !== "proofreading" && qa.translation != null && qa.translation !== originalTranslation) throw new Error("QA 返回的译文与待检查译文不一致，评分未保存，请重试 QA");
         const translation = qa.translation || originalTranslation;
         update = { ...segment, translation, accepted: translation === originalTranslation ? segment.accepted : false,
-          result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation }) } };
+          result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation, draft: segment.result?.draft || qa.draft }) } };
       } catch (error) {
-        update = { ...segment, result: { ...segment.result, aiQa: { ...segment.result?.aiQa, fallbackReason: String(error.message || error) } } };
+        update = { ...segment, result: { ...segment.result,
+          ...(stage ? { stages: { ...segment.result.stages, [stage]: { status: "failed", error: String(error.message || error) } } } : {}),
+          aiQa: { ...segment.result?.aiQa, fallbackReason: String(error.message || error) } } };
       }
       // 回写前重新读取，不能覆盖并发编辑或用户已经修好的 QA。
       run = await loadRun(batchId);
       const current = run?.segments.find((item) => item.id === segment.id);
-      if (current && current.translation === originalTranslation && isIncompleteBatchQa(current)) {
+      if (current && !current.accepted && current.translation === originalTranslation && incomplete(current)) {
         run.segments = run.segments.map((item) => item.id === segment.id ? update : item);
+        run.runnerOptions = { ...run.runnerOptions, stageRetryOnly: true,
+          ...(update.translation !== originalTranslation ? { translationCompletedAt: new Date().toISOString() } : {}) };
         await saveRun(run);
       }
-      if (isIncompleteBatchQa(run?.segments.find((item) => item.id === segment.id) || update)) failed += 1;
+      if (incomplete(run?.segments.find((item) => item.id === segment.id) || update)) failed += 1;
     }
     completed += 1;
     await report({ completed, failed, total: targets.length });

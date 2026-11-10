@@ -130,19 +130,20 @@ export function referenceBudgetFrom(settings = {}, skill = null) {
 /**
  * @param onlyChunkIds 评测隔离用：只允许这些片段参与检索（null 表示不限制）
  */
-export function buildReferenceToolRunner({ index, projectId = "", settings = {}, skill = null, onActivity = null, onlyChunkIds = null } = {}) {
+export function buildReferenceToolRunner({ index, projectId = "", settings = {}, skill = null, onActivity = null, onlyChunkIds = null, allowWeb = false } = {}) {
   const budget = referenceBudgetFrom(settings, skill);
-  if (!projectId) return null;
+  if (!projectId && !allowWeb) return null;
   const snapshot = taskResources(projectId), runtime = runtimeOptions();
   const styleGuides = snapshot?.styleGuideMode === "agent-native" ? snapshot.resources.filter((item) => item.purpose === "style-guide") : [];
-  const native = styleGuides.length || snapshot?.referenceMode === "agent-native" || runtime.embedded && snapshot?.resources?.some((item) => item.purpose === "reference");
+  const web = allowWeb && runtime.embedded && typeof runtime.referenceTools === "function" && Boolean(snapshot?.workspace || runtime.workspaceRoot);
+  const native = web || styleGuides.length || snapshot?.referenceMode === "agent-native" || runtime.embedded && snapshot?.resources?.some((item) => item.purpose === "reference");
   const enabled = native ? settings.enabled !== false : budget.enabled;
-  if (!enabled && !styleGuides.length) return null;
+  if (!enabled && !styleGuides.length && !web) return null;
   const references = enabled ? (snapshot?.resources || []).filter((item) => item.purpose === "reference") : [];
   if (native) {
     if (onlyChunkIds !== null) return null;
     if (typeof runtime.referenceTools !== "function") throw new Error("风格指南和参考资料只关联原件；请在原 DSH 会话中运行翻译或审校，以使用 Agent 的原生查阅工具");
-    return runtime.referenceTools({ workspace: snapshot.workspace, references, styleGuides, onActivity, maxRounds: Number(settings.nativeMaxRounds) || 6 });
+    return runtime.referenceTools({ workspace: snapshot?.workspace || runtime.workspaceRoot, references, styleGuides, onActivity, allowWeb: Boolean(web), maxRounds: Number(settings.nativeMaxRounds) || 6 });
   }
   const runner = createReferenceToolRunner({
     index,

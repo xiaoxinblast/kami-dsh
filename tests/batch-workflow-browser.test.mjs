@@ -101,12 +101,12 @@ test("翻译与任务中心展示阶段进度、失败原因和 QA 批量重试�
     await page.locator("#batchRetryQa").click();
     await page.waitForFunction(() => document.querySelector("#batchRetryQa")?.hidden === true);
     assert.equal(calls[0].projectId, "project-1");
-    assert.equal(calls[0].segmentIds, null, "一键 QA 重试应交给服务端筛选失败 QA");
+    assert.equal(calls[0].segmentIds, undefined, "一键 QA 重试应交给服务端筛选失败 QA");
     assert.match(await page.locator("#batchWorkflowStages").textContent(), /模型服务 503/u);
     assert.doesNotMatch(await page.locator("#batchWorkflowStages").textContent(), /等待启动|等待质量报告/u);
     assert.doesNotMatch(await page.locator("#batchProgressText").textContent(), /正在生成质量报告/u);
-    assert.match(await page.locator("#batchWorkflowNote").textContent(), /重试 QA 仅更新 QA 结果/u);
-    assert.match(await page.locator("#toast").textContent(), /保存 QA 结果后结束/u);
+    assert.match(await page.locator("#batchWorkflowNote").textContent(), /各阶段重试只执行该阶段/u);
+    assert.match(await page.locator("#toast").textContent(), /保存结果后结束/u);
     await shot(page, "qa-retry-finished");
     await page.locator('[data-batch-tab="report"]').click();
     await page.waitForSelector("#batchReportPanel:not([hidden])");

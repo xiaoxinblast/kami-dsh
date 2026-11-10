@@ -70,7 +70,8 @@ test("retry API finds legacy contamination, rejects invalid targets and locks co
     let latest;
     for (let i = 0; i < 250; i++) { latest = await workbench.invoke({ path }, context); if (!latest.workflow.writeBusy) break; await setTimeout(20); }
     assert.equal(latest.workflow.writeBusy, false);
-    assert.equal(latest.runState, "paused");
+    assert.equal(latest.runState, "needs_attention");
+    assert.equal(latest.segments[1].result.stages.proofreading.status, "pending");
     assert.equal(latest.segments[1].translation, "保存设置。"); assert.equal(latest.segments[2].translation, "保存设置。");
     assert.equal(latest.segments[1].retryTranslationReason, "");
     const saved = await getBatchRun(run.batchId);

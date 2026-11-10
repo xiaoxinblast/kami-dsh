@@ -74,21 +74,21 @@ test("质量档映射到执行计划：模型角色、候选数与修订轮次",
   assert.equal(fast.route, "direct");
   assert.equal(fast.modelRole, "fast");
   assert.equal(fast.model, "fast");
-  assert.equal(fast.modelQa, false);
+  assert.equal(fast.modelQa, true);
   assert.equal(fast.maxRevisions, 0);
-  assert.equal(fast.upgradeTier, "standard");
+  assert.equal(fast.upgradeTier, "");
 
   const standard = planQualityTier({ tier: "standard", provider: { model: "main" } });
   assert.equal(standard.route, "reflective");
   assert.equal(standard.modelQa, true);
-  assert.equal(standard.maxRevisions, 1);
-  assert.equal(standard.upgradeTier, "strict");
+  assert.equal(standard.maxRevisions, 0);
+  assert.equal(standard.upgradeTier, "");
 
   const strict = planQualityTier({ tier: "strict", purpose: "announcement", provider: { model: "main" } });
   assert.equal(strict.route, "fact_guarded");
   assert.equal(strict.modelRole, "main");
   assert.equal(strict.modelFallback, true, "没配高质量模型时必须标注回落");
-  assert.equal(strict.maxRevisions, 2);
+  assert.equal(strict.maxRevisions, 0);
   assert.equal(strict.reflect, false, "严苛档由统一 QA 审查，不重复反思");
   assert.match(describeTierStrength({ tier: "strict", provider: {} }), /未启用更强模型/u);
 

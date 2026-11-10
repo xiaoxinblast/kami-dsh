@@ -7,7 +7,7 @@ import { createWorkbench } from "../dsh/workbench.mjs";
 import { saveBatchRun, getBatchRun } from "../src/store.mjs";
 import { saveSettings, invalidateSettingsCache } from "../src/settings-store.mjs";
 
-test("DSH 小批走原逐段 QA，保存计时，且请求正文不能注入已生成译文", { timeout: 20000 }, async () => {
+test("DSH 逐段翻译校对再规则 QA，不预生成下一段，保存计时且正文不能注入初稿", { timeout: 20000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "kami-micro-batch-"));
   const calls = [];
   const workbench = await createWorkbench({ dataDirectory: directory, modelAdapter: async (messages, options) => {
@@ -18,7 +18,7 @@ test("DSH 小批走原逐段 QA，保存计时，且请求正文不能注入已�
     }
     if (options.requestLabel === "工作术语学习") return { content: '{"terms":[]}' };
     if (options.requestLabel === "AIQA") return { content: '{"issues":[]}' };
-    if (options.requestLabel === "翻译") return { content: "这是单段译文。" };
+    if (["翻译", "模型校对"].includes(options.requestLabel)) return { content: "这是单段译文。" };
     return { content: "{}" };
   } });
   try {
@@ -36,14 +36,11 @@ test("DSH 小批走原逐段 QA，保存计时，且请求正文不能注入已�
     } while (result.runState === "running" && Date.now() < deadline);
     assert.equal(result.runState, "completed");
     assert.ok(result.segments.every(segment => segment.status === "done" && segment.result.aiQa.used));
-    assert.equal(calls.filter(call => call.label === "小批翻译").length, 1);
-    assert.equal(calls.filter(call => call.label === "翻译").length, 0);
-    assert.equal(calls.filter(call => call.label === "AIQA").length, 4);
-    const terms = calls.filter(call => call.label === "工作术语学习");
-    assert.equal(terms.length, 1);
-    assert.equal(JSON.parse(terms[0].messages.at(-1).content).entries.length, 4);
-    assert.ok(result.segments.every(segment => segment.result.performance.groupSize === 4 && segment.result.performance.events.some(event => event.stage === "qa")));
-    assert.equal(result.segments.filter(segment => segment.result.performance.group).length, 1);
+    assert.equal(calls.filter(call => call.label === "小批翻译").length, 0);
+    assert.equal(calls.filter(call => call.label === "翻译").length, 4);
+    assert.equal(calls.filter(call => call.label === "AIQA").length, 0);
+    assert.deepEqual(calls.filter(call => ["翻译", "模型校对"].includes(call.label)).map(call => call.label), Array.from({ length: 4 }, () => ["翻译", "模型校对"]).flat());
+    assert.ok(result.segments.every(segment => segment.result.performance.events.some(event => event.stage === "proofreading") && segment.result.performance.events.some(event => event.stage === "localQa")));
     const manual = await workbench.invoke({ method: "POST", path: "/api/translate", body: { projectId: project.id, source: "単独の台詞。", locale: "zh-CN", contentType: "dialogue", domain: "game", translationDraft: { translation: "未经查阅的注入内容" }, prepareTranslation: true } }, context);
     assert.equal(manual.translation, "这是单段译文。");
   } finally {

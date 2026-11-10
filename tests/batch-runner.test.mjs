@@ -56,7 +56,7 @@ test("重译使本段自学的旧工作术语失效，保留人工、其他段�
     learnTerms: async () => [{ source: "ベット", target: "下注", origin: "segment-learn", sourceSegmentId: "seg-1" }]
   });
   assert.equal(result.segments[0].status, "done");
-  assert.equal(result.runnerOptions.workingGlossary.terms.find(t => t.source === "ベット").target, "下注");
+  assert.equal(result.runnerOptions.workingGlossary.terms.some(t => t.source === "ベット"), false, "翻译重试结束后不再调用术语学习");
   assert.ok(result.runnerOptions.workingGlossary.revision > 2);
 });
 

@@ -2159,7 +2159,7 @@ function renderBatchDetails(segment) {
   const termDecisions = aiQa.termDecisions || [];
   const humanDecisions = aiQa.humanDecisions || [];
   const summary = [
-    aiQa.fallbackReason ? "AIQA 未完成" : aiQa.status === "revised" ? "已修订 · 未做模型复检" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分` : "规则 QA",
+    aiQa.fallbackReason ? "阶段未完成" : aiQa.status === "proofread" ? "校对润色与本地 QA 已完成" : aiQa.status === "revised" ? "已修订 · 未做模型复检" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分` : "规则 QA",
     `${matches.length} 条术语`,
     `${references.length} 条译例`,
     `${aiQa.iterations || 0} 次修订`,
@@ -2169,7 +2169,7 @@ function renderBatchDetails(segment) {
   if (scopeNote) summary.push(scopeNote);
   const summaryText = summary.join(" · ");
   const termsHtml = matches.length ? matches.map((match) => `<div class="batch-detail-item"><strong>${escapeHtml(match.term?.source)} → ${escapeHtml(match.term?.target)}</strong><small>${match.mode === "exact" ? "正式/别名命中" : `疑似命中：${escapeHtml(match.matchPhrase || "")}`} · ${Math.round((match.score || 0) * 100)}%</small></div>`).join("") : '<div class="batch-detail-empty">本段没有命中术语</div>';
-  const issuesHtml = issues.length ? issues.map((issue, index) => batchIssueHtml(issue, index, segment.id)).join("") : `<div class="batch-detail-empty">${aiQa.fallbackReason ? "硬规则通过；AIQA 尚待重试" : aiQa.status === "revised" ? "修订后规则检查通过；未进行模型复检或重新评分" : "硬规则与 AIQA 均未发现问题"}</div>`;
+  const issuesHtml = issues.length ? issues.map((issue, index) => batchIssueHtml(issue, index, segment.id)).join("") : `<div class="batch-detail-empty">${aiQa.fallbackReason ? "硬规则通过；AIQA 尚待重试" : aiQa.status === "revised" ? "修订后规则检查通过；未进行模型复检或重新评分" : aiQa.status === "proofread" ? "校对已完成，本地规则未发现问题" : "硬规则与 AIQA 均未发现问题"}</div>`;
   const referencesHtml = references.length ? references.map((item) => {
     const type = contentTypeLabel(item.contentType || "general");
     const tags = contentTagLabels(item.contentType || "general", item.contentTags);
@@ -2284,7 +2284,7 @@ function batchSourceMetaText({ segments, characters, suffix }) {
   return `${prefix}${count} 段${batchSkipSummary(state.batchPreview?.structure)}${suffix ? ` · ${suffix}` : ""}`;
 }
 
-const BATCH_STAGE_LABELS = { translation: "翻译", aiQa: "AIQA", qualityReport: "质量报告", termSurvey: "术语普查" };
+const BATCH_STAGE_LABELS = { translation: "翻译", proofreading: "校对润色", aiQa: "本地 QA", qualityReport: "一致性校对", termSurvey: "术语普查" };
 const BATCH_STAGE_STATES = { completed: "已完成", in_progress: "进行中", waiting: "等待", needs_attention: "未完成", blocked: "暂无法执行", disabled: "自动执行已关闭", paused: "已暂停", not_started: "未开始" };
 let batchWorkflowTimer = 0;
 let batchWorkflowPolling = false;
@@ -2313,14 +2313,18 @@ function renderBatchWorkflow() {
   $("#batchWorkflowStages").innerHTML = batchWorkflowCards(workflow);
   const summary = workflow.summary;
   $("#batchWorkflowSummary").textContent = `${workflow.overall?.message || workflow.translation.message}${summary.qaIncomplete ? ` · AIQA 未完成 ${summary.qaIncomplete} 段` : ""}`;
-  $("#batchWorkflowNote").textContent = summary.failed || summary.qaIncomplete
-    ? `报告与普查继续使用已有译文，覆盖缺口会保留提示：${summary.failed ? `翻译失败 ${summary.failed} 段` : ""}${summary.failed && summary.qaIncomplete ? "；" : ""}${summary.qaIncomplete ? `AIQA 未完成 ${summary.qaIncomplete} 段` : ""}。重试翻译会刷新报告与普查；重试 QA 仅更新 QA 结果。`
-    : "质量报告与术语普查的执行状态分别显示；本轮翻译结束后，后续检查仍可能进行中。";
+  $("#batchWorkflowNote").textContent = "逐段翻译 → 校对润色 → 本地 QA；全批完成后再做一致性校对与术语普查。各阶段重试只执行该阶段，完成后即结束。";
+  const proofreadRetry = $("#batchRetryProofreading");
+  if (proofreadRetry) {
+    proofreadRetry.hidden = !summary.proofreadIncomplete;
+    proofreadRetry.disabled = state.batchRunning || workflow.qaRetryBusy;
+    proofreadRetry.textContent = `重试校对（${summary.proofreadIncomplete || 0}）`;
+  }
   const retry = $("#batchRetryQa");
   const qaRunning = ["waiting", "in_progress"].includes(workflow.aiQa.status) || workflow.qaRetryBusy;
   retry.hidden = !summary.qaIncomplete && !qaRunning;
   retry.disabled = state.batchRunning || qaRunning;
-  retry.textContent = qaRunning ? workflow.aiQa.status === "completed" || workflow.aiQa.status === "needs_attention" ? "QA 结果保存中…" : "AIQA 重试中…" : `重试未完成 AIQA（${summary.qaIncomplete}）`;
+  retry.textContent = qaRunning ? workflow.aiQa.status === "completed" || workflow.aiQa.status === "needs_attention" ? "QA 结果保存中…" : "AIQA 重试中…" : `重试本地 QA（${summary.qaIncomplete}）`;
   if (state.translationMode === "batch" && state.view === "workbench" && (workflow.qaRetryBusy || Object.keys(BATCH_STAGE_LABELS).some((key) => ["waiting", "in_progress"].includes(workflow[key]?.status))) && !batchWorkflowTimer) startBatchWorkflowWatch();
 }
 
@@ -2363,13 +2367,13 @@ function startBatchWorkflowWatch(batchId = state.batchPreview?.batchId) {
   update();
 }
 
-async function retryBatchQa(batchId = state.batchPreview?.batchId, button = $("#batchRetryQa"), segmentIds = null) {
+async function retryBatchQa(batchId = state.batchPreview?.batchId, button = $("#batchRetryQa"), segmentIds = null, stage = "qa") {
   if (!batchId) return;
   const original = button?.textContent;
   if (button) { button.disabled = true; button.textContent = "提交 QA 重试…"; }
   try {
-    const result = await api(`/api/batch/run/${encodeURIComponent(batchId)}/retry-qa`, { method: "POST", body: JSON.stringify({ ...projectPayload(), segmentIds }) });
-    toast(result.alreadyRunning ? "这条 QA 重试已在执行，进度见阶段状态" : result.total === 0 ? result.message : result.waiting ? "QA 重试已排队，等当前报告 / 普查结束后自动执行" : "已开始补查未完成的 AIQA，保存 QA 结果后结束");
+    const result = await api(`/api/batch/run/${encodeURIComponent(batchId)}/retry-${stage}`, { method: "POST", body: JSON.stringify({ ...projectPayload(), ...(segmentIds ? { segmentIds } : {}) }) });
+    toast(result.alreadyRunning ? "这条 QA 重试已在执行，进度见阶段状态" : result.total === 0 ? result.message : result.waiting ? "QA 重试已排队，等当前报告 / 普查结束后自动执行" : "已开始重试所选阶段，保存结果后结束");
     if (state.batchPreview?.batchId === batchId && result.total !== 0 && !result.alreadyRunning) {
       state.batchWorkflow = { ...currentBatchWorkflow(), aiQa: { status: "waiting", message: "QA 重试已排队" } };
       renderBatchWorkflow();
@@ -5392,6 +5396,7 @@ function compactBatchResult(result) {
   const compactText = (value, limit = 800) => String(value || "").slice(0, limit);
   return {
     translation: compactText(result.translation, 10_000),
+    ...(result.stages ? { stages: result.stages, draft: result.draft } : {}),
     qaScore: Number.isFinite(result.qaScore) ? result.qaScore : null,
     matches: (result.matches || []).slice(0, 20).map((match) => ({ mode: match.mode, matchPhrase: compactText(match.matchPhrase, 120), score: match.score, term: { source: compactText(match.term?.source, 120), target: compactText(match.term?.target, 120), enforcement: match.term?.enforcement, forbidden: match.term?.forbidden || [] } })),
     issues: (result.issues || []).slice(0, 30),
@@ -9416,6 +9421,7 @@ function bindEvents() {
   $("#batchBriefSave")?.addEventListener("click", () => saveBatchBriefEdit());
   $("#batchBriefCancel")?.addEventListener("click", () => { state.batchBriefDraft = null; renderBatchBrief(); });
   $("#batchConsistencyRun")?.addEventListener("click", () => runConsistencyCheckNow());
+  $("#batchRetryProofreading")?.addEventListener("click", () => retryBatchQa(undefined, $("#batchRetryProofreading"), null, "proofreading"));
   $("#batchRetryQa")?.addEventListener("click", () => retryBatchQa());
   $("#batchBriefPanel")?.addEventListener("click", (event) => {
     const remove = event.target.closest("[data-brief-note-remove]");

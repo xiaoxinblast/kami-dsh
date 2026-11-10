@@ -83,7 +83,7 @@
             <button class="translation-mode" data-translation-mode="batch"><span>当前文件</span><small>分句队列、语境档案与质量报告</small></button>
           </div>
           <div class="tier-row" id="tierRow">
-            <label><span>质量档</span><select id="qualityTier"><option value="auto" selected>自动（按句段风险分档）</option><option value="fast">快速 · 单次直译 + 确定性检查</option><option value="standard">标准 · 初译 + 模型质检</option><option value="strict">严苛 · 多候选 + 多轮修订</option></select></label>
+            <label><span>质量档</span><select id="qualityTier"><option value="auto" selected>自动（按句段风险分档）</option><option value="fast">快速 · 翻译 + 校对润色 + 本地 QA</option><option value="standard">标准 · 翻译 + 校对润色 + 本地 QA</option><option value="strict">严苛 · 加强事实与约束核对</option></select></label>
             <small class="tier-note">系统按每段的事实锚点、承诺措辞、长度与术语冲突自动选档，只向上升级；短标签走快速，长句与高风险走严苛。用途（语体/领域）由整份文件的语境分析标注，不再逐段手填。</small>
           </div>
           <div id="fileListWorkspace">
@@ -130,7 +130,7 @@
               <button class="batch-tab" type="button" role="tab" data-batch-tab="terms" aria-selected="false">术语普查<span class="batch-tab-badge" id="batchTabTermsBadge" hidden></span></button>
             </div>
             <div class="batch-workflow" id="batchWorkflow" hidden>
-              <div class="batch-workflow-head"><strong id="batchWorkflowSummary"></strong><button class="button secondary small" id="batchRetryQa" type="button" hidden>重试未完成 AIQA</button></div>
+              <div class="batch-workflow-head"><strong id="batchWorkflowSummary"></strong><button class="button secondary small" id="batchRetryProofreading" type="button" hidden>重试校对</button><button class="button secondary small" id="batchRetryQa" type="button" hidden>重试未完成 AIQA</button></div>
               <div class="batch-workflow-stages" id="batchWorkflowStages" aria-live="polite"></div>
               <p id="batchWorkflowNote"></p>
             </div>
@@ -146,12 +146,12 @@
               <article class="panel batch-policy-panel">
                 <span class="card-kicker">SEGMENT POLICY</span><h2>分段与翻译策略</h2>
                 <label><span>翻译单元 / 联译方式</span><select id="batchSegmentationMode"><option value="sentence" selected>逐句翻译 · 精细</option><option value="paragraph">自然段翻译 · 连贯</option><option value="unit">按文件条目翻译 · 一格 / 一个 trans-unit</option><option value="group">相邻条目联译 · 按 ID 分别写回</option></select></label>
-                <label><span>质量档</span><select id="batchQualityTier"><option value="auto" selected>自动（按句段风险分档）</option><option value="fast">快速 · 单次直译 + 确定性检查</option><option value="standard">标准 · 初译 + 模型质检</option><option value="strict">严苛 · 多候选 + 多轮修订</option></select></label>
+                <label><span>质量档</span><select id="batchQualityTier"><option value="auto" selected>自动（按句段风险分档）</option><option value="fast">快速 · 翻译 + 校对润色 + 本地 QA</option><option value="standard">标准 · 翻译 + 校对润色 + 本地 QA</option><option value="strict">严苛 · 加强事实与约束核对</option></select></label>
                 <div class="batch-policy-list">
                   <div><strong>01</strong><span>按完整句子或自然段切分，不再按固定字数机械截断。</span></div>
                   <div><strong>02</strong><span>每个单元携带明确的上文、下文和文档位置。</span></div>
                   <div><strong>03</strong><span>翻译前先通读全文做语境分析，用途与语气按区间标注，逐段继承。</span></div>
-                  <div><strong>04</strong><span>逐段按质量档执行 QA；整批完成后追加一次跨条目一致性核对。</span></div>
+                  <div><strong>04</strong><span>每段依次翻译、校对润色、本地 QA；全批完成后再做一致性校对与术语普查。</span></div>
                 </div>
                 <div class="spreadsheet-analysis" id="spreadsheetAnalysis" hidden></div>
               </article>

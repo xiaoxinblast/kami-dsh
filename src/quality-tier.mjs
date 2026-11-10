@@ -10,15 +10,15 @@ import { COMMITMENT_PATTERN, assessTranslationRisk } from "./translation-routing
 export const QUALITY_TIERS = Object.freeze({
   fast: {
     label: "快速",
-    description: "单次生成 + 确定性检查，适合低风险短标签、按钮、道具名。"
+    description: "逐段翻译、校对润色、本地规则 QA，适合低风险短标签、按钮、道具名。"
   },
   standard: {
     label: "标准",
-    description: "初译 + 模型质检，最多一轮修订。默认档。"
+    description: "逐段翻译、校对润色、本地规则 QA。默认档。"
   },
   strict: {
     label: "严苛",
-    description: "初译 + 一次加强模型质检，有问题才定向修订；修订后只做规则检查。"
+    description: "逐段翻译、校对润色、本地规则 QA，重点核对高风险事实与约束。"
   }
 });
 
@@ -142,9 +142,9 @@ export function planQualityTier({ tier = "standard", purpose = "general", provid
       model: fastModel || mainModel,
       modelFallback: !fastModel,
       reflect: false,
-      modelQa: false,
+      modelQa: true,
       maxRevisions: 0,
-      upgradeTier: "standard"
+      upgradeTier: ""
     };
   }
   if (resolved === "strict") {
@@ -161,7 +161,7 @@ export function planQualityTier({ tier = "standard", purpose = "general", provid
       modelFallback: !qualityModel,
       reflect: false,
       modelQa: true,
-      maxRevisions: 2,
+      maxRevisions: 0,
       upgradeTier: ""
     };
   }
@@ -174,8 +174,8 @@ export function planQualityTier({ tier = "standard", purpose = "general", provid
     model: mainModel,
     reflect: false,
     modelQa: true,
-    maxRevisions: 1,
-    upgradeTier: "strict"
+    maxRevisions: 0,
+    upgradeTier: ""
   };
 }
 
@@ -184,8 +184,8 @@ export function describeTierStrength({ tier, provider = {} } = {}) {
   if (tier !== "strict") return "";
   const qualityModel = String(provider.qualityModel || "").trim();
   return qualityModel
-    ? `严苛档使用高质量模型「${qualityModel}」加强质检，发现问题才修订。`
-    : "严苛档使用当前模型加强质检，发现问题才修订（未启用更强模型）。";
+    ? `严苛档使用高质量模型「${qualityModel}」翻译并执行一次校对润色。`
+    : "严苛档使用当前模型翻译并执行一次校对润色（未启用更强模型）。";
 }
 
 /**

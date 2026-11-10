@@ -16,7 +16,7 @@ function fixture() {
   };
 }
 
-test("部分翻译失败也为已有译文执行报告和术语普查；重试只补失败段", async () => {
+test("部分翻译失败不启动全批检查；重试只补翻译阶段", async () => {
   const run = fixture();
   const translated = [];
   const finalized = [];
@@ -26,15 +26,16 @@ test("部分翻译失败也为已有译文执行报告和术语普查；重试�
     translateSegment: async ({ source }) => { translated.push(source); throw new Error("invalid translation"); },
     finalize: async (value) => finalized.push(value.segments.filter((segment) => segment.status === "done" && segment.selected !== false).length)
   };
+  run.segments.find(segment => segment.id === "error").status = "pending";
   const failed = await runServerBatch(run.batchId, options);
   assert.equal(failed.runState, "needs_attention");
-  assert.deepEqual(finalized, [2], "失败段不应让已有译文的收尾被跳过");
+  assert.deepEqual(finalized, [], "全批未完成时不能启动收尾");
   const completed = await runServerBatch(run.batchId, {
-    ...options, translateSegment: async ({ source }) => { translated.push(source); return { translation: "丙", issues: [] }; }
+    ...options, segmentIds: ["error"], translateSegment: async ({ source }) => { translated.push(source); return { translation: "丙", issues: [] }; }
   });
   assert.equal(completed.runState, "completed");
   assert.deepEqual(translated, ["c", "c"], "成功段和 QA 未完成段都不能被重翻");
-  assert.deepEqual(finalized, [2, 3], "补齐失败段后要重新生成收尾结果");
+  assert.deepEqual(finalized, [], "重试完成后不启动收尾");
 });
 
 test("QA 重试只检查现有译文，保留成功段与翻译失败段", async () => {
@@ -133,8 +134,8 @@ test("未选中、规则检查与低分 QA 不计入执行失败；阶段进度�
   assert.equal(workflow.termSurvey.status, "needs_attention");
   assert.match(workflow.termSurvey.message, /terminated/u);
   const waiting = buildBatchWorkflow(run);
-  assert.equal(waiting.qualityReport.status, "waiting");
-  assert.match(waiting.qualityReport.message, /上次质量报告/u);
+  assert.equal(waiting.qualityReport.status, "blocked");
+  assert.match(waiting.qualityReport.message, /需先完成全部译段/u);
   assert.equal(buildBatchWorkflow(run, { autoConsistencyCheck: false }).qualityReport.status, "disabled");
   run.segments[2].status = "pending";
   run.runnerOptions.translationError = "Directus 503";
@@ -178,7 +179,7 @@ test("QA 重试不使已有报告和普查过期，新一轮翻译仍需收尾",
   assert.equal(failed.qualityReport.status, "needs_attention", "失败报告继续保留失败状态，不因重试 QA 重新排队");
   run.runnerOptions.translationCompletedAt = "2026-10-03T04:00:00Z";
   const translated = buildBatchWorkflow(run, { qualityTask: completed, termTask: completed });
-  assert.equal(translated.qualityReport.status, "waiting");
-  assert.equal(translated.termSurvey.status, "waiting");
-  assert.equal(batchQualityReportPending(run, translated), true);
+  assert.equal(translated.qualityReport.status, "blocked");
+  assert.equal(translated.termSurvey.status, "blocked");
+  assert.equal(batchQualityReportPending(run, translated), false);
 });

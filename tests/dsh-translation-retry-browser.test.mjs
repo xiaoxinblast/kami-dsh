@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { buildBatchWorkflow } from "../public/batch-status.js";
 
 test("DSH exposes single, cross-page and all-failed retries at wide and narrow widths", { skip: !process.env.KAMI_BROWSER_TEST_MODULE || !process.env.KAMI_REACT_DIRECTORY, timeout: 60000 }, async () => {
   const { chromium } = createRequire(import.meta.url)(process.env.KAMI_BROWSER_TEST_MODULE);
@@ -11,6 +12,10 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     status: i === 24 ? "pending" : i === 0 ? "error" : "done", error: i === 0 ? "模型输出被截断" : "", retryTranslationReason: i === 0 ? "模型输出被截断" : "",
     accepted: i === 3, result: { aiQa: i === 1 || i === 20 ? { fallbackReason: "请求中断，QA 未完成" } : { used: true, score: 95 } } }));
   const run = { batchId: "retry-batch", projectId: "p", locale: "zh-CN", filename: "重试验收.mqxliff", runState: "paused", segments, runnerOptions: {}, workflow: {} };
+  for (const [index, status] of [[4, "pending"], [5, "completed"], [6, "completed"]]) {
+    segments[index].result.stages = { translation: { status: "completed" }, proofreading: { status }, localQa: { status: index === 6 ? "completed" : "pending" } };
+  }
+  run.workflow = buildBatchWorkflow(run);
   let fail = false, held = false, release;
   const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>
     :root{--dsw-alias-label-primary:#25312b;--dsw-alias-label-secondary:#58665e;--dsw-alias-label-tertiary:#7b877f;--dsw-alias-bg-layer-1:#f6f8f5;--dsw-alias-bg-layer-2:#fff;--dsw-alias-bg-layer-3:#eaf0e9;--dsw-alias-border-l2:#d9e0d8;--dsw-alias-interactive-bg-hover:#edf2eb;--dsw-alias-brand-primary:#174d40;--dsw-alias-button-primary-fill:#174d40;--dsw-alias-label-primary-foreground:#fff;--dsw-alias-state-error-primary:#b33e38}
@@ -41,7 +46,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
       else if (operation.path === "/api/projects") value = { projects: [{ id: "p", name: "重试验收" }] };
       else if (operation.path?.startsWith("/api/batch/files")) value = { files: [run] };
       else if (operation.path?.startsWith("/api/tasks")) value = [];
-      else if (operation.method === "POST" && /\/retry-(translation|qa)$/.test(operation.path)) {
+      else if (operation.method === "POST" && /\/retry-(translation|qa|proofreading)$/.test(operation.path)) {
         operations.push(operation);
         if (held) await new Promise((resolve) => { release = resolve; });
         if (fail) throw new Error("模拟重试提交失败");
@@ -57,14 +62,33 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     page.setDefaultTimeout(6000); page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.getByRole("button", { name: "重试全部未完成 QA", exact: true }).waitFor();
+    await page.getByRole("button", { name: "查看校对润色详情", exact: true }).waitFor();
+    const analysis = page.getByRole("region", { name: "翻译流程", exact: true }).getByRole("region", { name: "语境分析", exact: true });
+    assert.equal(await analysis.getAttribute("data-status"), "not_started");
+    await analysis.getByText("可选", { exact: true }).waitFor();
+    assert.equal(await analysis.getByRole("button", { name: "开始语境分析", exact: true }).isEnabled(), true);
+    for (const width of [960, 330]) {
+      await page.setViewportSize({ width, height: 1500 });
+      assert.equal(await page.locator(".kami").evaluate(element => element.scrollWidth > element.clientWidth), false);
+      if (process.env.KAMI_UI_SCREENSHOTS) {
+        await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+        await page.locator(".workflow-graph").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `workflow-graph-${width}.png`) });
+      }
+    }
+    await page.setViewportSize({ width: 960, height: 1050 });
     await page.getByRole("button", { name: "查看翻译详情", exact: true }).click();
     const region = page.getByRole("region", { name: "句段重试", exact: true });
     assert.equal(await page.getByRole("checkbox", { name: "勾选句段 4", exact: true }).isDisabled(), true);
+    await page.getByRole("checkbox", { name: "勾选句段 5", exact: true }).check();
+    await region.getByRole("button", { name: "仅重试所选校对 (1)", exact: true }).click();
+    await region.getByRole("button", { name: "仅重试所选校对 (0)", exact: true }).waitFor();
+    assert.match(operations.at(-1).path, /retry-proofreading$/);
+    assert.deepEqual(operations.at(-1).body.segmentIds, ["s5"]);
     await page.getByRole("checkbox", { name: "勾选句段 2", exact: true }).check();
     await page.getByRole("button", { name: "下一页", exact: true }).click();
     await page.getByRole("checkbox", { name: "勾选句段 21", exact: true }).check();
     await region.getByRole("button", { name: "仅重试所选 QA (2)", exact: true }).click();
-    await region.getByText("重试已提交，可在任务概览查看进度。", { exact: true }).waitFor();
+    await region.getByText("重试已提交，可在任务概览查看进度。", { exact: true }).last().waitFor();
     assert.deepEqual(operations.at(-1).body.segmentIds, ["s2", "s21"]);
     await page.getByRole("button", { name: "上一页", exact: true }).click();
     await page.getByRole("checkbox", { name: "勾选句段 1", exact: true }).check();

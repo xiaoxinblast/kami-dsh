@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import vm from "node:vm";
 import { retryServerBatchQa } from "../src/batch-runner.mjs";
-import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows, summarizeBatchSegments } from "../public/batch-status.js";
+import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows, summarizeBatchSegments } from "../public/batch-status.js";
 import { runTaskPool } from "../src/task-pool.mjs";
 import { surveyPairs } from "../src/term-survey.mjs";
 import { markedSurveyTerms, restoreUnverifiedSurveyRepairs } from "../src/term-memory-survey.mjs";
@@ -21,7 +21,7 @@ const stageCode = block("function startConsistencyCheck(", "/**\n * 翻译期术
   + block("async function attachBatchWorkflowTask(", "function startBatchWorker(")
   + block("function startBatchWorker(", "async function apiHandler(")
   + block("async function translateBatchSegment(", "/**\n * 审校回填");
-const routeCode = block('  if (req.method === "POST" && /^\\/api\\/batch\\/run\\/[^/]+\\/retry-qa', '  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))')
+const routeCode = block('  if (req.method === "POST" && /^\\/api\\/batch\\/run\\/[^/]+\\/(?:retry-qa|retry-proofreading)', '  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))')
   + block('  if (req.method === "GET" && url.pathname === "/api/tasks")', '  if (req.method === "POST" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/export"))');
 
 test("QA 补试在任意翻译状态下都不触发一致性检查或术语普查", async () => {
@@ -204,7 +204,7 @@ test(`QA 重试沿用译文、合并重复请求并保留已有收尾结果${rev
     createBackgroundTask: async (input) => { const task = { ...input, id: `task-${tasks.size}`, status: "in_progress", createdAt: new Date().toISOString() }; tasks.set(task.id, task); return task; },
     updateBackgroundTaskProgress: async (id, update) => tasks.set(id, { ...tasks.get(id), ...update, updatedAt: new Date().toISOString() }),
     beginBackgroundRun: (id) => { const control = { cancelRequested: false }; controls.set(id, control); return control; }, endBackgroundRun: (id) => controls.delete(id),
-    retryServerBatchQa, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows,
+    retryServerBatchQa, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows,
     runServerBatch: async (_id, options) => { await options.finalize(run); await options.review(run); return run; },
     runEvolutionReview: async () => { signalReview(); await reviewGate; }, getProject: async () => ({ settings: {} }), classify: async () => ({ contentType: "general" }),
     workbenchSessionMonitor: null, setInterval: () => ({ unref: () => {} }), clearInterval: () => {},
