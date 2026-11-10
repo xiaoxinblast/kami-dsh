@@ -2157,7 +2157,7 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
       { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
       { role: "user", content: '上一个回答不是可解析的严格 JSON。请只重新输出 {"findings":[]} 这种形状的紧凑 JSON，不要 Markdown 或解释。' }
     ], configForRole("main"), {
-      temperature: 0, timeoutMs: 60_000, maxTokens: 2_000, requestLabel: "一致性检查格式重试", responseFormat: { type: "json_object" }, onUsage
+      temperature: 0, timeoutMs: requestOptions.timeoutMs, maxTokens: 2_000, requestLabel: "一致性检查格式重试", responseFormat: { type: "json_object" }, onUsage
     });
     try {
       return parseConsistencyFindings(retry, { validIds });
