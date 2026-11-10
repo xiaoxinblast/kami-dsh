@@ -893,6 +893,7 @@ export async function chatWithTools(messages, config = runtimeConfig, {
   onActivity = null,
   onToolsUnsupported = null,
   assertReady = null,
+  disposeTools = null,
   ...options
 } = {}) {
   if (typeof executeTool !== "function" || !tools.length) {
@@ -903,33 +904,35 @@ export async function chatWithTools(messages, config = runtimeConfig, {
   let content = "";
   const lastRound = Math.max(0, maxRounds);
   let exhausted = false;
-  for (let round = 0; round <= lastRound; round += 1) {
-    const message = await chat(conversation, config, { ...options, tools, tool_choice: "auto", returnMessage: true, onToolsUnsupported });
-    const calls = message.toolCalls || [];
-    if (!calls.length) {
-      try { assertReady?.(); }
-      catch (error) {
-        if (error.code !== "style_guide_unread" || round === lastRound) throw error;
-        conversation.push({ role: "user", content: `前置检查未通过：${error.message}\n请继续使用已提供的工具，成功查阅关联的人工风格指南后，再按原任务要求输出最终结果。不要把查阅说明写入结果。` });
-        continue;
+  try {
+    for (let round = 0; round <= lastRound; round += 1) {
+      const message = await chat(conversation, config, { ...options, tools, tool_choice: "auto", returnMessage: true, onToolsUnsupported });
+      const calls = message.toolCalls || [];
+      if (!calls.length) {
+        try { assertReady?.(); }
+        catch (error) {
+          if (error.code !== "style_guide_unread" || round === lastRound) throw error;
+          conversation.push({ role: "user", content: `前置检查未通过：${error.message}\n请继续使用已提供的工具，成功查阅关联的人工风格指南后，再按原任务要求输出最终结果。不要把查阅说明写入结果。` });
+          continue;
+        }
+        content = message.content || "";
+        break;
       }
-      content = message.content || "";
-      break;
+      conversation.push({ role: "assistant", content: message.content || "", tool_calls: calls });
+      for (const call of calls) {
+        const result = await measureStage("referenceTool", () => executeTool({ name: call.function.name, arguments: call.function.arguments }), { tool: call.function.name, round });
+        toolResults.push(result);
+        conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || ""), ...(result?.nativeContent ? { nativeContent: result.nativeContent } : {}), ...(result?.nativeIsError ? { nativeIsError: true } : {}) });
+        onActivity?.({ tool: call.function.name, refs: result?.refs?.length ?? 0 });
+      }
+      // 工具调用期间的文字是查阅过程，不是最终回答。
+      content = "";
+      // 轮次用尽时最后一轮仍在要工具：把这件事报给调用方。
+      // 以前这种情况只会返回空 content，调用方分不清"模型给了空译文"和"根本没答"。
+      if (round === lastRound) exhausted = true;
     }
-    conversation.push({ role: "assistant", content: message.content || "", tool_calls: calls });
-    for (const call of calls) {
-      const result = await measureStage("referenceTool", () => executeTool({ name: call.function.name, arguments: call.function.arguments }), { tool: call.function.name, round });
-      toolResults.push(result);
-      conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || ""), ...(result?.nativeContent ? { nativeContent: result.nativeContent } : {}), ...(result?.nativeIsError ? { nativeIsError: true } : {}) });
-      onActivity?.({ tool: call.function.name, refs: result?.refs?.length ?? 0 });
-    }
-    // 工具调用期间的文字是查阅过程，不是最终回答。
-    content = "";
-    // 轮次用尽时最后一轮仍在要工具：把这件事报给调用方。
-    // 以前这种情况只会返回空 content，调用方分不清"模型给了空译文"和"根本没答"。
-    if (round === lastRound) exhausted = true;
-  }
-  return { content, toolResults, exhausted, messages: conversation, ...(conversation.some((message) => message.nativeContent) ? { nativeMessages: conversation } : {}) };
+    return { content, toolResults, exhausted, messages: conversation, ...(conversation.some((message) => message.nativeContent) ? { nativeMessages: conversation } : {}) };
+  } finally { await disposeTools?.(); }
 }
 
 export function isEmbeddingConfigured() {
@@ -1467,6 +1470,7 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
       maxRounds: toolRunner.maxRounds ?? 4,
       executeTool: toolRunner.execute,
       assertReady: toolRunner.assertReady,
+      disposeTools: toolRunner.dispose,
       onActivity: toolRunner.onActivity
     });
     toolRunner.assertReady?.();
@@ -2144,6 +2148,7 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
       maxRounds: toolRunner.maxRounds ?? 2,
       executeTool: toolRunner.execute,
       assertReady: toolRunner.assertReady,
+      disposeTools: toolRunner.dispose,
       onActivity: toolRunner.onActivity
     })).content
     : await chat(messages, configForRole("main"), requestOptions);
@@ -2346,6 +2351,7 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
       maxRounds: toolRunner.maxRounds ?? 2,
       executeTool: toolRunner.execute,
       assertReady: toolRunner.assertReady,
+      disposeTools: toolRunner.dispose,
       onActivity: toolRunner.onActivity
     })
     : { content: await chat(initialMessages, callConfig, initialOptions), exhausted: false };
@@ -2441,7 +2447,7 @@ export async function translateMicroBatchWithModel(entries, { routePlan, toolRun
   const config = configForRole(routePlan?.modelRole, routePlan?.model);
   const options = { temperature: 0.6, timeoutMs: 75_000, requestLabel: "小批翻译" };
   const response = toolRunner?.tools?.length
-    ? await chatWithTools(messages, config, { ...options, tools: toolRunner.tools, maxRounds: toolRunner.maxRounds, executeTool: toolRunner.execute, assertReady: toolRunner.assertReady, onActivity: toolRunner.onActivity })
+    ? await chatWithTools(messages, config, { ...options, tools: toolRunner.tools, maxRounds: toolRunner.maxRounds, executeTool: toolRunner.execute, assertReady: toolRunner.assertReady, disposeTools: toolRunner.dispose, onActivity: toolRunner.onActivity })
     : { content: await chat(messages, config, options) };
   toolRunner?.assertReady?.();
   return parseMicroBatchTranslations(response.content, entries.map(entry => ({ id: entry.id, source: entry.contextPack.source })));

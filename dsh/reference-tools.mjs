@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { workspaceRoot } from "./workspace-files.mjs";
 import { runtimeOptions } from "../src/runtime-context.mjs";
 import { sessionModelRoute } from "./model-adapter.mjs";
@@ -13,9 +13,21 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
   const names = new Set(schemas.map((tool) => tool.name)), used = [];
   const originals = [...styleGuides, ...references];
   let lastError = "";
+  let temporary;
+  const temporaryDirectory = () => temporary ||= (async () => {
+    let parent = workspace;
+    for (const part of [".kami", "tmp"]) {
+      const path = join(parent, part);
+      await mkdir(path).catch((error) => { if (error.code !== "EEXIST") throw error; });
+      parent = await realpath(path);
+      if (!inside(parent)) throw new Error(`临时目录必须位于当前工作区内：${path}`);
+    }
+    return { parent, path: await mkdtemp(join(parent, "kami-reference-")) };
+  })();
   const workspaceHint = `当前工作区：${workspace}。相对路径以此为基准，禁止推测用户目录；查阅原件使用关联文件的 absolutePath。`;
+  const shellHint = `当前资料工作区：${workspace}。Shell 会强制在工作区 .kami/tmp/ 下本次查阅独占的临时目录中执行，不在工作区根目录执行。原件必须使用关联的 absolutePath；不要 cd / Set-Location 回工作区根目录，不要用绝对路径把脚本、转储或调试文件写到临时目录以外。优先直接打印读取结果；确需临时文件时使用相对路径，并在同一次查阅中使用，结束、失败或取消后工具会清理该临时目录。不要后台运行。`;
   const nativePath = (value) => process.platform === "win32" ? value.replace(/^\/(?:mnt\/)?([a-z])(?:\/|$)/i, "$1:/") : value;
-  const inside = (path) => { const part = relative(workspace, path); return part !== ".." && !part.startsWith(`..${sep}`) && !isAbsolute(part); };
+  const inside = (path, root = workspace) => { const part = relative(root, path); return part !== ".." && !part.startsWith(`..${sep}`) && !isAbsolute(part); };
   async function workspaceTarget(value) {
     const path = resolve(workspace, nativePath(value || "."));
     const error = () => new Error(`查阅目录必须位于当前工作区：${workspace}；请求路径：${value || "."}。请使用该工作区或其子目录，不要搜索用户目录`);
@@ -33,12 +45,20 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
   return {
     tools: [...(styleGuides.length ? [guidesList] : []), ...(references.length ? [list] : []), ...schemas].map((tool) => ({ type: "function", function: {
       name: tool.name,
-      description: `${tool.description || ""}${["glob", "grep", "bash", "pwsh"].includes(tool.name) ? `\n${workspaceHint} 搜索目录和命令工作目录必须位于此工作区内；省略时自动使用工作区。` : ""}${tool.name === "bash" ? " 此工具执行 Bash 语法，不接受 PowerShell 的 Get-ChildItem、Select-Object 等命令；PowerShell 命令请调用 pwsh。" : ""}`,
+      description: `${tool.description || ""}${["glob", "grep"].includes(tool.name) ? `\n${workspaceHint} 搜索目录必须位于此工作区内；省略时自动使用工作区。` : ""}${["bash", "pwsh"].includes(tool.name) ? `\n${shellHint}` : ""}${tool.name === "bash" ? " 此工具执行 Bash 语法，不接受 PowerShell 的 Get-ChildItem、Select-Object 等命令；PowerShell 命令请调用 pwsh。" : ""}`,
       parameters: tool.parameters
     } })),
     // chatWithTools uses an inclusive last-round index; the setting counts actual rounds.
     maxRounds: Math.max(0, maxRounds - 1),
     refs: () => used,
+    async dispose() {
+      if (!temporary) return;
+      const { parent, path } = await temporary;
+      const actual = await realpath(path).catch((error) => { if (error.code === "ENOENT") return path; throw error; });
+      if (actual !== path || dirname(actual) !== parent || !basename(actual).startsWith("kami-reference-")) throw new Error(`拒绝清理不属于本次查阅的临时目录：${path}`);
+      await rm(actual, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      temporary = undefined;
+    },
     assertReady() {
       const missing = styleGuides.filter((item) => !used.some((ref) => ref.path === item.path));
       if (!missing.length) return;
@@ -60,7 +80,12 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
         }
         if (!names.has(name)) throw new Error("此工具不属于当前会话的参考查阅能力");
         const args = { ...(typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {}) };
-        if (["bash", "pwsh"].includes(name)) args.workdir = await workspaceTarget(args.workdir);
+        if (["bash", "pwsh"].includes(name)) {
+          if (args.run_in_background === true) throw new Error("资料查阅不允许后台命令；临时目录会在本次查阅结束时清理");
+          const existing = temporary && await temporary;
+          if (args.workdir && !(existing && inside(resolve(workspace, nativePath(args.workdir)), existing.path))) await workspaceTarget(args.workdir);
+          args.workdir = (await temporaryDirectory()).path;
+        }
         if (["glob", "grep"].includes(name)) args.path = await workspaceTarget(args.path);
         if (["read", "read_image"].includes(name)) for (const key of ["file_path", "path"]) {
           if (typeof args[key] === "string") args[key] = resolve(workspace, nativePath(args[key]));
@@ -88,7 +113,7 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
         if (!isError && result.content?.length) for (const item of readSources) {
           if (!used.some((ref) => ref.path === item.path)) used.push({ path: item.path, tool: name });
         }
-        const workdirHint = isError && shellRead ? `\n命令工作目录：${args.workdir || current}。请确认目录存在${process.platform === "win32" ? "；Windows 进程的工作目录使用盘符路径" : ""}。` : "";
+        const workdirHint = shellRead ? `\n本次查阅临时目录：${args.workdir}。临时文件可用此目录下的绝对路径读取；原件仍使用关联的 absolutePath。本次查阅结束后此目录自动清理，不要把文件另存到工作区。` : "";
         if (isError) lastError = `${text || result.error?.message || "原文件读取失败或不完整"}${workdirHint}`;
         const readHint = isError && /binary file/i.test(text) && /\.(?:docx|xlsx|pptx|pdf)$/i.test(path || "")
           ? "\n该原件是文档格式，普通 read 不能读取。请用 skill 加载对应文档技能，再用当前会话的 bash/pwsh 只读查阅原件（Python 标准库 zipfile 可直接读取 Office XML），保留段落、表格、颜色、修订和图片等规则证据；不要生成正文副本，不要重复用 read 读取同一二进制文件。" : workdirHint;

@@ -30,11 +30,12 @@ async function fixture(run) {
   finally { await close(); assert.ok(directory.startsWith(join(tmpdir(), "kami-native-reference-"))); await rm(directory, { recursive: true, force: true }); }
 }
 
-test("Office guide read failures suggest native document tools and failed shell reads cannot satisfy the guide", async () => fixture(async ({ cwd, ctx, agent }) => {
+test("Office guide read failures suggest native document tools and failed shell reads cannot satisfy the guide", async (t) => fixture(async ({ cwd, ctx, agent }) => {
   let result = { isError: true, content: [{ type: "text", text: "cannot read: binary file" }] };
   ctx.tools.schemas = () => ["read", "bash", "pwsh"].map((name) => ({ name, parameters: {} }));
   ctx.tools.execute = async () => result;
   const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.docx" }] });
+  t.after(() => tools.dispose());
   assert.match((await tools.execute({ name: "read", arguments: { file_path: "guide.docx" } })).text, /bash\/pwsh/);
   for (const value of [{ exitCode: 1 }, { exitCode: 0, timedOut: true }, { exitCode: 0, stdout: { text: "partial", truncated: true } }]) {
     result = { value, content: [{ type: "text", text: "partial or failed read" }] };
@@ -46,7 +47,7 @@ test("Office guide read failures suggest native document tools and failed shell 
   assert.doesNotThrow(() => tools.assertReady());
 }));
 
-test("Windows Bash reference reads translate shell drive paths before native process startup", { skip: process.platform !== "win32" }, async () => fixture(async ({ cwd, ctx, agent }) => {
+test("Windows Bash reference reads accept shell drive paths and dispatch a native temporary workdir", { skip: process.platform !== "win32" }, async (t) => fixture(async ({ cwd, ctx, agent }) => {
   const calls = [];
   ctx.tools.schemas = () => [{ name: "bash", parameters: {} }];
   ctx.tools.execute = async ({ arguments: args }) => {
@@ -54,14 +55,18 @@ test("Windows Bash reference reads translate shell drive paths before native pro
     return { value: { exitCode: 0, stdout: { text: "完整规则" } }, content: [{ type: "text", text: "完整规则" }] };
   };
   const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd });
+  t.after(() => tools.dispose());
   const shellPath = cwd.replace(/\\/g, "/").replace(/^([a-z]):/i, "/$1");
   for (const workdir of [shellPath, `/mnt${shellPath}`, cwd, undefined]) await tools.execute({ name: "bash", arguments: { command: "pwd", ...(workdir ? { workdir } : {}) } });
-  assert.deepEqual(calls.map((args) => args.workdir), [cwd, cwd, cwd, cwd]);
+  const scratch = calls[0].workdir;
+  assert.notEqual(scratch, cwd);
+  assert.match(scratch, /kami-reference-/);
+  assert.deepEqual(calls.map((args) => args.workdir), [scratch, scratch, scratch, scratch]);
   ctx.tools.execute = async () => ({ isError: true, content: [{ type: "text", text: "spawn bash ENOENT" }] });
-  assert.ok((await tools.execute({ name: "bash", arguments: { command: "pwd", workdir: shellPath } })).text.includes(cwd));
+  assert.ok((await tools.execute({ name: "bash", arguments: { command: "pwd", workdir: shellPath } })).text.includes(scratch));
 }));
 
-test("native searches and shell calls bind omitted and relative directories to the task workspace", async () => fixture(async ({ cwd, directory, ctx, agent }) => {
+test("native searches stay in the workspace while shell calls use a separate temporary directory", async (t) => fixture(async ({ cwd, directory, ctx, agent }) => {
   const calls = [], child = join(cwd, "资料");
   await mkdir(child);
   ctx.tools.schemas = () => ["glob", "grep", "bash", "pwsh"].map((name) => ({ name, description: name, parameters: {} }));
@@ -70,15 +75,22 @@ test("native searches and shell calls bind omitted and relative directories to t
     return { value: { exitCode: 0, stdout: { text: "查阅结果" } }, content: [{ type: "text", text: "查阅结果" }] };
   };
   const tools = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd });
+  t.after(() => tools.dispose());
+  let scratch;
   for (const name of ["glob", "grep", "bash", "pwsh"]) {
     const key = ["glob", "grep"].includes(name) ? "path" : "workdir";
     const args = { command: `"${join(directory, "runtime", "python.exe")}" -c "print(1)"`, pattern: "*.docx" };
     await tools.execute({ name, arguments: args });
-    assert.equal(calls.at(-1).arguments[key], cwd, `${name} must pass an explicit workspace directory`);
+    if (key === "workdir") {
+      scratch ||= calls.at(-1).arguments[key];
+      assert.notEqual(scratch, cwd);
+      assert.match(scratch, /kami-reference-/);
+    }
+    assert.equal(calls.at(-1).arguments[key], key === "path" ? cwd : scratch);
     assert.equal(Object.hasOwn(args, key), false, "normalization must not mutate the model call");
     await tools.execute({ name, arguments: { ...args, [key]: "资料" } });
-    assert.equal(calls.at(-1).arguments[key], child);
-    assert.equal(calls.at(-1).arguments.command, args.command, "external runtime executables remain usable from the workspace");
+    assert.equal(calls.at(-1).arguments[key], key === "path" ? child : scratch);
+    assert.equal(calls.at(-1).arguments.command, args.command, "external runtime executables remain usable from the temporary directory");
   }
 }));
 
