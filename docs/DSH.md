@@ -4,7 +4,7 @@
 
 ## 安装
 
-当前兼容目标为 DSH `0.2.2-rc.1`，同时支持 `0.2.1-rc.2` 至 `0.2.1-rc.5`；运行环境使用 DSH 安装包自带的 Electron / Node.js。DSH `0.2.2-rc.1` 要求 Node.js `24.9` 或更高版本。
+当前兼容目标为 DSH `0.2.2-rc.2`，同时支持 `0.2.2-rc.1` 与 `0.2.1-rc.2` 至 `0.2.1-rc.5`；运行环境使用 DSH 安装包自带的 Electron / Node.js。本次兼容验收使用该桌面安装包附带的 Node.js `24.21.0`。
 
 1. 在 DSH 的“插件”→“添加插件”中填写 `https://github.com/xiaoxinblast/kami-dsh#main`，安装仓库中的当前版本。依赖由插件管理器安装。
 2. 开发时也可在仓库运行 `npm ci`、`npm run dsh:check` 后安装绝对目录；Creator 模式的 `plugin_manager` 使用 `action: install_bundle` 与同一安装地址。
@@ -188,6 +188,14 @@ npm pack --dry-run
 `tests/dsh-workspace.test.mjs` 验证路径与链接隔离、任务快照、新文件版本、重启续跑、参考索引与防覆盖导出；SDK 启用时使用真实 DSH LocalFileSystem。`tests/dsh-ui-bridge.test.mjs` 使用真实 Client/Host SDK 检查严格 Remote 编解码、服务注入和页面不追加聊天 JSON。`tests/dsh-workbench.test.mjs` 在禁止 HTTP 的条件下用隔离数据库验证项目创建、批次翻译、原格式导出和数据库重开；`tests/migrate-local.test.mjs` 验证迁移一致性、防覆盖与源变化检测。DSH SDK 可用时，`tests/dsh-model-adapter.test.mjs` 验证消息协议，`tests/dsh-agent.test.mjs` 验证预设工具范围。原上游的浏览器／Directus 集成测试仍有相应环境条件，跳过项不计作验证通过。
 
 UI 必须在真实 DSH 中截图验收；独立 HTML 预览不作为运行成功的证据。
+
+### 0.9.35 DSH 0.2.2-rc.2 兼容
+
+Kami `0.9.34` 的 `engines.dsh` 未声明支持 `0.2.2-rc.2`，因此升级 DSH 后会被启动门禁拒绝。`0.9.35` 将运行版本及全部十项可选 SDK peer 同步扩展到 `0.2.2-rc.2`，并保持已支持版本的范围。真实启动检查器验证默认 SDK 运行版本、显式运行版本和无 `engines.dsh` 时的 peer 回退均可准入，无需版本豁免；未验证的后续版本仍被拒绝。回归同时核对 manifest、lockfile 版本、引擎、peer 及其可选声明一致。
+
+已逐字节核对本机 `0.2.2-rc.2` 安装包中的 20 项相关 SDK 模块与测试提取件。使用配套 Node.js `24.21.0` 及真实 Host/Client SDK 串行运行完整回归：1,228 项，1,159 项通过、0 项失败、69 项因环境条件跳过；其中预设、工具继承、模型路由与 HTTP 协议、Remote、会话文件权限、工作区导出与人工终稿等 35 项关键兼容测试全部通过。三个 DSH 浏览器用例另行启用并通过，覆盖设置保存回读、资源编译及宽窄布局下的翻译重试。`npm run dsh:check` 和打包检查通过，发布包 118 个文件，不含本地数据、缓存或输出目录。
+
+真实隔离 `0.2.2-rc.2` Web Host/Client 已截图验收：Kami 预设可选择，右侧工作台正常连接，可新建并绑定项目，通过 DSH 文件服务解析工作区样例并创建批次。未调用线上模型，也未执行桌面 Electron 窗口操作；线上翻译质量与耗时不在本次兼容验收范围。
 
 ### 0.9.14 修复 DSH 0.2.2-rc.1 预设加载失败
 
