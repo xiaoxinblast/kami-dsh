@@ -3397,13 +3397,13 @@ async function runBatchInBrowserLegacy() {
       segmentCount: segments.length
     };
     try {
-      // 本批已定稿译文作为风格锚点：后续各行严格仿照同一句式与用词。
+      // 保留参考译文的人工采纳状态；机器完成稿不能作为定稿依据。
       const anchorCount = Math.max(0, Number(state.projectSettings?.tm?.contextAnchorCount ?? 5));
       const contextKey = `${segment.locator?.type || ""}\u0000${segment.locator?.sheet || segment.context?.sheet || ""}`;
       const batchReferences = segments.slice(0, position)
         .filter((item) => item.translation && `${item.locator?.type || ""}\u0000${item.locator?.sheet || item.context?.sheet || ""}` === contextKey)
         .slice(-anchorCount)
-        .map((item) => ({ source: item.source, target: item.translation }));
+        .map((item) => ({ segmentId: item.id, source: item.source, target: item.translation, accepted: item.accepted === true }));
       const result = await api("/api/translate", { method: "POST", body: JSON.stringify({
         ...projectPayload(),
         source: segment.source,

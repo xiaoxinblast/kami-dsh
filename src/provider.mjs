@@ -377,6 +377,16 @@ export function projectContextPack(contextPack = {}, purpose = "translate") {
   return { ...core, translationSkill: null };
 }
 
+function formatSegmentReferences(references, label) {
+  const list = Array.isArray(references) ? references : [];
+  const approved = list.filter((item) => item?.accepted === true);
+  const drafts = list.filter((item) => item?.accepted !== true);
+  return [
+    approved.length ? `${label}·人工确认稿（仅在原文、语境和项目规范适用时参考其用词与风格；不得覆盖当前原意，变量按当前原文翻译）：${JSON.stringify(approved)}` : "",
+    drafts.length ? `${label}·机器草稿或未确认译文（未经人工确认，不是定稿或规范；仅供上下文和一致性线索。须独立核对原文、注释、指南与正式术语；误译或生硬表达应纠正，不得为保持一致沿用错误，也不得仅因与草稿不同而判错）：${JSON.stringify(drafts)}` : ""
+  ].filter(Boolean).join("\n");
+}
+
 /** 把投影后的 pack 渲染成结构化文本：稳定信息在前，逐段变量在后。 */
 export function contextPackText(contextPack = {}, purpose = "review") {
   const pack = projectContextPack(contextPack, purpose);
@@ -395,12 +405,12 @@ export function contextPackText(contextPack = {}, purpose = "review") {
   if (pack.requiredTerms?.length) lines.push(`强制术语（必须逐字采用）：${JSON.stringify(pack.requiredTerms)}`);
   if (pack.preferredTerms?.length) lines.push(`参考术语（结合句义判断，不得仅凭字面强制替换）：${JSON.stringify(pack.preferredTerms)}`);
   if (pack.workingTerms?.length) lines.push(`本文件工作术语（优先级低于主术语库；未经人工或主 / 参考 TM 核实，仅供语境参考；不得强制套用，也不得用短词覆盖长词、改变词义或遗漏信息）：${JSON.stringify(pack.workingTerms)}`);
-  if (pack.patternReferences?.length) lines.push(`同句式参考（固定部分沿用参考译法，只替换当前原文的变量部分）：${JSON.stringify(pack.patternReferences)}`);
+  if (pack.patternReferences?.length) lines.push(formatSegmentReferences(pack.patternReferences, "同句式参考"));
   if (pack.protectedTokens?.length) lines.push(`必须原样保留：${JSON.stringify(pack.protectedTokens)}`);
   if (pack.factSchema?.facts?.length || pack.factSchema?.limits?.length) lines.push(`事实锚点：${JSON.stringify(pack.factSchema)}`);
   if (pack.translationReferences?.length) lines.push(`历史译例：${JSON.stringify(pack.translationReferences)}`);
   if (pack.qaGuidance?.length) lines.push(`历史 AIQA 反例：${JSON.stringify(pack.qaGuidance)}`);
-  if (pack.batchReferences?.length) lines.push(`本批已定稿译文（保持一致）：${JSON.stringify(pack.batchReferences)}`);
+  if (pack.batchReferences?.length) lines.push(formatSegmentReferences(pack.batchReferences, "本批参考译文"));
   const neighbor = formatNeighborContext(pack.neighborContext || {});
   if (neighbor && neighbor !== "无") lines.push(`文档上下文（仅用于理解，不得翻译进结果）：\n${neighbor}`);
   lines.push(`当前原文：\n${pack.source}`);
@@ -414,11 +424,9 @@ export function packPrompt(contextPack, { includeStable = true, batch = false } 
     ? "⚠️ 本条原文带有顺口溜/韵文结构（短句对仗 + 长句收尾，可能押韵）：必须用目标语言自然重现节奏与押韵，可以调整语序、换用拟态词、谚语与地道说法，严禁机械逐字重复原文的字数结构。\n"
     : "";
   const batchVerseHint = contextPack.batchVerse?.active
-    ? `⚠️ 本批为排比韵文：所有行共用「${contextPack.batchVerse.shape}」句式（短句 + 长句）。每一行都必须使用同一句式、节奏、语体与韵脚风格；如果本批已有定稿译文，后续各行必须严格仿照其句式与用词。\n`
+    ? `⚠️ 本批为排比韵文：原文共用「${contextPack.batchVerse.shape}」句式（短句 + 长句）。按原文与人工规范重现协调的句式、节奏、语体与韵律；人工确认稿可作适用的风格参考，机器草稿不能作为必须仿照的模板。\n`
     : "";
-  const batchReferenceHint = contextPack.batchReferences?.length
-    ? `本批已定稿译文（必须保持句式与风格完全一致，可参考其用词与语气）：${JSON.stringify(contextPack.batchReferences)}\n`
-    : "";
+  const batchReferenceHint = formatSegmentReferences(pack.batchReferences, "本批参考译文");
   const batchGroupHint = !batch && contextPack.batchGroupEntries?.length
     ? `当前文件条目联译组（仅用于理解同组上下文；输出仍然只能是当前原文对应的译文）：${JSON.stringify(contextPack.batchGroupEntries)}\n`
     : "";
@@ -465,7 +473,7 @@ export function packPrompt(contextPack, { includeStable = true, batch = false } 
     variable.push(`本文件工作术语（优先级低于主术语库；未经人工或主 / 参考 TM 核实，仅供语境参考；不得强制套用，也不得用短词覆盖长词、改变词义或遗漏信息）：\n${termsSummary(pack.workingTerms)}`);
   }
   if (pack.patternReferences?.length) {
-    variable.push(`同句式参考（这些句子共用同一固定框架；固定部分必须沿用参考译法，只替换当前原文的变量内容，变量不得照抄）：\n${pack.patternReferences.map((item) => `· ${item.source} → ${item.target}`).join("\n")}`);
+    variable.push(formatSegmentReferences(pack.patternReferences, "同句式参考"));
   }
   if (pack.protectedTokens?.length) variable.push(`必须原样保留（URL、占位符、标签、带单位的数值）：${JSON.stringify(pack.protectedTokens)}`);
   if (pack.factSchema) variable.push(`结构化事实锚点（translation 范围必须在译文中保持等价；task 范围只作为交付约束，不得翻译进正文）：${JSON.stringify(pack.factSchema)}`);
@@ -1376,7 +1384,7 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
   const messages = [
     {
       role: "system",
-      content: `你是独立于翻译器的亚洲语言本地化 QA 审校员。按照 MQM 思路逐项检查六个一级维度：Accuracy、Fluency、Terminology、Style、Locale、Platform。category 必须以小写一级维度开头，可细分为 accuracy_omission、accuracy_addition、accuracy_mistranslation、fluency_grammar、fluency_naturalness、terminology_required、terminology_forbidden、style_register、style_brand、locale_convention、platform_constraint、platform_placeholder。contextPack.styleProfile.reviewRubric 是评审标准，不是生成提示。contextPack.preferredTerms 中 matchMode 为 exact 只代表字面精确命中；你必须根据原文句义和上下文判断该条正式术语在此处是否适用，不能仅因译文未采用登记译法就报错。approvedReferences 是人工批准的译例，只有同语种、同语体且语义相关时才引用，且仍不能盲从。machineDrafts 是本系统自己此前产出的机器译文，只能用于发现同一文档内自相矛盾，绝不能当作正确与否的依据，也不得以"与 machineDrafts 不一致"为由报告问题。不要直接给总分，只报告可定位的问题。严重度只能是 critical、major、minor。message、suggestion 和其他解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 必须逐字保留原文或译文中的证据片段。特别注意：只有语义确实丢失或凭空添加事实才算漏译/增译；调整语序、换用同义地道表达、重写修辞都不是问题。发现译文逐字直译、翻译腔、不像目标语言原生文案时，记 major（category 用 fluency_naturalness）。原文含押韵、对仗、重复或口号结构时，译文必须用目标语言自然重现节奏与韵律；机械逐字重复、把闲散语气译成命令口吻、韵律完全丢失都应记 major。若输入里的 contextPack 携带 batchVerse 或 batchReferences（同批排比韵文），必须检查当前译文与本批已定稿译文的句式、节奏与用词风格是否一致，明显不一致记 major。没有问题返回空数组。输出严格 JSON：{"issues":[{"severity":"major","category":"accuracy_omission","sourceSpan":"原文片段","targetSpan":"译文片段","message":"简体中文问题原因","suggestion":"简体中文可执行修订意见","evidenceMemoryId":"可选ID","confidence":0.9}]}`
+      content: `你是独立于翻译器的亚洲语言本地化 QA 审校员。按照 MQM 思路逐项检查六个一级维度：Accuracy、Fluency、Terminology、Style、Locale、Platform。category 必须以小写一级维度开头，可细分为 accuracy_omission、accuracy_addition、accuracy_mistranslation、fluency_grammar、fluency_naturalness、terminology_required、terminology_forbidden、style_register、style_brand、locale_convention、platform_constraint、platform_placeholder。contextPack.styleProfile.reviewRubric 是评审标准，不是生成提示。contextPack.preferredTerms 中 matchMode 为 exact 只代表字面精确命中；你必须根据原文句义和上下文判断该条正式术语在此处是否适用，不能仅因译文未采用登记译法就报错。approvedReferences 是人工批准的译例，只有同语种、同语体且语义相关时才引用，且仍不能盲从。machineDrafts 是本系统自己此前产出的机器译文，只能用于发现同一文档内自相矛盾，绝不能当作正确与否的依据，也不得以"与 machineDrafts 不一致"为由报告问题。不要直接给总分，只报告可定位的问题。严重度只能是 critical、major、minor。message、suggestion 和其他解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 必须逐字保留原文或译文中的证据片段。特别注意：只有语义确实丢失或凭空添加事实才算漏译/增译；调整语序、换用同义地道表达、重写修辞都不是问题。发现译文逐字直译、翻译腔、不像目标语言原生文案时，记 major（category 用 fluency_naturalness）。原文含押韵、对仗、重复或口号结构时，译文必须用目标语言自然重现节奏与韵律；机械逐字重复、把闲散语气译成命令口吻、韵律完全丢失都应记 major。仅在原文或 batchVerse 明确包含排比韵文时，按原文结构与人工规范检查节奏。batchReferences 和 patternReferences 只有 accepted=true 的条目是人工确认稿；其余为机器草稿或来源未确认稿，仅供上下文与一致性线索，不得当作正确答案或风格规范。与机器草稿措辞不同本身不是错误，不能为保持一致要求沿用其中的误译、生硬表达或不适用词义。没有问题返回空数组。输出严格 JSON：{"issues":[{"severity":"major","category":"accuracy_omission","sourceSpan":"原文片段","targetSpan":"译文片段","message":"简体中文问题原因","suggestion":"简体中文可执行修订意见","evidenceMemoryId":"可选ID","confidence":0.9}]}`
     },
     {
       role: "user",
@@ -2417,7 +2425,7 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
     return { initial, translation: requireNonEmptyTranslation(localized, initial, "韵文本地化"), reflection: "rhyme-localized" };
   }
   const reflection = await chat([
-    { role: "system", content: "你是严格的双语本地化审校。只指出漏译、误译、术语、事实、语体、翻译腔和韵律/重复结构丢失问题（原文押韵、对仗或口号式重复时，译文须自然重现节奏与语气）；若上下文带有同批已定稿译文，还要检查句式与风格是否保持一致；没有问题则回答 PASS。" },
+    { role: "system", content: "你是严格的双语本地化审校。只指出漏译、误译、术语、事实、语体、翻译腔和韵律/重复结构丢失问题（原文押韵、对仗或口号式重复时，译文须自然重现节奏与语气）；同批与同句式参考只有 accepted=true 的条目是人工确认稿，且仍须结合当前原意与规范判断；机器草稿仅供上下文线索，与它不同不构成错误，不得为保持一致沿用错误或生硬表达；没有问题则回答 PASS。" },
     ...nativeMessages,
     { role: "user", content: `${contextPackText(contextPack, "reflect")}\n\n初译：\n${initial}` }
   ], callConfig, { temperature: 0.35, timeoutMs: 60_000, requestLabel: "翻译自检", onUsage });

@@ -77,7 +77,7 @@ test("Context Pack 携带批次排比模板与锚点译文", () => {
     batchReferences: [{ source: POEM[0], target: "殺さず、恨みは永遠に止まぬ。" }]
   });
   assert.equal(anchored.batchVerse, null);
-  assert.deepEqual(anchored.batchReferences, [{ source: POEM[0], target: "殺さず、恨みは永遠に止まぬ。" }]);
+  assert.deepEqual(anchored.batchReferences, [{ source: POEM[0], target: "殺さず、恨みは永遠に止まぬ。", accepted: false }]);
 });
 
 test("术语注释随 Context Pack 发给模型，空注释不占位", () => {

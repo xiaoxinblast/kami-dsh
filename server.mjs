@@ -51,7 +51,7 @@ import { DEFAULT_TRANSLATION_STRATEGY, createDefaultTranslationSkill, effectiveS
 import { benchmarkTranslationSkill, createBenchmarkSnapshot } from "./src/skill-benchmark.mjs";
 import { createEvaluationJobRunner } from "./src/evaluation-jobs.mjs";
 import { createLearningJobTaskBridge } from "./src/learning-task-bridge.mjs";
-import { detectBatchVerse } from "./src/batch-verse.mjs";
+import { detectBatchVerse, verifyBatchReferenceAcceptance } from "./src/batch-verse.mjs";
 import { createAutoProposer } from "./src/auto-proposal.mjs";
 import { createLearningAutomation } from "./src/learning-automation.mjs";
 import { createConflictScanner } from "./src/conflict-scan.mjs";
@@ -8607,12 +8607,14 @@ async function evaluateQaBatch(batchId, projectId = "") {
       }, { exact: 0, partial: 0, general: 0 })
     };
     // 批次排比/韵文检测：同一批次的多行共用一种句式时，注入模板约束；
-    // 客户端顺序翻译时还会带上本批已定稿译文作为风格锚点。
+    // 参考稿的人工采纳身份只认已保存且原文、译文均匹配的批次记录。
     let batchVerse = null;
+    let referenceSegments = [];
     if (body.batchId) {
       try {
         const batchRun = await getBatchRun(String(body.batchId));
         batchVerse = detectBatchVerse(batchRun?.segments || []);
+        if (batchRun?.projectId === projectId) referenceSegments = batchRun.segments || [];
       } catch { /* 批次记录不可用不影响翻译 */ }
     }
     const neighborMetadata = Array.isArray(body.neighborContext?.metadata) ? body.neighborContext.metadata : [];
@@ -8635,8 +8637,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
       userProfile,
       translationReferences,
       batchVerse,
-      batchReferences: body.batchReferences || [],
-      patternReferences: body.patternReferences || [],
+      batchReferences: verifyBatchReferenceAcceptance(body.batchReferences, referenceSegments),
+      patternReferences: verifyBatchReferenceAcceptance(body.patternReferences, referenceSegments),
       batchGroupEntries: body.batchGroupEntries || [],
       documentBrief: body.documentBrief || null,
       factSchema,

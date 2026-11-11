@@ -111,7 +111,7 @@ test("初译提示词分层下发工作术语与同句式参考", () => {
     patternReferences: [{ segmentId: "seg-1", source: "プレミアムパスを買うと3個の宝箱", target: "购买高级通行证可获得 3 个宝箱", similarity: 1 }]
   }));
   assert.match(prompt, /本文件工作术语（优先级低于主术语库/u);
-  assert.match(prompt, /同句式参考（这些句子共用同一固定框架/u);
+  assert.match(prompt, /同句式参考·机器草稿或未确认译文（/u);
   assert.match(prompt, /购买高级通行证可获得 3 个宝箱/u);
 });
 

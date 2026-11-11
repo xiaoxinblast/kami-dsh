@@ -40,11 +40,23 @@ export function detectBatchVerse(segments = []) {
   return best ? { active: true, shape: best.shape, matchingCount: best.matchingCount, total: list.length } : null;
 }
 
-/** Cap and clean anchor pairs (source → finished translation) from earlier segments. */
+/** Cap and clean earlier translations; only explicit human acceptance grants authority. */
 export function normalizeBatchReferences(references = [], limit = 5) {
   if (!Array.isArray(references)) return [];
   return references.map((item) => ({
     source: String(item?.source || "").trim(),
-    target: String(item?.target || "").trim()
+    target: String(item?.target || "").trim(),
+    ...(item?.segmentId ? { segmentId: String(item.segmentId) } : {}),
+    accepted: item?.accepted === true
   })).filter((item) => item.source && item.target).slice(0, Math.max(0, Number(limit) || 5));
+}
+
+/** Request flags cannot approve a draft or a translation edited since human acceptance. */
+export function verifyBatchReferenceAcceptance(references = [], segments = []) {
+  return (Array.isArray(references) ? references : []).map((item) => ({
+    ...item,
+    accepted: segments.some((segment) => segment.accepted === true
+      && (!item?.segmentId || String(segment.id) === String(item.segmentId))
+      && segment.source === item?.source && segment.translation === item?.target)
+  }));
 }

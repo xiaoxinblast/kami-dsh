@@ -13,7 +13,7 @@ test("同固定框架、不同数字/术语/引号内容得到同一骨架", () 
   assert.notEqual(a, buildPatternKey("レベルが足りません。", { terms }));
 });
 
-test("同骨架优先选已定稿参考，最多 3 条，不带空译文", () => {
+test("同骨架优先选已有参考，最多 3 条，不带空译文", () => {
   const terms = [{ source: "プレミアムパス", target: "高级通行证" }];
   const previous = [
     { segmentId: "s1", source: "プレミアムパスを購入すると、3個の宝箱を獲得します。", target: "购买高级通行证可获得 3 个宝箱。", patternKey: "x" },

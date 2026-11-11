@@ -126,7 +126,7 @@ export async function runServerBatch(batchId, {
   // 续跑时把已完成的段落先放进句式历史，后面的段落仍能拿到同框架参考。
   const patternHistory = (Array.isArray(run.segments) ? run.segments : [])
     .filter((segment) => segment.status === "done" && String(segment.translation || "").trim())
-    .map((segment) => ({ segmentId: segment.id, source: segment.source, target: segment.translation }));
+    .map((segment) => ({ segmentId: segment.id, source: segment.source, target: segment.translation, accepted: segment.accepted === true }));
   const batchSettings = project.settings?.batch || {};
   const tmSettings = project.settings?.tm || {};
   const retryIds = segmentIds ? new Set(segmentIds.map(String)) : null;
@@ -189,7 +189,7 @@ export async function runServerBatch(batchId, {
         previousSource: context.previous,
         nextSource: context.next,
         batchReferences: run.segments.slice(0, position).filter(item => item.status === "done" && item.translation && contextBoundary(item) === contextBoundary(segment))
-          .slice(-Math.max(0, Number(tmSettings.contextAnchorCount ?? 5))).map(item => ({ source: item.source, target: item.translation })),
+          .slice(-Math.max(0, Number(tmSettings.contextAnchorCount ?? 5))).map(item => ({ segmentId: item.id, source: item.source, target: item.translation, accepted: item.accepted === true })),
         patternReferences: selectPatternReferences({ source: segment.source, terms: patternTerms, previous: patternHistory.filter(item => String(item.segmentId) !== String(segment.id)) }),
         workingTerms,
         batchGroupEntries: (groupById.get(segment.id) || []).map(item => ({ id: item.id, source: item.source, context: item.context })),
@@ -309,7 +309,7 @@ export async function runServerBatch(batchId, {
             console.warn(`[Kami] 第 ${position + 1} 段工作术语学习失败，已跳过：${error.message}`);
           }
         }
-        patternHistory.push({ segmentId: segment.id, source: segment.source, target: segment.translation });
+        patternHistory.push({ segmentId: segment.id, source: segment.source, target: segment.translation, accepted: false });
       } catch (error) {
         segment.status = "error";
         segment.error = String(error?.message || error);

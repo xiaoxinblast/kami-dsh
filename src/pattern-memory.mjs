@@ -67,7 +67,7 @@ export function patternSimilarity(left, right) {
  * 从当前文件已翻段落里选同句式参考。
  *
  * 优先精确骨架；不足时做相似度兜底（只看最近 400 条，避免大文件 O(n²)）。
- * 返回的是已定稿 source→target，提示词只把它当"固定部分"参考，变量仍需按当前原文替换。
+ * 返回 source→target 及人工采纳状态；句式相似不代表译文已确认，变量仍需按当前原文翻译。
  */
 export function selectPatternReferences({ source, terms = [], previous = [], limit = PATTERN_MAX_REFERENCES, threshold = PATTERN_SIMILARITY_THRESHOLD } = {}) {
   const key = buildPatternKey(source, { terms });
@@ -87,6 +87,7 @@ export function selectPatternReferences({ source, terms = [], previous = [], lim
     segmentId: String(item.segmentId || item.id || ""),
     source: String(item.source || "").trim(),
     target: String(item.target || "").trim(),
+    accepted: item.accepted === true,
     similarity: item.patternKey === key ? 1 : Number(patternSimilarity(source, item.source).toFixed(3))
   }));
 }

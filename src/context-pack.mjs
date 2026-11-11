@@ -168,6 +168,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
       segmentId: String(item?.segmentId || ""),
       source: String(item?.source || ""),
       target: String(item?.target || ""),
+      accepted: item?.accepted === true,
       similarity: Number(item?.similarity) || 0
     })).filter((item) => item.source && item.target) : [],
     batchGroupEntries: Array.isArray(batchGroupEntries) ? batchGroupEntries.slice(0, 50).map((item) => ({
