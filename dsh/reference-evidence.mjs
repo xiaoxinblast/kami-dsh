@@ -14,15 +14,20 @@ export function batchReferenceEvidence({ cache, workspace, styleGuides, referenc
   if (!cache || !shell) return null;
   let currentEntries = [];
   const scopedRefs = new Map(), segmentLookups = new Map();
-  let readerDirectory;
-  async function stageReader() {
-    const dir = await mkdtemp(join(await scratchDirectory(), "reader-"));
+  let readerRoot, readerDirectory;
+  async function stageReader(root) {
+    const dir = await mkdtemp(join(root, "reader-"));
     await copyFile(new URL("./read-reference.py", import.meta.url), join(dir, "read-reference.py"));
     return dir;
   }
   async function original(file, op, extra = {}) {
     const data = Buffer.from(JSON.stringify({ ...extra, op, workspace, path: resolve(workspace, file.path) })).toString("base64");
-    const workdir = await (readerDirectory ??= stageReader());
+    const root = await scratchDirectory();
+    if (readerRoot !== root) {
+      readerRoot = root;
+      readerDirectory = stageReader(root);
+    }
+    const workdir = await readerDirectory;
     const result = await dispatch(shell, { workdir, command: `python -X utf8 -B ./read-reference.py ${data}`, description: "核对关联原件的版本、权限及内容" });
     const v = result?.value;
     if (result?.isError || v?.exitCode !== 0 || v.timedOut || v.aborted || v.stdout?.truncated) {

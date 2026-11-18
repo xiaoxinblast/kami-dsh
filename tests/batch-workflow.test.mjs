@@ -183,3 +183,25 @@ test("QA 重试不使已有报告和普查过期，新一轮翻译仍需收尾",
   assert.equal(translated.termSurvey.status, "blocked");
   assert.equal(batchQualityReportPending(run, translated), false);
 });
+
+
+test("修订后的模型 QA 补检完成后，一致性报告区别显示历史警告与当前状态", async () => {
+  const { buildBatchWorkflow } = await import("../public/batch-status.js");
+  const run = fixture();
+  run.segments = run.segments.slice(0, 2);
+  const warning = "1 段一致性修订后的 QA 未完成，可批量重试";
+  const report = { generatedAt: "2026-10-03T02:00:00Z" };
+  run.qualityReport = { warning, report, repair: { verification: { failures: [] } } };
+  run.runnerOptions.qaCompletedAt = "2026-10-03T03:00:00Z";
+  const qualityTask = { status: "needs_attention", updatedAt: report.generatedAt, payload: { report, warning } };
+  const status = () => buildBatchWorkflow(run, { qualityTask }).qualityReport;
+  assert.equal(status().status, "needs_attention");
+  run.segments[1].result.aiQa = { status: "passed", used: true, score: 100 };
+  assert.equal(status().status, "completed");
+  assert.match(status().message, /已补检/);
+  run.qualityReport.repair.verification.failures.push("有一片复核中断");
+  assert.equal(status().status, "needs_attention");
+  run.qualityReport.repair.verification.failures = [];
+  qualityTask.status = "in_progress";
+  assert.equal(status().status, "in_progress");
+});

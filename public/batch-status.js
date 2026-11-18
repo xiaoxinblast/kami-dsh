@@ -17,6 +17,16 @@ export function isIncompleteBatchStage(segment, stage, includeOptional = false) 
     && (stage === "proofreading" ? stages.translation?.status === "completed" : stages.proofreading?.status === "completed"));
 }
 
+// A consistency repair may need model QA even when the earlier local check passed.
+export function batchQaRetryStage(segment, includeOptional = false) {
+  if (segment.selected === false || segment.accepted || segment.status !== "done" || !segment.translation?.trim()) return null;
+  const stages = segment.result?.stages;
+  if (stages && stages.proofreading?.status !== "completed") return null;
+  if (isIncompleteBatchStage(segment, "localQa")) return "localQa";
+  if (isIncompleteBatchQa(segment)) return "modelQa";
+  return includeOptional && stages?.localQa?.status === "optional" ? "localQa" : null;
+}
+
 export function summarizeBatchSegments(segments = []) {
   const selected = segments.filter((segment) => segment.selected !== false);
   const done = selected.filter((segment) => segment.status === "done" && String(segment.translation || "").trim());
@@ -67,6 +77,15 @@ export function buildBatchWorkflow(run, { qualityTask = null, termTask = null, q
     return { status: "not_started", message: "尚未开始，翻译结束后自动执行" };
   };
   const qualityReport = followup(qualityTask, run.qualityReport ? { ...run.qualityReport.report, warning: run.qualityReport.warning } : null, autoConsistencyCheck, "质量报告");
+  // The saved report describes its generation time. Only its QA-only warning can be resolved by a later retry.
+  const saved = run.qualityReport, qaCompletedAt = Date.parse(run.runnerOptions?.qaCompletedAt || "");
+  if (qualityReport.status === "needs_attention" && /^\d+ 段一致性修订后的 QA 未完成，可批量重试$/u.test(saved?.warning)
+    && (!qualityTask || (qualityTask.status === "needs_attention" && qualityTask.payload?.warning === saved.warning
+      && qualityTask.payload?.report?.generatedAt === saved.report?.generatedAt))
+    && qaCompletedAt > Date.parse(saved.report?.generatedAt || "") && !saved.repair?.verification?.failures?.length
+    && summary.qaIncomplete === 0 && summary.total > 0 && summary.completed === summary.total) {
+    Object.assign(qualityReport, { status: "completed", percent: 100, qaResolved: true, message: "一致性核对完成，修订后的模型 QA 已补检；报告数据为生成时的记录" });
+  }
   const termSurvey = followup(termTask, run.runnerOptions?.termSurvey, termSurveyEnabled, "术语普查");
   if (ended && termSurvey.status === "waiting" && ["waiting", "in_progress"].includes(qualityReport.status)) termSurvey.message = "等待质量报告 / 一致性修复结束后开始";
   const translation = {

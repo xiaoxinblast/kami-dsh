@@ -14,8 +14,8 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     status: i === 24 ? "pending" : i === 0 ? "error" : "done", error: i === 0 ? "模型输出被截断" : "", retryTranslationReason: i === 0 ? "模型输出被截断" : "",
     accepted: i === 3, result: { aiQa: i === 1 || i === 20 ? { fallbackReason: "请求中断，QA 未完成" } : { used: true, score: 95 } } }));
   const run = { batchId: "retry-batch", projectId: "p", locale: "zh-CN", filename: "重试验收.mqxliff", runState: "needs_attention", segments, runnerOptions: {}, workflow: {} };
-  for (const [index, status] of [[4, "pending"], [5, "completed"], [6, "completed"]]) {
-    segments[index].result.stages = { translation: { status: "completed" }, proofreading: { status }, localQa: { status: index === 6 ? "completed" : "pending" } };
+  for (const [index, status] of [[1, "completed"], [4, "pending"], [5, "completed"], [6, "completed"]]) {
+    segments[index].result.stages = { translation: { status: "completed" }, proofreading: { status }, localQa: { status: [1, 6].includes(index) ? "completed" : "pending" } };
   }
   segments[7].result = { stages: { translation: { status: "completed" }, draftQa: { status: "completed", hintCount: 1 }, proofreading: { status: "completed" }, localQa: { status: "optional" } }, aiQa: { status: "proofread_only", used: true } };
   run.workflow = buildBatchWorkflow(run);
@@ -66,7 +66,10 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.getByRole("button", { name: "重试全部未完成 QA", exact: true }).waitFor();
     await page.getByRole("button", { name: "查看校对润色详情", exact: true }).waitFor();
-    assert.deepEqual(await page.locator(".flow-row").first().locator(".flow-node > strong").allTextContents(), ["翻译", "初稿 QA", "校对润色"]);
+    assert.deepEqual(await page.locator(".flow-row").first().locator(".flow-node > strong").allTextContents(), ["翻译", "逐段 QA", "校对润色"]);
+    const mixed = page.getByRole("button", { name: "查看逐段 QA详情", exact: true });
+    assert.match(await mixed.innerText(), /3\s*\/\s*25/);
+    await mixed.getByText("初稿 QA 1 · 旧版校对后 QA 2", { exact: true }).waitFor();
     const banner = page.getByRole("region", { name: "任务等待手动处理" });
     await banner.getByText(/1 段待处理.*模型输出被截断/).waitFor();
     await banner.getByRole("button", { name: "重试失败译段", exact: true }).click();
@@ -97,6 +100,11 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     }
     await page.setViewportSize({ width: 960, height: 1050 });
     await page.getByRole("button", { name: "查看翻译详情", exact: true }).click();
+    await page.locator(".segment-row").nth(1).click();
+    const modelRetry = page.getByRole("button", { name: "重试此句模型 QA", exact: true });
+    if (process.env.KAMI_UI_SCREENSHOTS) await page.locator(".segment-editor").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "model-qa-retry.png") });
+    await Promise.all([page.waitForResponse(response => response.url().endsWith("/invoke") && response.request().postData()?.includes("retry-qa")), modelRetry.click()]);
+    assert.deepEqual(operations.filter(operation => operation.path.endsWith("/retry-qa")).at(-1)?.body.segmentIds, ["s2"]);
     await page.locator(".segment-row").nth(7).click();
     const editor = page.locator(".segment-editor textarea").last();
     await checkRoundedField(editor, "translation");
@@ -148,6 +156,20 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     await page.getByRole("textbox", { name: "译文 1", exact: true }).fill("保留未保存草稿");
     assert.equal(await page.getByRole("button", { name: "重试此句翻译", exact: true }).isDisabled(), true);
     if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "translation-retry-single-330.png") });
+    run.segments = [segments[6], segments[7]];
+    run.runState = "completed";
+    run.runnerOptions.stageRetryOnly = true;
+    run.workflow = buildBatchWorkflow(run);
+    await page.reload();
+    const completed = page.getByRole("button", { name: "查看逐段 QA详情", exact: true });
+    await completed.getByText("已完成", { exact: true }).waitFor();
+    assert.match(await completed.innerText(), /2\s*\/\s*2/);
+    await completed.getByText("初稿 QA 1 · 旧版校对后 QA 1", { exact: true }).waitFor();
+    assert.doesNotMatch(await completed.innerText(), /未记录/);
+    for (const width of [960, 330]) {
+      await page.setViewportSize({ width, height: 1050 });
+      if (process.env.KAMI_UI_SCREENSHOTS) await page.locator(".flow-group").filter({ has: completed }).screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, 'completed-mixed-' + width + '.png') });
+    }
     assert.deepEqual(errors, []);
   } finally { release?.(); await browser.close(); await new Promise((resolve) => server.close(resolve)); }
 });

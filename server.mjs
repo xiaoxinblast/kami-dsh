@@ -85,7 +85,7 @@ import { BACKGROUND_TASK_STALE_MS, interruptedTaskPatch, selectStaleRunningTasks
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 import { runServerBatch, retryServerBatchQa, batchNeighborContext } from "./src/batch-runner.mjs";
 import { runSegmentWorkflow, proofreadingHints } from "./src/segment-workflow.mjs";
-import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows } from "./public/batch-status.js";
+import { batchQaRetryStage, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows } from "./public/batch-status.js";
 import { batchAttention, notifyBatchAttention } from "./src/batch-attention.mjs";
 import { translationRetryReason } from "./src/translation-output.mjs";
 
@@ -1597,7 +1597,7 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   let issuesBeforeRevision = [];
 
   try {
-    referenceSession ||= { toolRunner: buildReferenceToolRunner({ projectId, skill: contextPack.translationSkill }) };
+    referenceSession ||= { toolRunner: buildReferenceToolRunner({ projectId, skill: contextPack.translationSkill }), contextPack };
     const potentialIssues = hardIssues.filter((issue) => issue.type === "potential_term");
     if (potentialIssues.length && maxRevisions > 0) {
       try {
@@ -2725,7 +2725,9 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
 
 async function translateBatchSegment(body, path = "/api/translate", { draft = null } = {}) {
   const performance = { version: 1, events: [], ...(draft ? { groupId: draft.groupId, groupSize: draft.groupSize } : {}) };
-  return withRuntimeCall({ performanceTrace: performance, translationDraft: draft }, async () => {
+  const qaCache = path === "/api/qa" && body.batchId && runtimeOptions().evidenceCache?.batchId !== body.batchId
+    ? { evidenceCache: { batchId: body.batchId, guides: new Map(), snippets: new Map() } } : {};
+  return withRuntimeCall({ performanceTrace: performance, translationDraft: draft, ...qaCache }, async () => {
     try {
       const result = await measureStage("segment", () => dispatchBatchSegment(body, path));
       return { ...result, performance };
@@ -4419,7 +4421,7 @@ async function finalizeBatchWorkflow(batchId) {
 }
 
 function startBatchQaRetry(batchId, taskId, segmentIds, stage = null) {
-  const label = stage === "proofreading" ? "模型校对" : stage === "localQa" ? "本地 QA" : "AIQA";
+  const label = stage === "proofreading" ? "模型校对" : stage === "qa" ? "QA" : "AIQA";
   const control = beginBackgroundRun(taskId);
   const tracked = (async () => {
     // 收尾正在写批次时先等它结束，避免 QA 与一致性修复互相覆盖。
@@ -4431,7 +4433,7 @@ function startBatchQaRetry(batchId, taskId, segmentIds, stage = null) {
     const evidenceCache = { batchId, guides: new Map(), snippets: new Map() };
     const outcome = await retryServerBatchQa(batchId, {
       loadRun: getBatchRun, saveRun: saveBatchRun, segmentIds, stage,
-      recheckSegment: (body) => withRuntimeCall({ evidenceCache }, () => translateBatchSegment(body, stage ? "/api/translate" : "/api/qa")),
+      recheckSegment: (body) => withRuntimeCall({ evidenceCache }, () => translateBatchSegment(body, body.workflowStage ? "/api/translate" : "/api/qa")),
       shouldCancel: () => control.cancelRequested,
       report: ({ completed, failed, total }) => updateBackgroundTaskProgress(taskId, {
         progress: { phase: "checking", message: `${label} 重试：${completed} / ${total} 段${failed ? ` · ${failed} 段仍未完成` : ""}`,
@@ -7455,8 +7457,8 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     const run = await getBatchRun(batchId);
     if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
-    const stage = url.pathname.endsWith("/retry-proofreading") ? "proofreading" : run.segments.some(segment => segment.result?.stages) ? "localQa" : null;
-    const label = stage === "proofreading" ? "模型校对" : stage === "localQa" ? "本地 QA" : "AIQA";
+    const stage = url.pathname.endsWith("/retry-proofreading") ? "proofreading" : "qa";
+    const label = stage === "proofreading" ? "模型校对" : stage === "qa" ? "QA" : "AIQA";
     const existing = batchQaWorkers.get(batchId);
     if (existing) return json(res, 202, { batchId, backgroundTaskId: existing.taskId, alreadyRunning: true });
     if (batchQaStarts.has(batchId)) {
@@ -7466,7 +7468,7 @@ async function apiHandler(req, res, url) {
     if (["queued", "running"].includes(run.runState) || batchTranslationStarts.has(batchId) || contextAnalysisTasks.has(batchId)) return json(res, 409, { error: "翻译或语境分析仍在进行，请结束后仅重试未完成的 AIQA" });
     if (Object.hasOwn(body, "segmentIds") && (!Array.isArray(body.segmentIds) || !body.segmentIds.length)) return json(res, 400, { error: "请选择要重试 QA 的句段" });
     const segmentIds = Array.isArray(body.segmentIds) ? body.segmentIds.map(String) : null;
-    const count = run.segments.filter((segment) => (stage ? isIncompleteBatchStage(segment, stage, Boolean(segmentIds)) : isIncompleteBatchQa(segment)) && !segment.accepted && !translationRetryReason(segment) && (!segmentIds || segmentIds.includes(String(segment.id)))).length;
+    const count = run.segments.filter((segment) => (stage === "qa" ? batchQaRetryStage(segment, Boolean(segmentIds)) : isIncompleteBatchStage(segment, stage, Boolean(segmentIds))) && !segment.accepted && !translationRetryReason(segment) && (!segmentIds || segmentIds.includes(String(segment.id)))).length;
     if (!count) return json(res, 200, { batchId, total: 0, message: `没有待执行的${label}` });
     const worker = batchWorkers.get(batchId);
     const waiting = Boolean(worker && (!worker.translationComplete || worker.followupActive)) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId);

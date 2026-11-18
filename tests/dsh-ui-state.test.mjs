@@ -65,6 +65,7 @@ test("QA labels never turn null scores or deterministic checks into model QA suc
   assert.equal(qaLabel({ result: { aiQa: { status: "deterministic_only", score: null } } }), "规则检查");
   assert.equal(qaLabel({ result: { aiQa: { used: true, score: 93 } } }), "模型 QA · 93");
   assert.equal(qaLabel({ result: { aiQa: { score: 100, fallbackReason: "timeout" } } }), "QA 未完成");
+  for (const status of ["passed", "review"]) assert.equal(qaLabel({ result: { stages: { proofreading: { status: "completed" }, localQa: { status: "completed" } }, aiQa: { status, used: true, score: 93 } } }), "模型 QA · 93");
   assert.equal(qaLabel({ accepted: true, result: { humanReview: { source: "external-review-import" }, aiQa: { used: false } } }), "memoQ 人工终稿");
   assert.equal(editingLocked({ runState: "paused", workflow: { writeBusy: true } }), true, "pause must wait for the active segment to settle");
   assert.equal(editingLocked({ runState: "completed", workflow: { qaRetryBusy: true } }), true);

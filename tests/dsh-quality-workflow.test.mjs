@@ -110,3 +110,42 @@ test("批次校对和本地 QA 重试只补对应阶段，保持其他段及历�
     assert.equal(latest.runnerOptions.termSurvey.marker, "保留普查");
   } finally { await workbench.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test("已做本地 QA 的旧段按 ID 重试修订后的模型 QA，保留译文和其他阶段", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kami-revision-qa-")), calls = [];
+  const workbench = await createWorkbench({ dataDirectory: directory, modelAdapter: async (messages, options) => {
+    if (options.requestLabel === "AIQA") assert.match(JSON.stringify(messages), /RULE_FROM_ORIGINAL/);
+    calls.push(options.requestLabel); return { content: '{"issues":[]}' };
+  } });
+  const batchId = "batch-qa-retry-original";
+  const ctx = { human: true, referenceTools: ({ evidenceCache }) => {
+    assert.equal(evidenceCache?.batchId, batchId);
+    return { tools: [{ type: "function", function: { name: "read", parameters: {} } }],
+      prepareEvidence: async () => ({ guides: [{ path: "guide.docx", content: "RULE_FROM_ORIGINAL" }] }),
+      execute: async () => { throw new Error("已通过原件工具读取"); } };
+  } };
+  try {
+    const { project } = await workbench.invoke({ path: "/api/projects", method: "POST", body: { name: "补检" } }, ctx);
+    const stages = { translation: { status: "completed" }, proofreading: { status: "completed" }, localQa: { status: "completed" } };
+    const one = { id: "one", source: "設定を保存。", translation: "保存设置。", selected: true, status: "done",
+      result: { stages, aiQa: { status: "review", fallbackReason: "指南读取失败" } } };
+    const two = { ...one, id: "two", source: "次へ", translation: "下一步" };
+    const workspaceSnapshot = { batchId, projectId: project.id, workspace: directory, styleGuideMode: "agent-native", resources: [{ path: "guide.docx", purpose: "style-guide" }] };
+    const run = await saveBatchRun({ batchId, projectId: project.id, runnerOptions: { workspaceSnapshot }, locale: "zh-CN", filename: "old.txt", runState: "completed", contentType: "ui", segments: [one, two] });
+    const path = `/api/batch/run/${run.batchId}`;
+    const retry = await workbench.invoke({ path: path + "/retry-qa", method: "POST", body: { projectId: project.id, segmentIds: ["one"] } }, ctx);
+    assert.equal(retry.total, 1);
+    let latest;
+    for (let i = 0; i < 200; i++) {
+      latest = await workbench.invoke({ path }, ctx);
+      if (!latest.workflow.writeBusy) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.ok(calls.includes("AIQA")); assert.ok(!calls.includes("模型校对"));
+    assert.equal(latest.segments[0].translation, one.translation);
+    assert.deepEqual(latest.segments[0].result.stages, stages);
+    assert.ok(!latest.segments[0].result.aiQa.fallbackReason);
+    assert.equal(latest.segments[1].result.aiQa.fallbackReason, "指南读取失败");
+    assert.equal(latest.workflow.summary.qaIncomplete, 1);
+  } finally { await workbench.close(); await rm(directory, { recursive: true, force: true }); }
+});

@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import JSZip from "jszip";
 import { batchReferenceEvidence } from "../dsh/reference-evidence.mjs";
-import { translateWithReflection, proofreadTranslationWithModel, learnWorkingTermsWithModel } from "../src/provider.mjs";
+import { translateWithReflection, proofreadTranslationWithModel, evaluateTranslationWithModel, learnWorkingTermsWithModel } from "../src/provider.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 
 const execute = promisify(execFile);
@@ -28,7 +28,8 @@ test("批内并发共享指南，版本和权限按阶段复核，资料复用�
   let denied = false, fullReads = 0;
   const cache = { guides: new Map(), snippets: new Map() };
   const bash = process.platform === "win32" ? resolve((await execute("git", ["--exec-path"])).stdout.trim(), "../../../bin/bash.exe") : "bash";
-  const runner = (shell = "bash") => batchReferenceEvidence({ cache, workspace, shell, scratchDirectory: async () => workspace, styleGuides: [{ path: "O'Brien 指南.docx" }], references: [{ path: "names.txt" }],
+  let scratch = await mkdtemp(join(workspace, "session-"));
+  const runner = (shell = "bash") => batchReferenceEvidence({ cache, workspace, shell, scratchDirectory: async () => scratch, styleGuides: [{ path: "O'Brien 指南.docx" }], references: [{ path: "names.txt" }],
     dispatch: async (name, { command, workdir }) => {
       if (denied) return { isError: true };
       assert.doesNotMatch(command, /[\r\n]/, "the shell receives one short command, never the Python source");
@@ -46,6 +47,8 @@ test("批内并发共享指南，版本和权限按阶段复核，资料复用�
   assert.match(both[0].guides[0].content, /例外规则甲/);
   assert.match(both[0].guides[0].content, /FF0000/);
   if (process.platform === "win32") assert.match((await runner("pwsh").prepare(pack)).guides[0].content, /例外规则甲/);
+  await rm(scratch, { recursive: true });
+  scratch = await mkdtemp(join(workspace, "session-"));
   const lookup = await first.lookup({ path: "names.txt", query: "リン" });
   assert.match(lookup.text, /说话人\/对象\/称呼/);
   assert.match((await second.prepare({ ...pack, source: "リン、来て。" })).snippets[0], /"line":2/);
@@ -96,4 +99,19 @@ test("工作术语学习先匹配后限量，保留表尾别名命中，组内�
     workingTerms: [...known, { source: "隊長", target: "队长" }] }));
   assert.deepEqual(payload.existingTerms, [{ source: "main", target: "", aliases: ["リン"] }]);
   assert.deepEqual(payload.workingTerms, [{ source: "隊長", target: "队长" }]);
+});
+
+
+test("独立模型 QA 在首次调用就获得已核实的完整指南，并在格式重试时保留它", async () => {
+  let preparations = 0, calls = 0;
+  const toolRunner = { tools: [{ type: "function", function: { name: "read", parameters: {} } }],
+    execute: async () => { throw new Error("格式重试无需再次调用原件工具"); },
+    prepareEvidence: async context => { assert.equal(context, pack); preparations++; return { guides: [{ path: "qa.docx", content: "QA_GUIDE_EXCEPTION" }] }; } };
+  await withRuntimeCall({ modelAdapter: async messages => {
+    calls++;
+    assert.match(JSON.stringify(messages), /QA_GUIDE_EXCEPTION/);
+    return { content: calls === 1 ? "invalid" : '{"issues":[]}' };
+  } }, () => evaluateTranslationWithModel({ contextPack: pack, translation: "林队长", referenceSession: { contextPack: pack, toolRunner } }));
+  assert.equal(calls, 2);
+  assert.equal(preparations, 1);
 });

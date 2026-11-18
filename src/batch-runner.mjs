@@ -5,7 +5,7 @@ import { isTransientConnectionError, retryTransient } from "./transient-errors.m
 import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
-import { isIncompleteBatchQa, isIncompleteBatchStage, segmentWorkflowComplete } from "../public/batch-status.js";
+import { batchQaRetryStage, isIncompleteBatchQa, isIncompleteBatchStage, segmentWorkflowComplete } from "../public/batch-status.js";
 import { translationRetryReason } from "./translation-output.mjs";
 import { microBatchSegments } from "./micro-batch.mjs";
 import { includePriorModelCalls, measureStage, summarizeModelUsage } from "./performance.mjs";
@@ -349,8 +349,12 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
   let run = await loadRun(batchId);
   if (!run) throw new Error("未找到批次任务");
   const ids = segmentIds ? new Set(segmentIds.map(String)) : null;
-  const incomplete = (segment) => stage ? isIncompleteBatchStage(segment, stage, Boolean(ids)) : isIncompleteBatchQa(segment);
-  const targets = run.segments.filter((segment) => incomplete(segment) && !segment.accepted && !translationRetryReason(segment) && (!ids || ids.has(String(segment.id))));
+  const retryKind = (segment) => {
+    if (stage === "qa") return batchQaRetryStage(segment, Boolean(ids));
+    if (stage) return isIncompleteBatchStage(segment, stage, Boolean(ids)) ? stage : null;
+    return isIncompleteBatchQa(segment) ? "modelQa" : null;
+  };
+  const targets = run.segments.filter((segment) => retryKind(segment) && !segment.accepted && !translationRetryReason(segment) && (!ids || ids.has(String(segment.id))));
   let completed = 0;
   let failed = 0;
   await report({ completed, failed, total: targets.length });
@@ -359,39 +363,41 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
     run = await loadRun(batchId);
     const segment = run?.segments.find((item) => item.id === target.id);
     if (!segment) break;
-    if (!segment.accepted && incomplete(segment)) {
+    const kind = retryKind(segment);
+    if (!segment.accepted && kind) {
       const originalTranslation = segment.translation;
       let update;
       try {
         const qa = await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
           locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
           domain: run.domain || "auto", batchId, segmentId: segment.id,
-          ...(stage ? { workflowStage: stage, stages: segment.result.stages,
+          ...(kind !== "modelQa" ? { workflowStage: kind, stages: segment.result.stages,
             neighborContext: batchNeighborContext(run, segment), documentBrief: contextBriefSlice(run.contextBrief, run.segments.indexOf(segment), segment.id),
             useModelClassification: false, qualityTier: segment.result.qualityTier } : {}),
           workingTerms: [],
           aiQa: true });
-        if (stage !== "proofreading" && qa.translation != null && qa.translation !== originalTranslation) throw new Error("QA 返回的译文与待检查译文不一致，评分未保存，请重试 QA");
+        if (kind !== "proofreading" && qa.translation != null && qa.translation !== originalTranslation) throw new Error("QA 返回的译文与待检查译文不一致，评分未保存，请重试 QA");
         const translation = qa.translation || originalTranslation;
         update = { ...segment, translation, accepted: translation === originalTranslation ? segment.accepted : false,
           result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation, draft: segment.result?.draft || qa.draft,
             performance: includePriorModelCalls(qa.performance, segment.result?.performance) }) } };
       } catch (error) {
         update = { ...segment, result: { ...segment.result, performance: includePriorModelCalls(error.performance, segment.result?.performance),
-          ...(stage ? { stages: { ...segment.result.stages, [stage]: { status: "failed", error: String(error.message || error) } } } : {}),
+          ...(kind !== "modelQa" ? { stages: { ...segment.result.stages, [kind]: { status: "failed", error: String(error.message || error) } } } : {}),
           aiQa: { ...segment.result?.aiQa, fallbackReason: String(error.message || error) } } };
       }
       // 回写前重新读取，不能覆盖并发编辑或用户已经修好的 QA。
       run = await loadRun(batchId);
       const current = run?.segments.find((item) => item.id === segment.id);
-      if (current && !current.accepted && current.translation === originalTranslation && incomplete(current)) {
+      if (current && !current.accepted && current.translation === originalTranslation && retryKind(current) === kind) {
         if (update.result?.performance?.events) update.result.performance.modelUsage = summarizeModelUsage(update.result.performance.events);
         run.segments = run.segments.map((item) => item.id === segment.id ? update : item);
         run.runnerOptions = { ...run.runnerOptions, stageRetryOnly: true,
           ...(update.translation !== originalTranslation ? { translationCompletedAt: new Date().toISOString() } : {}) };
         await saveRun(run);
       }
-      if (incomplete(run?.segments.find((item) => item.id === segment.id) || update)) failed += 1;
+      const saved = run?.segments.find((item) => item.id === segment.id) || update;
+      if (kind === "modelQa" ? isIncompleteBatchQa(saved) : isIncompleteBatchStage(saved, kind, true)) failed += 1;
     }
     completed += 1;
     await report({ completed, failed, total: targets.length });
