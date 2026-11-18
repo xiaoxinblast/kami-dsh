@@ -61,8 +61,9 @@ function budgetAdapter(responses, { defaultMaxTokens = 32000, prepare = (config)
       const response = responses[Math.min(requests.length - 1, responses.length - 1)];
       request.signal.throwIfAborted();
       yield { type: "text-delta", index: 0, text: response.content || "" };
+      if (response.error) throw response.error;
       if (response.usage) yield { type: "usage", usage: response.usage };
-      yield { type: "finish", reason: { kind: response.kind || "stop" } };
+      yield { type: "finish", reason: { kind: response.kind || "stop", ...(response.failure ? { failure: response.failure } : {}) } };
     } };
   } } }, testLlm);
   return { adapter, requests };
@@ -149,6 +150,31 @@ test("disabled retry and unchanged provider caps do not repeat the same request"
     await assert.rejects(adapter(budgetMessages, { route: budgetRoute }), /截断/);
     assert.equal(requests.length, 1);
   }
+}));
+
+test("transport failures retry only the failed call, discard partial output and stop after three retries", () => budgetFixture(async () => {
+  const failure = { message: "DeepSeek Messages transport failed", code: "TRANSPORT" };
+  const thrown = Object.assign(new Error(failure.message), { code: failure.code });
+  const broken = { kind: "error", content: "partial", failure };
+  const { adapter, requests } = budgetAdapter([broken, { error: thrown }, { content: "成功" }]);
+  assert.equal((await adapter(budgetMessages, { route: budgetRoute })).content, "成功");
+  assert.equal(requests.length, 3);
+  const exhausted = budgetAdapter([broken]);
+  await assert.rejects(exhausted.adapter(budgetMessages, { route: budgetRoute }), /自动重试 3 次.*transport failed/);
+  assert.equal(exhausted.requests.length, 4);
+  const other = budgetAdapter([{ kind: "error", failure: { code: "AUTH", message: "auth failed" } }]);
+  await assert.rejects(other.adapter(budgetMessages, { route: budgetRoute }), /auth failed/);
+  assert.equal(other.requests.length, 1);
+}));
+
+test("cancelling during transport backoff dispatches no more requests", () => budgetFixture(async () => {
+  const controller = new AbortController();
+  const { adapter, requests } = budgetAdapter([{ error: Object.assign(new Error("transport failed"), { code: "TRANSPORT" }) }]);
+  const timer = setTimeout(() => controller.abort(), 50);
+  try {
+    await assert.rejects(adapter(budgetMessages, { route: budgetRoute, signal: controller.signal }), { name: "AbortError" });
+    assert.equal(requests.length, 1);
+  } finally { clearTimeout(timer); }
 }));
 
 test("cancelled calls do not dispatch or retry", () => budgetFixture(async () => {

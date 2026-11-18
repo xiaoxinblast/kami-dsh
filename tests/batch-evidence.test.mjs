@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import JSZip from "jszip";
 import { batchReferenceEvidence } from "../dsh/reference-evidence.mjs";
@@ -16,7 +16,7 @@ const pack = { source: "隊長のリン", targetLocale: "zh-CN", sourceLanguage:
 test("批内并发共享指南，版本和权限按阶段复核，资料复用保留原行和语境", async t => {
   const workspace = await mkdtemp(join(tmpdir(), "kami-evidence-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  const guide = join(workspace, "guide.docx"), ref = join(workspace, "names.txt");
+  const guide = join(workspace, "O'Brien 指南.docx"), ref = join(workspace, "names.txt");
   async function document(text, visual = false) {
     const archive = new JSZip();
     archive.file("word/document.xml", `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`);
@@ -27,13 +27,16 @@ test("批内并发共享指南，版本和权限按阶段复核，资料复用�
   await writeFile(ref, "说话人/对象/称呼\nA/B/リン\n另一个人物");
   let denied = false, fullReads = 0;
   const cache = { guides: new Map(), snippets: new Map() };
-  const runner = () => batchReferenceEvidence({ cache, workspace, shell: "bash", styleGuides: [{ path: "guide.docx" }], references: [{ path: "names.txt" }],
-    dispatch: async (_shell, { command }) => {
+  const bash = process.platform === "win32" ? resolve((await execute("git", ["--exec-path"])).stdout.trim(), "../../../bin/bash.exe") : "bash";
+  const runner = (shell = "bash") => batchReferenceEvidence({ cache, workspace, shell, scratchDirectory: async () => workspace, styleGuides: [{ path: "O'Brien 指南.docx" }], references: [{ path: "names.txt" }],
+    dispatch: async (name, { command, workdir }) => {
       if (denied) return { isError: true };
-      const token = command.split("'")[1];
+      assert.doesNotMatch(command, /[\r\n]/, "the shell receives one short command, never the Python source");
+      const token = command.split(" ").at(-1);
       if (JSON.parse(Buffer.from(token, "base64")).op === "guide") fullReads++;
-      const script = command.split("<<'KAMI_READER'\n")[1].split("\nKAMI_READER").at(0);
-      const { stdout } = await execute("python", ["-X", "utf8", "-B", "-c", script, token]);
+      const { stdout } = name === "bash"
+        ? await execute(bash, ["-c", command], { cwd: workdir })
+        : await execute("pwsh", ["-NoProfile", "-Command", command], { cwd: workdir });
       return { value: { exitCode: 0, stdout: { text: stdout, truncated: false } } };
     } });
   const first = runner(), second = runner();
@@ -42,6 +45,7 @@ test("批内并发共享指南，版本和权限按阶段复核，资料复用�
   assert.deepEqual(both[0].guides, both[1].guides);
   assert.match(both[0].guides[0].content, /例外规则甲/);
   assert.match(both[0].guides[0].content, /FF0000/);
+  if (process.platform === "win32") assert.match((await runner("pwsh").prepare(pack)).guides[0].content, /例外规则甲/);
   const lookup = await first.lookup({ path: "names.txt", query: "リン" });
   assert.match(lookup.text, /说话人\/对象\/称呼/);
   assert.match((await second.prepare({ ...pack, source: "リン、来て。" })).snippets[0], /"line":2/);

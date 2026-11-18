@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { getSettings } from "../src/settings-store.mjs";
 import { measureStage, tokenCounts } from "../src/performance.mjs";
 
@@ -36,15 +37,16 @@ export function createModelAdapter(ctx, llm) {
     if (options.seed !== undefined) options.onSeedUnsupported?.("DSH 模型接口未提供固定 seed，本次评测不声明确定性采样");
     config = { ...config, ...(options.temperature === undefined ? {} : { temperature: options.temperature }) };
     const retryLimit = getSettings().model.retryMaxTokens, label = options.requestLabel || "模型调用";
-    let usage, truncated;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const retryDelays = [1000, 2000, 4000];
+    let usage, truncated, transportRetries = 0;
+    for (let attempt = 1; ; attempt += 1) {
       const signal = AbortSignal.any([options.signal || new AbortController().signal, AbortSignal.timeout(options.timeoutMs || 120_000)]);
       signal.throwIfAborted();
-      const prepared = await ctx.llm.prepareCall(config, signal);
-      const maxTokens = prepared.config.maxTokens;
-      if (truncated && !(maxTokens > truncated.details.maxTokens)) break;
-      const assembler = new llm.BlockAssembler();
+      let prepared, assembler;
       try {
+        prepared = await ctx.llm.prepareCall(config, signal);
+        if (truncated && !(prepared.config.maxTokens > truncated.details.maxTokens)) break;
+        assembler = new llm.BlockAssembler();
         await measureStage("model", async event => {
           try {
             for await (const chunk of prepared.stream({ ...prepared.config, messages: converted, ...(tools.length ? { tools } : {}), signal })) assembler.push(chunk);
@@ -59,26 +61,36 @@ export function createModelAdapter(ctx, llm) {
               if (["max-tokens", "error", "aborted"].includes(assembler.finish?.kind)) event.status = "failed";
             }
           }
-        }, { requestLabel: label, provider: prepared.config.provider, model: prepared.config.model, reasoningEffort: prepared.config.reasoningEffort, maxTokens, attempt: attempt + 1 });
+        }, { requestLabel: label, provider: prepared.config.provider, model: prepared.config.model, reasoningEffort: prepared.config.reasoningEffort, maxTokens: prepared.config.maxTokens, attempt });
+        if (assembler.finish.kind === "error" || assembler.finish.kind === "aborted") {
+          const failure = assembler.finish.failure;
+          throw Object.assign(new Error(`${label}：${failure?.message || "DSH 模型调用中断或失败"}`), { code: assembler.finish.kind === "aborted" ? "ABORTED" : failure?.code });
+        }
       } catch (error) {
-        if (signal.aborted) throw new Error(`${label}${options.signal?.aborted ? "已取消" : `超过 ${Math.round((options.timeoutMs || 120_000) / 1000)} 秒，调用超时`}（${prepared.config.model}，输出上限 ${maxTokens ?? "提供商默认"}）`, { cause: error });
-        throw error;
+        if (signal.aborted) throw new Error(`${label}${options.signal?.aborted ? "已取消" : `超过 ${Math.round((options.timeoutMs || 120_000) / 1000)} 秒，调用超时`}（${prepared?.config.model || config.model}，输出上限 ${prepared?.config.maxTokens ?? "提供商默认"}）`, { cause: error });
+        const transportFailed = error?.code === "TRANSPORT" || (!error?.code && /(?:^|：)DeepSeek Messages transport failed$/u.test(error?.message));
+        if (!transportFailed) throw error;
+        if (transportRetries === retryDelays.length) throw Object.assign(new Error(`${label}传输失败，已自动重试 ${transportRetries} 次：${error.message}`, { cause: error }), { code: "TRANSPORT" });
+        await delay(retryDelays[transportRetries++], undefined, { signal: options.signal });
+        continue;
+      } finally {
+        if (assembler?.usage) {
+          usage ??= {};
+          for (const [key, value] of Object.entries(assembler.usage)) if (typeof value === "number") usage[key] = (usage[key] || 0) + value;
+          usage.promptTokens = usage.totalTokens != null && usage.outputTokens != null ? usage.totalTokens - usage.outputTokens
+            : usage.inputTokens + (usage.cacheReadTokens || 0) + (usage.cacheWriteTokens || 0);
+          usage.completionTokens = usage.outputTokens ?? usage.completionTokens;
+        }
       }
-      if (assembler.usage) {
-        usage ??= {};
-        for (const [key, value] of Object.entries(assembler.usage)) if (typeof value === "number") usage[key] = (usage[key] || 0) + value;
-        usage.promptTokens = usage.totalTokens != null && usage.outputTokens != null ? usage.totalTokens - usage.outputTokens
-          : usage.inputTokens + (usage.cacheReadTokens || 0) + (usage.cacheWriteTokens || 0);
-        usage.completionTokens = usage.outputTokens ?? usage.completionTokens;
-      }
+      const maxTokens = prepared.config.maxTokens;
       if (assembler.finish.kind === "max-tokens") {
-        const details = { requestLabel: label, provider: prepared.config.provider, model: prepared.config.model, reasoningEffort: prepared.config.reasoningEffort, maxTokens, attempts: attempt + 1, usage };
+        const details = { requestLabel: label, provider: prepared.config.provider, model: prepared.config.model, reasoningEffort: prepared.config.reasoningEffort, maxTokens, attempts: attempt, usage };
+        const canRetry = !truncated;
         truncated = Object.assign(new Error(`${label}：DSH 模型输出被截断（${details.model}，实际输出上限 ${maxTokens ?? "提供商默认"} token，已调用 ${details.attempts} 次，累计输出 ${usage?.completionTokens ?? "未知"} token）。请在 Kami「设置 → 模型」调整输出与重试上限。`), { code: "KAMI_MODEL_TRUNCATED", details });
         const nextMaxTokens = Math.min(retryLimit, maxTokens * 2);
-        if (attempt === 0 && Number.isSafeInteger(nextMaxTokens) && nextMaxTokens > maxTokens) { config = { ...prepared.config, maxTokens: nextMaxTokens }; continue; }
+        if (canRetry && Number.isSafeInteger(nextMaxTokens) && nextMaxTokens > maxTokens) { config = { ...prepared.config, maxTokens: nextMaxTokens }; continue; }
         break;
       }
-      if (assembler.finish.kind === "error" || assembler.finish.kind === "aborted") throw new Error(`${label}：${assembler.finish.failure?.message || "DSH 模型调用中断或失败"}`);
       const result = assembler.blocks();
       return {
         content: result.filter((block) => block.type === "text").map((block) => block.text).join(""),

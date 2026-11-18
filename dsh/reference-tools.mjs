@@ -57,10 +57,11 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
     } finally { toolSet.dispose(); }
   }
   const evidence = batchReferenceEvidence({ cache: evidenceCache, workspace, references, styleGuides, onActivity,
+    scratchDirectory: async () => (await temporaryDirectory()).path,
     shell: ["bash", "pwsh"].find(name => names.has(name)), dispatch: async (name, args) => {
       signal?.throwIfAborted();
       if (await workspaceRoot({ cwd: ctx.workingDirectory.get(agent.session), fs: ctx.fs, signal }) !== workspace) throw new Error("原文件所属工作区已切换");
-      return dispatch(name, { ...args, workdir: (await temporaryDirectory()).path });
+      return dispatch(name, args);
     } });
   return {
     prepareEvidence: evidence && (async (pack, entries) => {

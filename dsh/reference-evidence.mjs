@@ -1,8 +1,7 @@
-import { readFile } from "node:fs/promises";
-import { extname, resolve } from "node:path";
+import { copyFile, mkdtemp } from "node:fs/promises";
+import { extname, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 
-let readerSource;
 const sheetLookup = {
   name: "lookup_reference_rows",
   description: "在一份已关联 XLSX 或文本原件查词。首次可省略表名与表头行查看表名和前几行，再指定实际表名与表头行取得含列名的匹配原行。文本返回行号和相邻行。优先用本工具查专名或称呼。同一语境可复用原文片段，复杂格式仍可用原生文档工具。",
@@ -11,17 +10,20 @@ const sheetLookup = {
 
 // The batch worker owns the two maps. All original reads, including permission
 // and version probes on hits, go through the current agent's guarded shell.
-export function batchReferenceEvidence({ cache, workspace, styleGuides, references, shell, dispatch, onActivity }) {
+export function batchReferenceEvidence({ cache, workspace, styleGuides, references, shell, dispatch, scratchDirectory, onActivity }) {
   if (!cache || !shell) return null;
   let currentEntries = [];
   const scopedRefs = new Map(), segmentLookups = new Map();
+  let readerDirectory;
+  async function stageReader() {
+    const dir = await mkdtemp(join(await scratchDirectory(), "reader-"));
+    await copyFile(new URL("./read-reference.py", import.meta.url), join(dir, "read-reference.py"));
+    return dir;
+  }
   async function original(file, op, extra = {}) {
-    readerSource ??= await readFile(new URL("./read-reference.py", import.meta.url), "utf8");
     const data = Buffer.from(JSON.stringify({ ...extra, op, workspace, path: resolve(workspace, file.path) })).toString("base64");
-    const command = shell === "bash"
-      ? `python -X utf8 -B - '${data}' <<'KAMI_READER'\n${readerSource}\nKAMI_READER`
-      : `@'\n${readerSource}\n'@ | python -X utf8 -B - '${data}'`;
-    const result = await dispatch(shell, { command, description: "核对关联原件的版本、权限及内容" });
+    const workdir = await (readerDirectory ??= stageReader());
+    const result = await dispatch(shell, { workdir, command: `python -X utf8 -B ./read-reference.py ${data}`, description: "核对关联原件的版本、权限及内容" });
     const v = result?.value;
     if (result?.isError || v?.exitCode !== 0 || v.timedOut || v.aborted || v.stdout?.truncated) {
       const reason = result?.error?.message || v?.stderr?.text || result?.content?.find(block => block.type === "text")?.text;
