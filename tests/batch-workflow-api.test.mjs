@@ -11,7 +11,7 @@ import { surveyPairs } from "../src/term-survey.mjs";
 import { markedSurveyTerms, restoreUnverifiedSurveyRepairs } from "../src/term-memory-survey.mjs";
 import { normalizeSource } from "../src/text.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
-import { withRuntimeCall } from "../src/runtime-context.mjs";
+import { runtimeOptions, withRuntimeCall } from "../src/runtime-context.mjs";
 import { measureStage } from "../src/performance.mjs";
 import { translationRetryReason } from "../src/translation-output.mjs";
 
@@ -64,7 +64,8 @@ test(`一致性修复后的复核结果必须传递到报告和后台任务：${
     buildPatternKey: (_source, { terms }) => { assert.equal(terms.some(term => term.working), false, "工作术语不能变成一致性修订的强制骨架"); return "pattern"; },
     deterministicConsistencyFindings: segments => { assert.equal(segments[0].result.matches.length, 0, "未确认工作术语不作为登记术语发起一致性修订"); return []; }, getProjectStyleProfile: async () => null,
     consistencyTermEvidence: (_run, _segments, assets) => { assert.equal((assets.terms || []).some(term => term.working), false); return []; }, consistencyTmEvidence: async () => [], splitConsistencyChunks: () => [{ index: 0, ids: ["s1"] }],
-    consistencyChunkEvidence: () => ({}), buildReferenceToolRunner: () => null, checkBatchConsistencyWithModel: async () => [],
+    runtimeOptions, withRuntimeCall, consistencyChunkEvidence: () => ({}), buildReferenceToolRunner: () => null,
+    checkBatchConsistencyWithModel: async () => { assert.equal(runtimeOptions().evidenceCache.batchId, run.batchId); return []; },
     runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 1, mergeConsistencyFindings: () => [],
     applyConsistencyRepairs: async ({ segments }) => ({ segments, repair: { changed: [{ segmentId: "s1" }] } }),
     adjudicateRemainingFindings: async ({ segments }) => ({ segments }),

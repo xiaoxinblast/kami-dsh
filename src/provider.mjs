@@ -991,6 +991,16 @@ function originalGuideBlocks(guides = []) {
   return blocks;
 }
 
+async function prepareQaGuides(runner, pack) {
+  try {
+    const ready = await runner?.prepareEvidence?.(pack);
+    return originalGuideBlocks(ready?.guides);
+  } catch (error) {
+    await runner?.dispose?.();
+    throw error;
+  }
+}
+
 async function segmentMessages(pack, runner, part, task, entries, session) {
   const ready = await runner?.prepareEvidence?.(pack, entries);
   if (ready?.requiresOriginal && session) session.messages = [];
@@ -1015,8 +1025,7 @@ async function chatWithQaReferences(messages, options, session, config = runtime
   const runner = session?.toolRunner;
   if (!runner?.tools?.length) return chat(messages, config, options);
   if (session.contextPack && runner.prepareEvidence && !session.guideBlocks) {
-    const ready = await runner.prepareEvidence(session.contextPack);
-    session.guideBlocks = originalGuideBlocks(ready?.guides);
+    session.guideBlocks = await prepareQaGuides(runner, session.contextPack);
   }
   const guides = session.guideBlocks?.length ? [{ role: "user", content: session.guideBlocks }] : [];
   const evidence = session.messages?.length ? [{ role: "user", content: "以下工具证据已在当前这一段的本轮处理中实际读取，可直接用于当前校对或修订，无需重复读取；有新的疑点时仍可按需查阅原件或联网查证。" }, ...session.messages] : [];
@@ -2247,6 +2256,8 @@ export async function analyzeDocumentContextWithModel({ filename = "", format = 
  */
 export async function checkBatchConsistencyWithModel({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, evidence = null, toolRunner = null, onUsage = null } = {}) {
   const messages = consistencyMessages({ filename, locale, purpose, pairs, part, evidence });
+  const guides = await prepareQaGuides(toolRunner, { targetLocale: locale, contentType: purpose, neighborContext: { document: filename } });
+  if (guides.length) messages.splice(1, 0, { role: "user", content: guides });
   const requestOptions = {
     temperature: 0.1, timeoutMs: 120_000, maxTokens: 2_000, requestLabel: "一致性检查", responseFormat: { type: "json_object" }, onUsage
   };

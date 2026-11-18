@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import JSZip from "jszip";
 import { batchReferenceEvidence } from "../dsh/reference-evidence.mjs";
-import { translateWithReflection, proofreadTranslationWithModel, evaluateTranslationWithModel, learnWorkingTermsWithModel } from "../src/provider.mjs";
+import { translateWithReflection, proofreadTranslationWithModel, evaluateTranslationWithModel, checkBatchConsistencyWithModel, learnWorkingTermsWithModel } from "../src/provider.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 
 const execute = promisify(execFile);
@@ -114,4 +114,17 @@ test("独立模型 QA 在首次调用就获得已核实的完整指南，并在�
   } }, () => evaluateTranslationWithModel({ contextPack: pack, translation: "林队长", referenceSession: { contextPack: pack, toolRunner } }));
   assert.equal(calls, 2);
   assert.equal(preparations, 1);
+});
+
+
+test("一致性分片和格式重试均收到已核实的原件指南", async () => {
+  let prepared = 0, calls = 0;
+  const toolRunner = { tools: [{ type: "function", function: { name: "read", parameters: {} } }], execute: async () => ({}),
+    prepareEvidence: async () => { prepared++; return { guides: [{ path: "guide.docx", content: "CHUNK_GUIDE_EXCEPTION" }] }; },
+    assertReady: () => assert.equal(prepared, 1) };
+  await withRuntimeCall({ modelAdapter: async messages => {
+    assert.match(JSON.stringify(messages), /CHUNK_GUIDE_EXCEPTION/);
+    return { content: ++calls === 1 ? "format error" : '{"findings":[]}' };
+  } }, () => checkBatchConsistencyWithModel({ pairs: [{ id: "1", source: "設定", translation: "设置" }], toolRunner }));
+  assert.equal(calls, 2);
 });

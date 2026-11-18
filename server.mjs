@@ -4162,7 +4162,9 @@ function startConsistencyCheck(batchId) {
     });
     try {
       await attachBatchWorkflowTask(batchId, "qualityReport", task.id);
-      const outcome = await runConsistencyCheck(batchId, { taskId: task.id });
+      const cached = runtimeOptions().evidenceCache;
+      const evidenceCache = cached?.batchId === batchId ? cached : { batchId, guides: new Map(), snippets: new Map() };
+      const outcome = await withRuntimeCall({ evidenceCache }, () => runConsistencyCheck(batchId, { taskId: task.id }));
       const repairedCount = (outcome.repair?.changed || []).length;
       await updateBackgroundTaskProgress(task.id, {
         status: outcome.failures.length ? "needs_attention" : "completed",
