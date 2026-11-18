@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
-const supportedVersions = ["0.2.1-rc.2", "0.2.1-rc.3", "0.2.1-rc.4", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2"];
+const supportedVersions = ["0.2.1-rc.2", "0.2.1-rc.3", "0.2.1-rc.4", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"];
 
 const bootModule = process.env.DSH_TEST_LLM_MODULE && new URL("../../dsh-app-boot/lib/index.js", process.env.DSH_TEST_LLM_MODULE);
 
@@ -17,7 +17,7 @@ test("DSH startup accepts verified runtime versions without a version exemption"
     assert.equal(evaluatePluginCompatibility(manifest, {}, version), undefined, `Startup must accept DSH ${version}`);
     assert.equal(evaluatePluginCompatibility(withoutEngine, {}, version), undefined, `Runtime peers must accept DSH ${version}`);
   }
-  for (const version of ["0.2.1-rc.1", "0.2.1-rc.6", "0.2.2-alpha.3", "0.2.2-rc.3", "0.2.2", "0.3.0"]) {
+  for (const version of ["0.2.1-rc.1", "0.2.1-rc.6", "0.2.2-alpha.3", "0.2.2-rc.4", "0.2.2", "0.3.0"]) {
     const issue = evaluatePluginCompatibility(manifest, {}, version);
     assert.equal(issue?.exempted, false, `Unverified DSH ${version} must not receive an exemption`);
     assert.equal(issue?.requirements["engines.dsh"], manifest.engines.dsh);
