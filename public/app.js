@@ -742,8 +742,10 @@ function renderMatches(matches) {
 
 function renderQa(result) {
   const errors = result.issues.filter((issue) => issue.severity === "error");
+  const proofreadOnly = result.aiQa?.status === "proofread_only" && !result.aiQa.fallbackReason;
   $("#issueCount").textContent = result.aiQa?.fallbackReason ? "AIQA 未完成" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分 · ${result.aiQa?.iterations || 0} 次修订` : errors.length ? `${errors.length} 个阻断项` : result.issues.length ? `${result.issues.length} 条建议` : result.aiQa?.status === "revised" ? "已修订 · 规则检查通过" : "硬校验通过";
   const reflection = result.reflection ? `<div class="reflection-box"><strong>模型反思</strong>\n${escapeHtml(result.reflection)}</div>` : "";
+  if (proofreadOnly) $("#issueCount").textContent = "校对完成";
   const retrieval = result.aiQa?.references?.length ? `<div class="reflection-box"><strong>相似译例检索</strong>\n${result.aiQa.references.map((item) => {
     const tags = contentTagLabels(item.contentType || "general", item.contentTags);
     const origin = item.sourceFile ? `${item.sourceFile}${item.sourceRow ? ` 第 ${item.sourceRow} 行` : ""}` : (item.provenance || "历史资产");
@@ -762,7 +764,7 @@ function renderQa(result) {
   const factSummary = result.factSchema?.facts?.length || result.factSchema?.limits?.length ? `<div class="reflection-box"><strong>事实与交付约束</strong>\n${escapeHtml(`${result.factSchema.facts?.length || 0} 个事实锚点 · ${result.factSchema.limits?.length || 0} 项交付限制`)}</div>` : "";
   $("#qaList").className = "qa-list";
   const fallback = result.aiQa?.fallbackReason ? `<div class="qa-item warning">AIQA 暂未完成：${escapeHtml(result.aiQa.fallbackReason)}</div>` : "";
-  const revisionNote = result.aiQa?.status === "revised" ? '<div class="qa-item">已按 QA 意见修订；修订后只做规则检查，未进行模型复检或重新评分。</div>' : "";
+  const revisionNote = proofreadOnly ? '<div class="qa-item">初稿已检查，校对稿可按需手动 QA。</div>' : result.aiQa?.status === "revised" ? '<div class="qa-item">已按 QA 意见修订；修订后只做规则检查，未进行模型复检或重新评分。</div>' : "";
   $("#qaList").innerHTML = `${routing}${qualityRoute}${factSummary}${referenceBox}${reflection}${retrieval}${qaCases}${humanDecisions}${receipt}${fallback}${revisionNote}${issues || (!fallback && !revisionNote ? '<div class="qa-item">硬规则与检索式 AIQA 均通过</div>' : '')}`;
   $$(".single-qa-action").forEach((button) => button.addEventListener("click", () => resolveSingleQaIssue(Number(button.dataset.issueIndex), button.dataset.action, button)));
 }
@@ -2158,18 +2160,19 @@ function renderBatchDetails(segment) {
   const qaCases = aiQa.qaCases || [];
   const termDecisions = aiQa.termDecisions || [];
   const humanDecisions = aiQa.humanDecisions || [];
+  const proofreadOnly = aiQa.status === "proofread_only" && !aiQa.fallbackReason;
   const summary = [
-    aiQa.fallbackReason ? "阶段未完成" : aiQa.status === "proofread" ? "校对润色与本地 QA 已完成" : aiQa.status === "revised" ? "已修订 · 未做模型复检" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分` : "规则 QA",
+    aiQa.fallbackReason ? "阶段未完成" : proofreadOnly ? "校对完成" : aiQa.status === "proofread" ? "校对润色与本地 QA 已完成" : aiQa.status === "revised" ? "已修订 · 未做模型复检" : Number.isFinite(result.qaScore) ? `AIQA ${result.qaScore} 分` : "规则 QA",
     `${matches.length} 条术语`,
     `${references.length} 条译例`,
     `${aiQa.iterations || 0} 次修订`,
-    issues.length ? `${issues.length} 条建议` : aiQa.fallbackReason ? "AIQA 待重试" : "无问题"
+    issues.length ? `${issues.length} 条建议` : aiQa.fallbackReason ? "AIQA 待重试" : proofreadOnly ? "可手动 QA" : "无问题"
   ];
   const scopeNote = scopeUsageText(result.scopeUsage);
   if (scopeNote) summary.push(scopeNote);
   const summaryText = summary.join(" · ");
   const termsHtml = matches.length ? matches.map((match) => `<div class="batch-detail-item"><strong>${escapeHtml(match.term?.source)} → ${escapeHtml(match.term?.target)}</strong><small>${match.mode === "exact" ? "正式/别名命中" : `疑似命中：${escapeHtml(match.matchPhrase || "")}`} · ${Math.round((match.score || 0) * 100)}%</small></div>`).join("") : '<div class="batch-detail-empty">本段没有命中术语</div>';
-  const issuesHtml = issues.length ? issues.map((issue, index) => batchIssueHtml(issue, index, segment.id)).join("") : `<div class="batch-detail-empty">${aiQa.fallbackReason ? "硬规则通过；AIQA 尚待重试" : aiQa.status === "revised" ? "修订后规则检查通过；未进行模型复检或重新评分" : aiQa.status === "proofread" ? "校对已完成，本地规则未发现问题" : "硬规则与 AIQA 均未发现问题"}</div>`;
+  const issuesHtml = issues.length ? issues.map((issue, index) => batchIssueHtml(issue, index, segment.id)).join("") : `<div class="batch-detail-empty">${proofreadOnly ? "初稿已检查，校对稿可按需手动 QA。" : aiQa.fallbackReason ? "硬规则通过；AIQA 尚待重试" : aiQa.status === "revised" ? "修订后规则检查通过；未进行模型复检或重新评分" : aiQa.status === "proofread" ? "校对已完成，本地规则未发现问题" : "硬规则与 AIQA 均未发现问题"}</div>`;
   const referencesHtml = references.length ? references.map((item) => {
     const type = contentTypeLabel(item.contentType || "general");
     const tags = contentTagLabels(item.contentType || "general", item.contentTags);

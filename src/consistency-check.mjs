@@ -1,4 +1,5 @@
 import { extractProtectedTokens, normalizeSource, parseModelJsonObject, similarity } from "./text.mjs";
+import { chineseQaLocale } from "./chinese-numbers.mjs";
 
 /**
  * 批次级闭环：逐段 QA 看不见跨段问题——同一句话和同一个专名在不同段落里被译成
@@ -365,7 +366,7 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
       factIssueSegments += 1;
     }
     const translation = String(segment.translation || "");
-    const tokens = extractProtectedTokens(segment.source);
+    const tokens = extractProtectedTokens(segment.source, { numericUnits: !chineseQaLocale(locale) });
     if (tokens.length) {
       protectedTotal += tokens.length;
       protectedKept += tokens.filter((token) => translation.includes(token)).length;
@@ -411,7 +412,7 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
     coverage: {
       modelQa,
       qaIncomplete: done.filter((segment) => segment.result?.aiQa?.fallbackReason).length,
-      deterministicOnly: Math.max(0, done.length - modelQa),
+      deterministicOnly: Math.max(0, done.length - modelQa - done.filter(segment => segment.result?.aiQa?.status === "proofread_only").length),
       percent: done.length ? Math.round((modelQa / done.length) * 100) : 0
     },
     scores: {

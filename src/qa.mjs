@@ -1,8 +1,9 @@
 import { textContainsTerm } from "./asset-governance.mjs";
-import { digitSequence, digitsRecoverable, extractProtectedTokens, normalizeSource } from "./text.mjs";
+import { digitSequence, digitsRecoverable, extractProtectedTokens, normalizeSource, withoutProtectedTokens } from "./text.mjs";
 import { checkOrthography } from "./orthography.mjs";
 import { checkRegisterExpectation } from "./register-classifier.mjs";
 import { applyProjectQaPolicy } from "./project-config.mjs";
+import { chineseQaLocale, qaNumericValues } from "./chinese-numbers.mjs";
 
 export function checkExactMasterTm({ translation = "", translationReferences = [] } = {}) {
   const exactMasterTargets = [...new Set((Array.isArray(translationReferences) ? translationReferences : [])
@@ -21,16 +22,17 @@ export function checkExactMasterTm({ translation = "", translationReferences = [
   }];
 }
 
-export function runQa({ source, translation, matches = [], translationReferences = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null }) {
+export function runQa({ source, translation, matches = [], translationReferences = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null, draftCheck = false }) {
   const issues = [];
-  for (const token of extractProtectedTokens(source)) {
+  const chinese = chineseQaLocale(locale);
+  for (const token of extractProtectedTokens(source, { numericUnits: !chinese })) {
     if (!String(translation).includes(token)) {
-      issues.push({ severity: "error", type: "protected_token", message: `受保护内容缺失：${token}` });
+      issues.push({ severity: "error", type: "protected_token", token, message: `受保护内容缺失：${token}` });
     }
   }
   for (const match of matches) {
     const { term, mode = "exact", matchPhrase, caseMismatch = false } = match;
-    if (term.working) continue; // 文件候选不能触发正式术语裁决或硬约束。
+    if (term.working || draftCheck && mode !== "exact") continue; // 文件候选不能触发正式术语裁决或硬约束。
     // 保留原文的术语期望的是原文形态本身；区分大小写的术语按原样比对，不做大小写折叠。
     const caseSensitive = match.caseSensitive ?? Boolean(term.caseSensitive);
     const preserveOriginal = match.preserveOriginal ?? Boolean(term.preserveOriginal);
@@ -65,18 +67,28 @@ export function runQa({ source, translation, matches = [], translationReferences
   }
   issues.push(...checkExactMasterTm({ translation, translationReferences }));
   // 目标语言标点约定是确定性规则，交给本地检查而不是靠模型自觉。
-  issues.push(...checkOrthography({ source, translation, locale, titleOverrides }));
+  if (!draftCheck) issues.push(...checkOrthography({ source, translation, locale, titleOverrides }));
   // 语域（太营销 / 太网感 / 太普通）走确定性分类器而不是模型自由判断：
   // 同一段译文每次都得到同一个结论，才谈得上回归。
-  issues.push(...checkRegisterExpectation({ translation, locale, contentType, policyOverrides: registerPolicy }).issues);
+  if (!draftCheck) issues.push(...checkRegisterExpectation({ translation, locale, contentType, policyOverrides: registerPolicy }).issues);
   // 裸数字按数值等价校验而不是字面包含：8月20日 / 8월 20일 是 820 的正确本地化，
   // 不该判成漏掉受保护内容。仅当数字确实无法从译文还原时提示复核。
-  if (!digitsRecoverable(source, translation)) {
+  const sourceNumbers = chinese ? qaNumericValues(withoutProtectedTokens(source)) : [];
+  const targetNumbers = chinese ? qaNumericValues(withoutProtectedTokens(translation)) : [];
+  const remaining = [...targetNumbers];
+  const missingValues = sourceNumbers.filter(value => {
+    const index = remaining.indexOf(value);
+    if (index < 0) return true;
+    remaining.splice(index, 1);
+    return false;
+  });
+  if (chinese ? missingValues.length : !digitsRecoverable(source, translation)) {
     issues.push({
       severity: "warning",
       type: "number_drift",
       category: "number",
-      message: `原文中的数字未能在译文中完整还原（原文数字：${digitSequence(source)}，译文数字：${digitSequence(translation) || "无"}），请确认是否漏译或已按目标语言习惯改写`
+      ...(chinese ? { missingValues } : {}),
+      message: `原文中的数字未能在译文中完整还原（原文数字：${chinese ? sourceNumbers.join("、") : digitSequence(source)}，译文数字：${(chinese ? targetNumbers.join("、") : digitSequence(translation)) || "无"}），请确认是否漏译或已按目标语言习惯改写`
     });
   }
   if (source.trim() && !String(translation).trim()) {

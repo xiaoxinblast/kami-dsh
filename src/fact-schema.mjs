@@ -1,3 +1,6 @@
+import { chineseQaLocale, compactCalendarDate, normalizeQaQuantities } from "./chinese-numbers.mjs";
+import { withoutProtectedTokens } from "./text.mjs";
+
 export const FACT_SCHEMA_VERSION = "1.0";
 
 const PLATFORM_DEFINITIONS = [
@@ -41,7 +44,7 @@ const THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "�
 const FRENCH_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
 const CURRENCY_ALIASES = {
   USD: ["$", "USD", "美元", "米ドル", "달러", "ดอลลาร์"],
-  CNY: ["CNY", "RMB", "人民币", "人民幣", "元", "人民币元", "人民幣元"],
+  CNY: ["CNY", "RMB", "人民币", "人民幣", "元", "圆", "人民币元", "人民幣元"],
   JPY: ["JPY", "日元", "円", "圓", "엔", "เยน"],
   KRW: ["KRW", "₩", "韩元", "韓元", "원", "วอน"],
   THB: ["THB", "฿", "泰铢", "泰銖", "บาท"],
@@ -132,6 +135,7 @@ function collectDates(text, options = {}) {
   };
   for (const match of text.matchAll(/(?<!\d)(\d{4})(?:年|[-/.])(\d{1,2})(?:月|[-/.])(\d{1,2})日?(?!\d)/gu)) add(match, match[1], match[2], match[3]);
   for (const match of text.matchAll(/(?<!\d)(\d{1,2})月\s*(\d{1,2})日(?!\d)/gu)) add(match, null, match[1], match[2]);
+  for (const match of text.matchAll(compactCalendarDate)) add(match, null, match[1], match[2]);
   for (const match of text.matchAll(/(?<!\d)(\d{1,2})월\s*(\d{1,2})일(?!\d)/gu)) add(match, null, match[1], match[2]);
   const thaiPattern = new RegExp(`(?<!\\d)(\\d{1,2})\\s*(${THAI_MONTHS.join("|")})(?:\\s*(\\d{4}))?`, "giu");
   for (const match of text.matchAll(thaiPattern)) add(match, match[3] || null, THAI_MONTHS.findIndex((month) => month.toLowerCase() === match[2].toLowerCase()) + 1, match[1]);
@@ -177,14 +181,14 @@ function collectQuantities(text, blockedRanges = []) {
     facts.push({ raw: match[0], type, normalized, details, certainty, range });
   };
 
-  const moneyPattern = /(?:(¥|￥|\$|USD|CNY|RMB|JPY|KRW|THB|₩|฿)\s*(\d+(?:,\d{3})*(?:\.\d+)?)|(\d+(?:,\d{3})*(?:\.\d+)?)\s*(美元|人民币元?|人民幣元?|日元|韩元|韓元|泰铢|泰銖|元|円|圓|달러|원|บาท|เยน))/giu;
+  const moneyPattern = /(?:(¥|￥|\$|USD|CNY|RMB|JPY|KRW|THB|₩|฿|人民币|人民幣)\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)|(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(美元|人民币元?|人民幣元?|日元|韩元|韓元|泰铢|泰銖|元|圆|円|圓|달러|원|บาท|เยน|USD|CNY|RMB|JPY|KRW|THB|₩|฿))/giu;
   for (const match of text.matchAll(moneyPattern)) {
     const marker = match[1] || match[4];
     const amount = numericValue(match[2] || match[3]);
     const currency = Object.entries(CURRENCY_ALIASES).find(([, aliases]) => aliases.some((alias) => alias.toLocaleLowerCase() === marker.toLocaleLowerCase()))?.[0] || "UNKNOWN";
     add(match, "money", `${currency}:${amount}`, { currency, amount });
   }
-  for (const match of text.matchAll(/(?<![\d.])(\d+(?:\.\d+)?)\s*[%％](?!\w)/gu)) {
+  for (const match of text.matchAll(/(?<![\d.])(-?\d+(?:\.\d+)?)\s*[%％]/gu)) {
     const rate = numericValue(match[1]);
     add(match, "percentage", `${rate}%`, { rate });
   }
@@ -201,7 +205,7 @@ function collectQuantities(text, blockedRanges = []) {
   }
   for (const match of text.matchAll(/半价|半價/gu)) add(match, "discount", "pay:50;off:50", { payRate: 50, offRate: 50, notation: "half_price" });
 
-  for (const match of text.matchAll(/(?<![A-Za-z0-9])\d+(?:,\d{3})*(?:\.\d+)?(?![A-Za-z0-9%％折成元円圓])/gu)) {
+  for (const match of text.matchAll(/(?<![A-Za-z0-9])-?\d+(?:,\d{3})*(?:\.\d+)?(?![A-Za-z0-9%％折成元円圓])/gu)) {
     const value = numericValue(match[0]);
     add(match, "number", String(value), { value }, 0.99);
   }
@@ -250,7 +254,8 @@ export function extractFactSchema(input = {}) {
     for (const item of matchControlled(text, REGION_DEFINITIONS)) pushUnique(facts, { ...common, type: "region", value: item.raw, normalized: item.definition.canonical, certainty: 0.98, details: { label: item.definition.label, aliases: item.definition.aliases } });
 
     const deadline = stream.scope === "task" && isDeadline(stream);
-    const dates = collectDates(text, { allowNumericPair: deadline });
+    const numericText = text.replace(/[０-９％．－]/gu, char => char.normalize("NFKC"));
+    const dates = collectDates(numericText, { allowNumericPair: deadline });
     for (const item of dates) pushUnique(facts, { ...common, type: deadline ? "deadline" : "date", value: item.raw, normalized: item.normalized, certainty: item.certainty, details: item.details });
 
     const limit = stream.scope === "task" ? parseLengthLimit(stream) : null;
@@ -261,7 +266,7 @@ export function extractFactSchema(input = {}) {
       const start = text.indexOf(limit.raw);
       if (start >= 0) blocked.push([start, start + limit.raw.length]);
     }
-    for (const item of collectQuantities(text, blocked)) pushUnique(facts, { ...common, type: item.type, value: item.raw, normalized: item.normalized, certainty: item.certainty, details: item.details });
+    for (const item of collectQuantities(numericText, blocked)) pushUnique(facts, { ...common, type: item.type, value: item.raw, normalized: item.normalized, certainty: item.certainty, details: item.details });
   }
 
   const normalizedFacts = facts.map(({ _key, ...fact }, index) => ({ id: `fact-${index + 1}`, ...fact }));
@@ -280,7 +285,7 @@ function containsAlias(text, aliases = []) {
 }
 
 function containsNumber(text, expected) {
-  return [...String(text).matchAll(/\d+(?:,\d{3})*(?:\.\d+)?/gu)].some((match) => numericValue(match[0]) === Number(expected));
+  return [...String(text).replace(/(?<=\d)-(?=\d)/gu, " ").matchAll(/-?\d+(?:,\d{3})*(?:\.\d+)?/gu)].some((match) => numericValue(match[0]) === Number(expected));
 }
 
 function containsMoney(text, details) {
@@ -310,16 +315,21 @@ function countWords(text, locale) {
   }
 }
 
-function issueForFact(fact, translation) {
+function issueForFact(fact, translation, numericText, chinese) {
   if (fact.type === "url" && !translation.includes(fact.value)) return { severity: "error", type: "fact_url_missing", category: "fact", message: `网址缺失或被改写：${fact.value}` };
   if (fact.type === "placeholder" && !translation.includes(fact.value)) return { severity: "error", type: "fact_placeholder_missing", category: "format", message: `占位符缺失或被改写：${fact.value}` };
   if (fact.type === "platform" && !containsAlias(translation, fact.details.aliases)) return { severity: "error", type: "fact_platform_missing", category: "platform", message: `平台信息缺失：${fact.details.label}` };
   if (fact.type === "region" && !containsAlias(translation, fact.details.aliases)) return { severity: "error", type: "fact_region_missing", category: "locale", message: `地区信息缺失：${fact.details.label}` };
-  if (fact.type === "date" && !targetContainsDate(translation, fact)) return { severity: "error", type: "fact_date_missing", category: "fact", message: `日期缺失或发生变化：${fact.value}` };
-  if (fact.type === "money" && !containsMoney(translation, fact.details)) return { severity: "error", type: "fact_money_mismatch", category: "number", message: `金额或币种缺失：${fact.value}` };
-  if (fact.type === "percentage" && !new RegExp(`(?<!\\d)${escapeRegExp(fact.details.rate)}(?:\\.0+)?\\s*[%％](?!\\d)`, "u").test(translation)) return { severity: "error", type: "fact_percentage_mismatch", category: "number", message: `百分比缺失或发生变化：${fact.value}` };
-  if (fact.type === "discount" && !containsDiscount(translation, fact.details)) return { severity: "error", type: "fact_discount_mismatch", category: "number", message: `折扣信息缺失或发生变化：${fact.value}` };
-  if (fact.type === "number" && !containsNumber(translation, fact.details.value)) return { severity: "warning", type: "fact_number_missing", category: "number", message: `数字未在译文中找到：${fact.value}` };
+  if (fact.type === "date" && !targetContainsDate(numericText, fact)) return { severity: "error", type: "fact_date_missing", category: "fact", message: `日期缺失或发生变化：${fact.value}` };
+  if (fact.type === "money") {
+    const found = chinese ? collectQuantities(numericText).some(item => item.type === "money" && item.details.amount === fact.details.amount &&
+      (item.details.currency === fact.details.currency || fact.details.currency === "YEN_OR_YUAN" && ["JPY", "CNY"].includes(item.details.currency)))
+      : containsMoney(numericText, fact.details);
+    if (!found) return { severity: "error", type: "fact_money_mismatch", category: "number", message: `金额或币种缺失：${fact.value}` };
+  }
+  if (fact.type === "percentage" && !new RegExp(`(?<![\\d.-])${escapeRegExp(fact.details.rate)}(?:\\.0+)?\\s*[%％](?!\\d)`, "u").test(numericText)) return { severity: "error", type: "fact_percentage_mismatch", category: "number", message: `百分比缺失或发生变化：${fact.value}` };
+  if (fact.type === "discount" && !containsDiscount(numericText, fact.details)) return { severity: "error", type: "fact_discount_mismatch", category: "number", message: `折扣信息缺失或发生变化：${fact.value}` };
+  if (fact.type === "number" && !containsNumber(numericText, fact.details.value)) return { severity: "warning", type: "fact_number_missing", category: "number", message: `数字未在译文中找到：${fact.value}` };
   return null;
 }
 
@@ -351,10 +361,12 @@ export function checkFactSchema(input = {}) {
   const schema = input.schema || extractFactSchema(input);
   const translation = String(input.translation ?? "");
   const locale = String(input.locale || "");
+  const chinese = chineseQaLocale(locale);
+  const numericText = chinese ? normalizeQaQuantities(withoutProtectedTokens(translation)) : translation;
   const issues = [];
   for (const fact of schema.facts || []) {
     if (fact.scope !== "translation") continue;
-    const issue = issueForFact(fact, translation);
+    const issue = issueForFact(fact, translation, numericText, chinese);
     if (issue) issues.push({ ...issue, factId: fact.id, fact });
   }
   for (const limit of schema.limits || []) {

@@ -15,6 +15,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
   for (const [index, status] of [[4, "pending"], [5, "completed"], [6, "completed"]]) {
     segments[index].result.stages = { translation: { status: "completed" }, proofreading: { status }, localQa: { status: index === 6 ? "completed" : "pending" } };
   }
+  segments[7].result = { stages: { translation: { status: "completed" }, draftQa: { status: "completed", hintCount: 1 }, proofreading: { status: "completed" }, localQa: { status: "optional" } }, aiQa: { status: "proofread_only", used: true } };
   run.workflow = buildBatchWorkflow(run);
   let fail = false, held = false, release;
   const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>
@@ -63,6 +64,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.getByRole("button", { name: "重试全部未完成 QA", exact: true }).waitFor();
     await page.getByRole("button", { name: "查看校对润色详情", exact: true }).waitFor();
+    assert.deepEqual(await page.locator(".flow-row").first().locator(".flow-node > strong").allTextContents(), ["翻译", "初稿 QA", "校对润色"]);
     const analysis = page.getByRole("region", { name: "翻译流程", exact: true }).getByRole("region", { name: "语境分析", exact: true });
     assert.equal(await analysis.getAttribute("data-status"), "not_started");
     await analysis.getByText("可选", { exact: true }).waitFor();
@@ -77,6 +79,16 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     }
     await page.setViewportSize({ width: 960, height: 1050 });
     await page.getByRole("button", { name: "查看翻译详情", exact: true }).click();
+    await page.locator(".segment-row").nth(7).click();
+    const manual = page.getByRole("button", { name: "手动检查此句 QA", exact: true });
+    assert.equal(await manual.isEnabled(), true);
+    if (process.env.KAMI_UI_SCREENSHOTS) await page.locator(".segment-editor").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "manual-qa.png") });
+    await manual.click();
+    await page.getByText("重试已提交，可在任务概览查看进度。", { exact: true }).last().waitFor();
+    assert.deepEqual(operations.at(-1).body.segmentIds, ["s8"]);
+    await page.setViewportSize({ width: 330, height: 1050 });
+    await page.getByRole("button", { name: "返回译段列表", exact: true }).click();
+    await page.setViewportSize({ width: 960, height: 1050 });
     const region = page.getByRole("region", { name: "句段重试", exact: true });
     assert.equal(await page.getByRole("checkbox", { name: "勾选句段 4", exact: true }).isDisabled(), true);
     await page.getByRole("checkbox", { name: "勾选句段 5", exact: true }).check();

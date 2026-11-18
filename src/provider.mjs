@@ -475,7 +475,7 @@ export function packPrompt(contextPack, { includeStable = true, batch = false } 
   if (pack.patternReferences?.length) {
     variable.push(formatSegmentReferences(pack.patternReferences, "同句式参考"));
   }
-  if (pack.protectedTokens?.length) variable.push(`必须原样保留（URL、占位符、标签、带单位的数值）：${JSON.stringify(pack.protectedTokens)}`);
+  if (pack.protectedTokens?.length) variable.push(`必须原样保留：${JSON.stringify(pack.protectedTokens)}`);
   if (pack.factSchema) variable.push(`结构化事实锚点（translation 范围必须在译文中保持等价；task 范围只作为交付约束，不得翻译进正文）：${JSON.stringify(pack.factSchema)}`);
   if (pack.translationReferences?.length) variable.push(`历史译例（同语言、相似度与人工可信度排序；标有 contextualFallback 或用途不同的译例只用于稳定术语与基础表达，不得覆盖当前用途要求）：${JSON.stringify(pack.translationReferences)}`);
   if (pack.qaGuidance?.length) variable.push(`历史 AIQA 反例与修订：${JSON.stringify(pack.qaGuidance)}`);
@@ -1907,10 +1907,11 @@ export function parseAiQaLineResponse(content) {
   }];
 }
 
-export async function proofreadTranslationWithModel({ contextPack, translation, toolRunner = null, referenceSession = null, onUsage = null, model = "", modelRole = "main" }) {
+export async function proofreadTranslationWithModel({ contextPack, translation, hints = [], toolRunner = null, referenceSession = null, onUsage = null, model = "", modelRole = "main" }) {
+  const draftChecks = hints.length ? `\n\n初稿规则提示（对照原文核实，真错直接修正，误报保留正确表达）：\n${hints.map(hint => "- " + hint).join("\n")}` : "";
   const revised = await chatWithQaReferences([
     { role: "system", content: "你是日中本地化校对编辑。本阶段同时负责准确性校对、项目规范检查和自然流畅的语言润色。对照原文、上下文、人工风格指南、术语和参考资料，修正误译、漏译、指代、语气、格式等问题；即使没有硬错误，也须检查并改善生硬的日式语序、词语搭配、句间衔接和节奏，使中文自然易读、符合角色口吻和文本用途。保留信息、事实确定性、情绪强度、数字、占位符与标签；不增添原文没有的内容，不为了变化而改掉已自然准确的表达。原文带韵律时在这一次校对中完善韵律。直接输出完整校对后的译文，不输出问题列表、评分、解释或查证报告。" },
-    { role: "user", content: `${packPrompt(contextPack)}\n\n待校对译文（仅作编辑对象）：\n${translation}\n\n请完成校对与润色，只输出完整译文。` }
+    { role: "user", content: `${packPrompt(contextPack)}\n\n待校对译文（仅作编辑对象）：\n${translation}${draftChecks}\n\n请完成校对与润色，只输出完整译文。` }
   ], { temperature: 0.15, timeoutMs: 75_000, requestLabel: "模型校对", onUsage }, referenceSession || { toolRunner }, configForRole(modelRole, model));
   return requireNonEmptyTranslation(revised, "", "模型校对");
 }

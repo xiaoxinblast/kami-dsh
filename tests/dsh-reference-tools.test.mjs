@@ -329,7 +329,7 @@ test("translation and proofreading share actual reads, proofreading can read new
     const body = { projectId: state.project.id, batchId: prepared.batchId, locale: "zh-CN", source: "設定を保存します。", segmentPurpose: "ui", qualityTier: "standard", useModelClassification: false };
     const result = await workbench.invoke({ path: "/api/translate", method: "POST", body }, context);
     assert.equal(result.translation, "保存设置。");
-    assert.equal(result.aiQa.status, "proofread");
+    assert.equal(result.aiQa.status, "proofread_only");
     assert.equal(result.qaScore, null);
     assert.equal(result.aiQa.iterations, 0);
     assert.equal(calls.filter(call => call.arguments.file_path.endsWith("guide.custom")).length, 1, "初译实际读取，校对复用本段工具证据");

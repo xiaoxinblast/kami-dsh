@@ -5,7 +5,7 @@ import { isTransientConnectionError, retryTransient } from "./transient-errors.m
 import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
-import { isIncompleteBatchQa, isIncompleteBatchStage } from "../public/batch-status.js";
+import { isIncompleteBatchQa, isIncompleteBatchStage, segmentWorkflowComplete } from "../public/batch-status.js";
 import { translationRetryReason } from "./translation-output.mjs";
 import { microBatchSegments } from "./micro-batch.mjs";
 import { measureStage } from "./performance.mjs";
@@ -301,7 +301,7 @@ export async function runServerBatch(batchId, {
         // 小批初译已共享组内上下文，统一在本组最终译文保存后学习，供下一组使用。
         if (!retryIds && drafts.has(segment.id) && learnGroupTerms) {
           pendingTerms.push(segment);
-        } else if (!retryIds && learnTerms && (!result.stages || result.stages.localQa?.status === "completed")) {
+        } else if (!retryIds && learnTerms && segmentWorkflowComplete(result.stages)) {
           try {
             const learned = await withRuntimeCall({ performanceTrace: segment.result?.performance }, () => measureStage("workingTerms", () => learnTerms({ run, segment, translation: segment.translation })));
             applyLearned(learned, segment);
@@ -323,7 +323,7 @@ export async function runServerBatch(batchId, {
   }
 
   const failed = selected.filter((segment) => segment.status === "error").length;
-  const incomplete = selected.some(segment => segment.result?.stages && segment.result.stages.localQa?.status !== "completed");
+  const incomplete = selected.some(segment => !segmentWorkflowComplete(segment.result?.stages));
   run.runState = failed || incomplete ? "needs_attention" : retryIds && run.segments.some((segment) => segment.selected !== false && segment.status !== "done") ? "paused" : "completed";
   run.runnerOptions = { ...run.runnerOptions, translationCompletedAt: new Date().toISOString(), stageRetryOnly: Boolean(retryIds) };
   run.subBatches = checkpointSubBatches(subBatches, run.segments);
@@ -340,7 +340,7 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
   let run = await loadRun(batchId);
   if (!run) throw new Error("未找到批次任务");
   const ids = segmentIds ? new Set(segmentIds.map(String)) : null;
-  const incomplete = (segment) => stage ? isIncompleteBatchStage(segment, stage) : isIncompleteBatchQa(segment);
+  const incomplete = (segment) => stage ? isIncompleteBatchStage(segment, stage, Boolean(ids)) : isIncompleteBatchQa(segment);
   const targets = run.segments.filter((segment) => incomplete(segment) && !segment.accepted && !translationRetryReason(segment) && (!ids || ids.has(String(segment.id))));
   let completed = 0;
   let failed = 0;

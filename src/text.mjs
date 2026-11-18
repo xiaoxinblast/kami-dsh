@@ -69,16 +69,22 @@ export function detectRhymeLike(text = "") {
  * Bare numbers are now checked for numeric equivalence instead (see
  * digitsRecoverable), which tolerates reformatting but still catches real loss.
  */
-export function extractProtectedTokens(text = "") {
+export function extractProtectedTokens(text = "", { numericUnits = true } = {}) {
   const patterns = [
     /https?:\/\/[^\s)）\]】]+/gi,
     /\{\{[^{}]+\}\}|\{[^{}]+\}/g,
     /%\([^)]+\)[a-z]|%\d*\$?[a-z]/gi,
-    /<\/?[a-z][^>]*>/gi,
-    // 末尾不能再加 \b：单位后面通常是中日韩字符，边界不成立会让正则回退成裸数字。
-    /\d+(?:[.,:]\d+)*(?:%|％|元|円|₩|฿|USD|JPY|KRW|THB)/gi
+    /<\/?[a-z][^>]*>/gi
   ];
+  // 末尾不能再加 \b：单位后面通常是中日韩字符，边界不成立会让正则回退成裸数字。
+  if (numericUnits) patterns.push(/\d+(?:[.,:]\d+)*(?:%|％|元|円|₩|฿|USD|JPY|KRW|THB)/gi);
   return [...new Set(patterns.flatMap((pattern) => String(text).match(pattern) ?? []))];
+}
+
+export function withoutProtectedTokens(text) {
+  let value = String(text ?? "");
+  for (const token of extractProtectedTokens(value, { numericUnits: false })) value = value.replaceAll(token, " ");
+  return value;
 }
 
 /** Every digit of a text in reading order, separators and units dropped. */

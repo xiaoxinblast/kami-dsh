@@ -47,6 +47,12 @@ test("正式 TM 只认人工批准，机器通过稿不能充当生产或 QA 权
   }
 });
 
+test("校对稿仍能作为本批工作译例，但不充当 QA 权威", () => {
+  const memory = { source: "甲", target: "A", assetTier: "working", qualityStatus: "provisional", batchId: "b", provenance: "batch-working-tm" };
+  assert.equal(partitionTranslationMemories([memory], { batchId: "b" }, { purpose: MEMORY_PURPOSES.WORKING_CONSISTENCY }).working.length, 1);
+  assert.equal(partitionTranslationMemories([memory], { batchId: "b" }, { purpose: MEMORY_PURPOSES.QA_AUTHORITY }).references.length, 0);
+});
+
 test("机器 TM 仅在显式工作记忆模式和同批/受限短期上下文中可用", () => {
   const memories = [
     { id: "same-batch", source: "甲", target: "A", qualityStatus: "machine_verified", batchId: "b1", createdAt: "2026-08-01T00:00:00.000Z" },

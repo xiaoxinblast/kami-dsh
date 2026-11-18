@@ -252,7 +252,8 @@ export function partitionTranslationMemories(memories = [], context = {}, option
       formal.push(asset);
       continue;
     }
-    if (asset.qualityStatus === "machine_verified" && asset.assetTier === ASSET_TIERS.WORKING) {
+    const proofreadDraft = asset.qualityStatus === "provisional" && asset.provenance === "batch-working-tm";
+    if ((asset.qualityStatus === "machine_verified" || proofreadDraft) && asset.assetTier === ASSET_TIERS.WORKING) {
       if (purpose === MEMORY_PURPOSES.WORKING_CONSISTENCY && isWorkingMemoryAllowed(asset, context, options)) working.push(asset);
       else excluded.push({ asset, reasons: [purpose === MEMORY_PURPOSES.WORKING_CONSISTENCY ? "working_scope_mismatch" : "machine_not_authoritative"] });
       continue;

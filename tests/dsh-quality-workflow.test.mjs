@@ -6,13 +6,14 @@ import { join } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { saveBatchRun } from "../src/store.mjs";
 
-test("逐段翻译、模型校对润色、规则 QA，各阶段重试独立结束", async () => {
+test("初稿规则提示合入校对，手动 QA 只检查校对稿", async () => {
   const directory = await mkdtemp(join(tmpdir(), "kami-quality-flow-"));
   let calls = [], mode = "pass";
   const workbench = await createWorkbench({ dataDirectory: directory, modelAdapter: async (messages, options) => {
     calls.push({ label: options.requestLabel, text: JSON.stringify(messages) });
     if (options.requestLabel === "模型校对" && mode === "failure") throw new Error("proofreading unavailable probe");
     if (options.requestLabel === "模型校对" && mode === "empty") return { content: "" };
+    if (options.requestLabel === "模型校对" && messages.at(-1).content.includes("初稿规则提示") && messages.at(-1).content.includes("百分比缺失或发生变化")) return { content: "把 {value} 设为百分之十五。" };
     return { content: options.requestLabel === "翻译" ? "对设置进行保存。" : "保存设置。" };
   } });
   const context = { human: true };
@@ -30,9 +31,10 @@ test("逐段翻译、模型校对润色、规则 QA，各阶段重试独立结�
       assert.match(calls[1].text, /自然流畅的语言润色/);
       assert.equal(result.translation, "保存设置。");
       assert.equal(result.draft, "对设置进行保存。");
-      assert.equal(result.stages.localQa.status, "completed");
+      assert.equal(result.stages.localQa.status, "optional");
+      assert.doesNotMatch(calls[1].text, /初稿规则提示/);
       assert.equal(result.qaScore, null, "直接输出校对稿的阶段不能虚构评分");
-      assert.equal(result.qualityRoute.decision, "auto_pass");
+      assert.equal(result.qualityRoute.decision, "proofread_only");
     }
     for (mode of ["failure", "empty"]) {
       calls = [];
@@ -44,13 +46,22 @@ test("逐段翻译、模型校对润色、规则 QA，各阶段重试独立结�
       assert.equal(calls.length, 2, "不复检或重新翻译");
     }
     mode = "pass";
+    calls = [];
+    const flagged = await translate("standard", { source: "設定を15%にします。{value}" });
+    const hints = calls[1].text.split("初稿规则提示")[1];
+    assert.deepEqual(calls.map(call => call.label), ["翻译", "模型校对"]);
+    assert.equal(flagged.translation, "把 {value} 设为百分之十五。");
+    assert.match(hints, /百分比缺失或发生变化/);
+    assert.equal((hints.match(/\{value\}/g) || []).length, 1, "占位符只提示一次");
+    assert.equal(flagged.stages.draftQa.hintCount, 2);
+    assert.deepEqual(flagged.issues, [], "初稿问题不冒充对校对稿的检查");
     let current;
     for (const workflowStage of ["translation", "proofreading", "localQa"]) {
       calls = [];
       current = await translate("standard", { workflowStage, translation: current?.translation, stages: current?.stages });
       assert.deepEqual(calls.map(call => call.label), workflowStage === "translation" ? ["翻译"] : workflowStage === "proofreading" ? ["模型校对"] : []);
       assert.equal(current.stages[workflowStage].status, "completed");
-      if (workflowStage !== "localQa") assert.equal(current.stages.localQa.status, "pending");
+      if (workflowStage !== "localQa") assert.equal(current.stages.localQa.status, workflowStage === "translation" ? "pending" : "optional");
     }
   } finally { await workbench.close(); await rm(directory, { recursive: true, force: true }); }
 });
@@ -82,11 +93,14 @@ test("批次校对和本地 QA 重试只补对应阶段，保持其他段及历�
     let latest = await settled();
     assert.deepEqual(calls, ["模型校对"]);
     assert.equal(latest.segments[0].translation, "保存设置。");
-    assert.equal(latest.segments[0].result.stages.localQa.status, "pending");
+    assert.equal(latest.segments[0].result.stages.localQa.status, "optional");
+    assert.equal(latest.workflow.summary.qaIncomplete, 0);
     assert.equal(latest.workflow.qualityReport.status, "not_started");
     assert.equal(latest.workflow.termSurvey.status, "not_started");
     calls.length = 0;
-    await workbench.invoke({ path: `${path}/retry-qa`, method: "POST", body: { projectId: project.id } }, context);
+    const noRetry = await workbench.invoke({ path: `${path}/retry-qa`, method: "POST", body: { projectId: project.id } }, context);
+    assert.equal(noRetry.total, 0);
+    await workbench.invoke({ path: `${path}/retry-qa`, method: "POST", body: { projectId: project.id, segmentIds: ["one"] } }, context);
     latest = await settled();
     assert.deepEqual(calls, [], "本地 QA 重试不调用任何模型");
     assert.equal(latest.segments[0].result.stages.localQa.status, "completed");

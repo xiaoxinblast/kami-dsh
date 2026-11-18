@@ -7408,7 +7408,7 @@ async function apiHandler(req, res, url) {
     if (["queued", "running"].includes(run.runState) || batchTranslationStarts.has(batchId) || contextAnalysisTasks.has(batchId)) return json(res, 409, { error: "翻译或语境分析仍在进行，请结束后仅重试未完成的 AIQA" });
     if (Object.hasOwn(body, "segmentIds") && (!Array.isArray(body.segmentIds) || !body.segmentIds.length)) return json(res, 400, { error: "请选择要重试 QA 的句段" });
     const segmentIds = Array.isArray(body.segmentIds) ? body.segmentIds.map(String) : null;
-    const count = run.segments.filter((segment) => (stage ? isIncompleteBatchStage(segment, stage) : isIncompleteBatchQa(segment)) && !segment.accepted && !translationRetryReason(segment) && (!segmentIds || segmentIds.includes(String(segment.id)))).length;
+    const count = run.segments.filter((segment) => (stage ? isIncompleteBatchStage(segment, stage, Boolean(segmentIds)) : isIncompleteBatchQa(segment)) && !segment.accepted && !translationRetryReason(segment) && (!segmentIds || segmentIds.includes(String(segment.id)))).length;
     if (!count) return json(res, 200, { batchId, total: 0, message: `没有待执行的${label}` });
     const worker = batchWorkers.get(batchId);
     const waiting = Boolean(worker && (!worker.translationComplete || worker.followupActive)) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId);
@@ -8702,8 +8702,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
     }
     try {
       const routedPassScore = Math.max(passScore, qualityThresholdForRisk(risk.tier));
-      const deterministicIssues = (translation) => [
-        ...runQa({ source: body.source, translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
+      const deterministicIssues = (translation, phase) => [
+        ...runQa({ source: body.source, translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings, draftCheck: phase === "draftQa" }),
         ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation, locale }), projectSettings || undefined)
       ];
       const stage = body.workflowStage || "all";
@@ -8719,28 +8719,30 @@ async function evaluateQaBatch(batchId, projectId = "") {
           routePlan: { ...routing, route: "direct", candidateCount: 1, reflect: false },
           reflect: false, singlePass: true, toolRunner: referenceToolRunner, referenceSession
         })),
-        proofread: (translation) => measureStage("proofreading", () => proofreadTranslationWithModel({ contextPack, translation, referenceSession, model: routing.model, modelRole: routing.modelRole })),
-        check: (translation) => measureStage("localQa", () => deterministicIssues(translation))
+        proofread: (translation, hints) => measureStage("proofreading", () => proofreadTranslationWithModel({ contextPack, translation, hints, referenceSession, model: routing.model, modelRole: routing.modelRole })),
+        check: (translation, phase) => measureStage(phase, () => deterministicIssues(translation, phase))
       });
       const result = workflow.generated || { initial: workflow.draft, translation: workflow.translation };
       const failure = Object.values(workflow.stages).find(value => value.status === "failed");
       const checked = workflow.stages.localQa?.status === "completed";
+      const proofread = workflow.stages.proofreading?.status === "completed";
       const aiQa = {
         translation: workflow.translation, issues: workflow.issues, score: null,
-        status: checked ? "proofread" : "not_run", iterations: 0,
-        used: workflow.stages.proofreading?.status === "completed", fallbackReason: failure?.error || "",
+        status: checked ? "proofread" : proofread ? "proofread_only" : "not_run", iterations: 0,
+        used: proofread, fallbackReason: failure?.error || "",
         references: [], qaCases: []
       };
       const qualityRoute = {
-        decision: checked && !workflow.issues.some(issue => ["error", "critical"].includes(issue.severity)) ? "auto_pass" : "human_review",
+        decision: checked && !workflow.issues.some(issue => ["error", "critical"].includes(issue.severity)) ? "auto_pass"
+          : proofread && !checked && !failure ? "proofread_only" : "human_review",
         threshold: routedPassScore,
-        reason: failure ? `阶段未完成：${failure.error}` : checked ? "模型校对已完成，已执行本地规则检查" : "本阶段已结束，后续阶段待单独执行"
+        reason: failure ? `阶段未完成：${failure.error}` : checked ? "已手动检查校对稿" : proofread ? "已根据初稿提示完成校对" : "初译已结束，等待校对"
       };
       const suggestionCandidates = buildSuggestionCandidates(aiQa.translation, matches);
       const alignment = { requested: false, used: false, fallbackReason: "" };
       const modelSuggestions = [];
       const termSuggestions = resolveTermSuggestions(aiQa.translation, suggestionCandidates, modelSuggestions);
-      if (stage === "all" && checked && projectId && aiQa.translation && !(aiQa.issues || []).some((issue) => ["error", "critical"].includes(issue.severity))) {
+      if (stage === "all" && proofread && projectId && aiQa.translation) {
         const workingLibrary = projectLibraries.find((library) => library.role === "working" && library.enabled);
         if (workingLibrary) {
           try {
@@ -8749,7 +8751,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
               target: aiQa.translation,
               domain,
               contentType: classification.contentType,
-              qualityStatus: "machine_verified",
+              qualityStatus: "provisional",
               assetTier: "working",
               project: projectId,
               projectId,
@@ -8778,7 +8780,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
             finalTranslation: aiQa.translation,
             termDecisions: aiQa.termDecisions || [],
             qaBefore: { score: null, status: "not_run", issues: [] },
-            qaAfter: { ...trajectoryMetricsFromIssues(aiQa.issues, aiQa.score, matches), issues: aiQa.issues, iterations: aiQa.iterations },
+            qaAfter: checked ? { ...trajectoryMetricsFromIssues(aiQa.issues, aiQa.score, matches), issues: aiQa.issues, iterations: aiQa.iterations }
+              : { status: "not_run", score: null, issues: [] },
             referenceUsage: { refs: referenceToolRunner?.refs?.() || [], events: referenceUsages },
             events: [
               { type: "started", at: trajectory.createdAt },

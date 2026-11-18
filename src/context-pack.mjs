@@ -1,6 +1,7 @@
 import { CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { punctuationGuidance } from "./orthography.mjs";
 import { detectRhymeLike, extractProtectedTokens, normalizeSource } from "./text.mjs";
+import { chineseQaLocale } from "./chinese-numbers.mjs";
 import { normalizeBatchReferences } from "./batch-verse.mjs";
 import { contentTypeDirective, registerPolicyFor } from "./register-classifier.mjs";
 
@@ -145,7 +146,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
           ? `原文精确命中，但仍须结合当前句义判断是否采用登记译法，不得仅凭字符串强制替换。${term.note || ""}`
           : `疑似术语，仅供参考，不得未经判断强制替换。${term.note || ""}`)
     })),
-    protectedTokens: extractProtectedTokens(source),
+    protectedTokens: extractProtectedTokens(source, { numericUnits: !chineseQaLocale(locale) }),
     factSchema: factSchema ? {
       version: String(factSchema.version || "1.0"),
       facts: Array.isArray(factSchema.facts) ? factSchema.facts.slice(0, 80) : [],

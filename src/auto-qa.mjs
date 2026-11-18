@@ -1,6 +1,8 @@
 import { runQa } from "./qa.mjs";
 import { normalizeSource } from "./text.mjs";
 import { applyProjectQaPolicy } from "./project-config.mjs";
+import { chineseQaLocale } from "./chinese-numbers.mjs";
+import { runFactQa } from "./fact-schema.mjs";
 
 export const AUTO_QA_DIMENSIONS = Object.freeze(["basic", "fidelity", "nuance"]);
 
@@ -302,7 +304,8 @@ function escapeRegExp(value) {
  * 返回的每条 issue 都带 dimension: "basic"。
  */
 export function runBasicQa({ source, translation, matches = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null }) {
-  const issues = runQa({ source, translation, matches, locale, titleOverrides, contentType, registerPolicy, projectSettings }).map((issue) => ({
+  const issues = [...runQa({ source, translation, matches, locale, titleOverrides, contentType, registerPolicy, projectSettings }),
+    ...(chineseQaLocale(locale) ? applyProjectQaPolicy(runFactQa({ source, translation, locale }).issues.filter(issue => issue.category === "number"), projectSettings || undefined) : [])].map((issue) => ({
     ...issue,
     dimension: "basic",
     category: issue.category || "basic"

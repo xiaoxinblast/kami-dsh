@@ -54,12 +54,14 @@ window.__ModuleLoader__.load({
     }
     function qaLabel(segment) {
       if (segment.accepted && segment.result?.humanReview?.source === "external-review-import") return "memoQ 人工终稿";
-      if (segment.result?.stages) {
-        const stages = segment.result.stages;
-        return stages.proofreading?.status !== "completed" ? "校对未完成" : stages.localQa?.status !== "completed" ? "待本地 QA" : "校对完成 · 规则检查";
-      }
       const qa = segment.result?.aiQa || {};
       if (qa.fallbackReason) return "QA 未完成";
+      if (qa.status === "completed" && qa.used && Number.isFinite(qa.score)) return `模型 QA · ${qa.score}`;
+      if (segment.result?.stages) {
+        const stages = segment.result.stages;
+        if (stages.localQa?.status === "optional") return "校对完成 · 可手动 QA";
+        return stages.proofreading?.status !== "completed" ? "校对未完成" : stages.localQa?.status !== "completed" ? "待本地 QA" : "校对完成 · 规则检查";
+      }
       if (qa.status === "deterministic_only") return "规则检查";
       const score = qa.score ?? segment.result?.qaScore;
       return qa.used && Number.isFinite(score) ? `模型 QA · ${score}` : "尚未执行 QA";
@@ -67,7 +69,8 @@ window.__ModuleLoader__.load({
     function qaSummary(run, pending = false) {
       const translated = (run.segments || []).filter((segment) => segment.selected !== false && segment.status === "done" && segment.translation?.trim());
       const labels = translated.map(qaLabel), model = labels.filter((label) => label.startsWith("模型 QA · ")).length, rules = labels.filter((label) => label === "规则检查" || label === "校对完成 · 规则检查").length, human = labels.filter((label) => label === "memoQ 人工终稿").length;
-      const incomplete = translated.length - model - rules - human, busy = pending || ["in_progress", "waiting"].includes(run.workflow?.aiQa?.status);
+      const proofread = labels.filter(label => label === "校对完成 · 可手动 QA").length;
+      const incomplete = translated.length - model - rules - human - proofread, busy = pending || ["in_progress", "waiting"].includes(run.workflow?.aiQa?.status);
       const label = busy ? pending || run.workflow.aiQa.status === "in_progress" ? "正在处理" : "等待中"
         : labels.includes("QA 未完成") || (incomplete > 0 && model + rules > 0) ? "QA 未完成"
         : human > 0 && human === translated.length ? "memoQ 人工终稿" : rules > 0 && rules === translated.length ? "规则检查" : translated.length && !incomplete ? "已完成" : "尚未执行 QA";
@@ -395,6 +398,7 @@ window.__ModuleLoader__.load({
       "当前任务": "Current task", "选择翻译批次": "Select a batch", "暂无翻译批次": "No translation batches", "从工作区开始": "Start with your workspace", "指定原文、关联资源，然后开始第一批翻译。": "Choose a source file and resources to start your first batch.",
       "正在处理": "In progress", "已暂停": "Paused", "待开始": "Ready", "需要处理": "Needs attention", "处理中": "Working", "翻译进度": "Translation progress", "问题": "issues", "失败": "failed", "未译": "pending",
       "翻译": "Translation", "质量检查": "QA", "一致性": "Consistency", "术语普查": "Term survey", "未开始": "Not started", "等待中": "Waiting", "已关闭": "Disabled", "等待条件": "Blocked",
+      "初稿 QA": "Draft QA", "筛出明确问题，交给校对": "Flag concrete issues for proofreading", "结合初稿提示校对并保存译文": "Proofread with draft findings and save", "手动检查此句 QA": "Run QA on this segment", "校对完成 · 可手动 QA": "Proofread · QA available", "校对稿可按需手动检查": "Run QA on the proofread text when needed",
       "开始翻译": "Start translation", "继续翻译": "Resume translation", "等待当前阶段结束": "Wait for the current stage", "批次需要先完成语境分析，请在主会话中推进。": "Complete the context brief in the conversation before starting this batch.",
       "已冻结的任务资源": "Frozen task resources", "任务启动后保持此版本；资源页预览的是工作区最新版。": "This task keeps its snapshot. Resource previews show the current workspace file.", "旧版任务 · 沿用原有资源": "Legacy task · original resources", "创建时间": "Created", "原文文件": "Source file",
       "译文复核": "Review translations", "全部译段": "All segments", "仅看问题": "Issues only", "尚未翻译": "Untranslated", "定位问题译段": "Find an issue", "此筛选下没有译段": "No matching segments", "待重新检查": "QA needs rerun",
@@ -604,26 +608,31 @@ window.__ModuleLoader__.load({
     function WorkflowGraph({ run, t, review, reports, children }) {
       const selected = run.segments.filter(item => item.selected !== false), total = selected.length;
       const translated = selected.filter(item => item.status === "done" && item.translation?.trim()), legacy = translated.filter(item => !item.result?.stages).length;
-      const completed = [translated.length,
-        translated.filter(item => item.result?.stages?.proofreading?.status === "completed").length,
-        translated.filter(item => item.result?.stages?.localQa?.status === "completed").length];
-      const rows = [["translation", "翻译", "理解原文，生成初稿"], ["proofreading", "校对润色", "核对准确性，让中文自然流畅"], ["aiQa", "本地 QA", "检查术语、数字与格式"],
+      const draftFirst = !translated.length || translated.some(item => item.result?.stages?.draftQa);
+      const proofread = ["proofreading", "校对润色", draftFirst ? "结合初稿提示校对并保存译文" : "核对准确性，让中文自然流畅"];
+      const qa = draftFirst ? ["draftQa", "初稿 QA", "筛出明确问题，交给校对"] : ["aiQa", "本地 QA", "检查术语、数字与格式"];
+      const phaseKeys = draftFirst ? ["draftQa", "proofreading"] : ["proofreading", "localQa"];
+      const completed = [translated.length, ...phaseKeys.map(key =>
+        translated.filter(item => item.result?.stages?.[key]?.status === "completed").length)];
+      const rows = [["translation", "翻译", "理解原文，生成初稿"], ...(draftFirst ? [qa, proofread] : [proofread, qa]),
         ["qualityReport", "一致性校对", "统一全批用词与表达"], ["termSurvey", "术语普查", "核对本批术语与参考译法"]];
       const card = ([key, label, hint], index) => {
         const stage = run.workflow?.[key] || {};
+        const legacyCount = key === "draftQa" ? translated.filter(item => !item.result?.stages?.draftQa).length : legacy;
         let status = stage.status || "not_started";
+        if (key === "draftQa") status = translated.some(item => item.result?.stages?.draftQa?.status === "failed") ? "needs_attention" : completed[index] ? "completed" : "not_started";
         if (index > 0 && index < 3 && ["completed", "not_started"].includes(status)) {
-          if (legacy && !completed[index]) status = "legacy";
+          if (legacyCount && !completed[index]) status = "legacy";
           else if (status === "completed" && completed[index] < total) status = "partial";
         }
         const needsAttention = status === "needs_attention" || key === "proofreading" && selected.some(proofreadRetryable);
         return h("button", { type: "button", className: "flow-node", key, "data-status": needsAttention ? "needs_attention" : status,
-          onClick: index < 2 ? review : () => reports(key), "aria-label": t(`查看${label}详情`), title: stage.message || t(hint) },
+          onClick: ["translation", "draftQa", "proofreading"].includes(key) ? review : () => reports(key), "aria-label": t(`查看${label}详情`), title: stage.message || t(hint) },
           h("span", { className: "flow-node-top" }, h("span", { className: "flow-number", "aria-hidden": true }, status === "completed" ? "✓" : needsAttention ? "!" : String(index + 2).padStart(2, "0")),
             h("span", { className: "flow-status" }, needsAttention ? stateText("needs_attention", t) : status === "legacy" ? t("旧版记录") : status === "partial" ? t("部分完成") : stateText(status, t))),
           h("strong", null, t(label)), h("span", { className: "flow-hint" }, t(hint)),
           index < 3 && h("span", { className: "flow-count" }, h("b", null, completed[index]), ` / ${total} ${t("段")}`),
-          index > 0 && index < 3 && legacy > 0 && h("span", { className: "flow-legacy" }, `${legacy} ${t("段旧版译文未记录此阶段")}`));
+          index > 0 && index < 3 && legacyCount > 0 && h("span", { className: "flow-legacy" }, `${legacyCount} ${t("段旧版译文未记录此阶段")}`));
       };
       return h("section", { className: "workflow-graph", "aria-label": t("翻译流程") },
         children, h("div", { className: "flow-bridge" }, h("span", { "aria-hidden": true }, "↓"), t("带入全文语境")),
@@ -639,7 +648,7 @@ window.__ModuleLoader__.load({
       const failed = selected.filter((segment) => ["error", "failed"].includes(segment.status)).length, problems = selected.reduce((count, segment) => count + issuesOf(segment).length, 0);
       const locked = editingLocked(run), pending = model.dirty(), id = run.batchId;
       const translated = selected.filter((segment) => segment.status === "done" && segment.translation?.trim());
-      const qaFailed = translated.some(qaRetryable), proofreadFailed = translated.some(proofreadRetryable);
+      const qaFailed = translated.some(item => item.result?.stages?.localQa?.status !== "optional" && qaRetryable(item)), proofreadFailed = translated.some(proofreadRetryable);
       const retryFailed = selected.filter((segment) => segment.retryTranslationReason && !segment.accepted).length;
       const brief = run.contextBrief, briefBusy = run.contextBriefPending || model.view.operations[`context-brief:${id}`]?.pending;
       const briefFailed = brief?.status === "failed" || Boolean(brief?.warning) || (brief?.coverage && brief.coverage.covered < brief.coverage.total);
@@ -682,7 +691,7 @@ window.__ModuleLoader__.load({
       return h("section", { className: "card qa-report" }, h("div", { className: "section-heading" }, h("h3", null, t(label)), h("div", { className: "score-summary" }, h("span", { className: "score" }, reportScore(report) ?? "—"), h("span", { className: "muted" }, t("QA 分数")))),
         report.fallbackReason && h("p", { className: "error", role: "alert" }, report.fallbackReason), reportScore(report) == null && h("p", { className: "muted" }, t("报告没有评分")),
         report.sourceKind === "batch" && h("p", { className: "muted" }, t("规则检查"), " · ", (report.segments || []).filter((segment) => segment.aiQaStatus === "deterministic_only").length, " / ", report.segmentCount || 0),
-        reportScore(report) == null && h("p", { className: "muted" }, t("检查未完成，不表示通过")),
+        reportScore(report) == null && h("p", { className: "muted" }, t((report.segments || []).some(item => item.aiQaStatus === "proofread_only") && !report.fallbackReason ? "校对稿可按需手动检查" : "检查未完成，不表示通过")),
         ...(report.segments || []).filter((segment) => segment.issues?.length || segment.fallbackReason || segment.aiQaFallbackReason).map((segment, index) => h("article", { className: "resource-row", key: segment.id || index }, h("strong", null, `#${segment.index || index + 1}`), h("div", { className: "pairs report-pair" }, h("div", null, h("span", { className: "muted" }, t("原文")), h("p", { className: "source-text" }, segment.source)), h("div", null, h("span", { className: "muted" }, t("译文")), h("p", { className: "source-text" }, segment.translation))), (segment.fallbackReason || segment.aiQaFallbackReason) && h("p", { className: "error" }, segment.fallbackReason || segment.aiQaFallbackReason),
           h("ul", { className: "issues" }, ...(segment.issues || []).map((issue, issueIndex) => h("li", { key: issueIndex }, h("p", null, issue.message || issue.description || ""), issue.suggestion && h("p", null, issue.suggestion)))), review && h(Button, { small: true, onClick: () => review(segment.id) }, t("查看译段")))),
         h("ul", { className: "issues" }, ...(report.alignmentIssues || []).map((issue, index) => h("li", { key: index }, issue.message || ""))), !issues.length && h("p", { className: "muted" }, t("暂无已记录问题")));
@@ -734,7 +743,7 @@ window.__ModuleLoader__.load({
       const checkedIds = checked.filter((id) => run.segments.some((item) => item.id === id && canRetry(item)));
       const checkedQa = run.segments.filter((item) => checkedIds.includes(item.id) && qaRetryable(item)).map((item) => item.id);
       const failedCount = run.segments.filter((item) => canRetry(item) && item.retryTranslationReason).length;
-      const qaCount = run.segments.filter(qaRetryable).length;
+      const qaCount = run.segments.filter(item => item.result?.stages?.localQa?.status !== "optional" && qaRetryable(item)).length;
       const checkedProofread = run.segments.filter(item => checkedIds.includes(item.id) && proofreadRetryable(item)).map(item => item.id);
       const proofreadCount = run.segments.filter(proofreadRetryable).length;
       const retry = async (verb, ids) => { const result = await model.retry(verb, ids); if (result.ok) setChecked([]); };
@@ -782,7 +791,7 @@ window.__ModuleLoader__.load({
             h("div", { className: "button-row" }, h(Button, { primary: true, small: true, onClick: () => model.save(), disabled: !model.dirty() || locked, busy: model.view.operations.save?.pending }, t("保存修改")),
               h(Button, { small: true, onClick: () => retry("retry-translation", [segment.id]), disabled: locked || model.dirty() || !canRetry(segment) }, t("重试此句翻译")),
               proofreadRetryable(segment) && h(Button, { small: true, onClick: () => retry("retry-proofreading", [segment.id]), disabled: locked || model.dirty() }, t("仅重试此句校对")),
-              qaRetryable(segment) && h(Button, { small: true, onClick: () => retry("retry-qa", [segment.id]), disabled: locked || model.dirty() }, t("仅重试此句 QA"))), h(Feedback, { model, name: "save", t }))),
+              qaRetryable(segment) && h(Button, { small: true, onClick: () => retry("retry-qa", [segment.id]), disabled: locked || model.dirty() }, t(segment.result?.stages?.localQa?.status === "optional" ? "手动检查此句 QA" : "仅重试此句 QA"))), h(Feedback, { model, name: "save", t }))),
         !page.total && h(Empty, { title: "此筛选下没有译段", t }));
     }
     function ExportPanel({ model, run, t, onFinal }) {
