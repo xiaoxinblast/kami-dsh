@@ -65,6 +65,7 @@ test("小批初译仍逐段 QA 和保存，合并术语供下一组使用", asyn
   run.segments = Array.from({ length: 8 }, (_, i) => ({ id: `s${i}`, source: `原文${i}`, status: "pending" }));
   const groups = [], singles = [], learned = [], snapshots = [];
   await runServerBatch(run.batchId, {
+    grouping: { maxSegments: 4, maxChars: 800 },
     loadRun: async () => run, saveRun: async value => snapshots.push(structuredClone(value)),
     loadProject: async () => ({ settings: {} }), classifyDocument: async () => "dialogue",
     translateGroup: async requests => {

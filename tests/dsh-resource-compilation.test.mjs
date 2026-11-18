@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { createWorkspaceReferenceTools } from "../dsh/reference-tools.mjs";
-import { createResourceLibraryCompiler } from "../src/resource-library-compilation.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
 
 async function fixture(run) {
@@ -51,11 +50,11 @@ test("linking requests agent compilation and accepts native compilation files wi
   assert.equal(pending.compilation.status, "pending");
   const terms = await compile("terms.custom", "terms", { terms: [{ ja: "星の剣", zh: "星刃_术语探针", note: "装备名称_备注探针" }] });
   const tm = await compile("tm.custom", "tm", { entries: [{ source: "星の剣を装備します。", target: "TM_句对探针。", context: "装备界面", file: "历史工作表" }] });
-  const guide = await workbench.importFile({ path: "style.custom", purpose: "style-guide" }, context);
+  const guide = await compile("style.custom", "style-guide", { format: "kami-guide-v1", complete: true, style_guide: originals["style.custom"] });
   assert.equal(terms.compilation.status, "ready");
   assert.equal(terms.compilation.itemCount, 1);
   assert.equal(tm.compilation.itemCount, 1);
-  assert.equal(guide.compilation, undefined);
+  assert.equal(guide.compilation.status, "ready");
   await writeFile(join(cwd, "source.txt"), "星の剣を装備します。");
   const prepared = await workbench.importFile({ path: "source.txt" }, context);
   const snapshot = (await workbench.store.request(`/items/batch_runs/${prepared.batchId}`)).runner_options.workspaceSnapshot;
@@ -63,8 +62,8 @@ test("linking requests agent compilation and accepts native compilation files wi
   assert.equal(snapshot.terms[0].note, "装备名称_备注探针");
   assert.equal(snapshot.memories[0].target, "TM_句对探针。");
   assert.equal(snapshot.memories[0].context, "装备界面");
-  assert.equal(snapshot.guide, null);
-  assert.equal(snapshot.resources.find((resource) => resource.purpose === "style-guide").reader, "agent-native");
+  assert.match(snapshot.guide.instruction, /风格末尾探针_8137/);
+  assert.equal(snapshot.resources.find((resource) => resource.purpose === "style-guide").reader, "compiled");
   assert.ok(snapshot.resources.filter((resource) => resource.purpose !== "style-guide").every((resource) => resource.reader === "agent"));
   for (const kind of ["term", "tm"]) assert.equal((await workbench.invoke({ path: `/api/library-entries?projectId=${state.project.id}&locale=zh-CN&kind=${kind}` }, context)).total, 0);
   await workbench.invoke({ path: "/api/translate", method: "POST", body: { batchId: prepared.batchId, projectId: state.project.id, locale: "zh-CN", source: "星の剣を装備します。", qualityTier: "fast", reflect: false } }, context);
@@ -124,29 +123,30 @@ test("bulk configuration reports compilation work without requiring fixed input 
   await writeFile(join(cwd, "terms.custom"), "不固定排版的术语资料");
   await writeFile(join(cwd, "guide.custom"), "不固定排版的风格指南");
   const state = await workbench.workspace({ action: "configure", resources: { terms: ["terms.custom"], styleGuides: ["guide.custom"] } }, context);
-  assert.equal(state.compilations.length, 1);
-  assert.equal(state.compilations[0].purpose, "terms");
+  assert.equal(state.compilations.length, 2);
+  assert.deepEqual(state.compilations.map(item => item.purpose).sort(), ["style-guide", "terms"]);
   assert.ok(state.compilations.every((item) => item.compilation.status === "pending"));
   const next = await workbench.workspace({ action: "configure", resources: { styleGuides: ["guide.custom"] } }, context);
-  assert.deepEqual(next.compilations, []);
+  assert.equal(next.compilations[0].compilation.status, "pending");
 }));
 
 test("existing compiled guide caches are ignored when linking originals and creating new batches", async () => fixture(async ({ cwd, dataDirectory, workbench, context, state }) => {
   await writeFile(join(cwd, "guide.custom"), "原件中的当前指南");
   await writeFile(join(cwd, "source.txt"), "設定を開きます。");
-  const compiler = createResourceLibraryCompiler(dataDirectory);
   const group = { workspace: state.workspace, projectId: state.project.id, purpose: "style-guide", libraryId: "" };
-  await compiler.update(group, [{ source: { path: "guide.custom", hash: createHash("sha256").update("原件中的当前指南").digest("hex") }, parsed: { text: "旧编译正文不得使用" } }]);
-  const before = await readFile(compiler.path(group), "utf8");
+  const oldPath = join(dataDirectory, "runtime", "compiled-resources", createHash("sha256").update(JSON.stringify([state.workspace, state.project.id, "style-guide", ""])).digest("hex") + ".json");
+  await mkdir(join(dataDirectory, "runtime", "compiled-resources"), { recursive: true });
+  await writeFile(oldPath, JSON.stringify({ version: 2, ...group, sources: [{ path: "guide.custom", hash: createHash("sha256").update("原件中的当前指南").digest("hex") }], guides: [{ text: "旧编译正文不得使用", origins: [{ path: "guide.custom" }] }] }));
+  const before = await readFile(oldPath, "utf8");
   const linked = await workbench.importFile({ path: "guide.custom", purpose: "style-guide" }, context);
-  assert.equal(linked.compilation, undefined);
-  await assert.rejects(workbench.workspace({ action: "compilations", selection: [{ path: "guide.custom", purpose: "style-guide" }] }, context), /直接查阅原件/);
+  assert.equal(linked.compilation.status, "pending");
+  assert.equal((await workbench.workspace({ action: "compilations", selection: [{ path: "guide.custom", purpose: "style-guide" }] }, context)).groups[0].files[0].status, "pending");
   const prepared = await workbench.importFile({ path: "source.txt" }, context);
   const snapshot = (await workbench.store.request(`/items/batch_runs/${prepared.batchId}`)).runner_options.workspaceSnapshot;
   assert.equal(snapshot.guide, null);
   assert.doesNotMatch(JSON.stringify(snapshot), /旧编译正文|原件中的当前指南/);
   assert.equal(snapshot.resources[0].reader, "agent-native");
-  assert.equal(await readFile(compiler.path(group), "utf8"), before, "old caches remain untouched for history");
+  assert.equal(await readFile(oldPath, "utf8"), before, "old caches remain untouched for history");
 }));
 
 test("multi-file updates share one library file and snapshots merge only current source contributions", async () => fixture(async ({ cwd, dataDirectory, workbench, context }) => {

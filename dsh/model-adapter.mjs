@@ -1,5 +1,5 @@
 import { getSettings } from "../src/settings-store.mjs";
-import { measureStage } from "../src/performance.mjs";
+import { measureStage, tokenCounts } from "../src/performance.mjs";
 
 export function sessionModelRoute(ctx, agent) {
   const selected = agent?.model?.current?.();
@@ -30,7 +30,7 @@ export function createModelAdapter(ctx, llm) {
       if (message.role === "system") return llm.createSystemMessage(String(message.content || ""));
       if (message.role === "tool") return llm.createToolResultMessage({ callId: message.tool_call_id, content: message.nativeContent || await blocks(message.content), ...(message.nativeIsError ? { isError: true } : {}) });
       if (message.role === "assistant") return llm.createAssistantMessage({ content: [...await blocks(message.content), ...(message.tool_calls || []).map((call) => ({ type: "tool-call", id: call.id, name: call.function.name, arguments: call.function.arguments || "{}" }))], source: route });
-      return { role: "user", content: await blocks(message.content) };
+      return { role: "user", content: message.nativeContent || await blocks(message.content) };
     }));
     const tools = (options.tools || []).map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters }));
     if (options.seed !== undefined) options.onSeedUnsupported?.("DSH 模型接口未提供固定 seed，本次评测不声明确定性采样");
@@ -45,9 +45,20 @@ export function createModelAdapter(ctx, llm) {
       if (truncated && !(maxTokens > truncated.details.maxTokens)) break;
       const assembler = new llm.BlockAssembler();
       try {
-        await measureStage("model", async () => {
-          for await (const chunk of prepared.stream({ ...prepared.config, messages: converted, ...(tools.length ? { tools } : {}), signal })) assembler.push(chunk);
-          signal.throwIfAborted();
+        await measureStage("model", async event => {
+          try {
+            for await (const chunk of prepared.stream({ ...prepared.config, messages: converted, ...(tools.length ? { tools } : {}), signal })) assembler.push(chunk);
+            signal.throwIfAborted();
+          } finally {
+            if (event) {
+              const u = assembler.usage;
+              const input = u?.totalTokens != null && u.outputTokens != null ? u.totalTokens - u.outputTokens
+                : u?.inputTokens != null ? u.inputTokens + (u.cacheReadTokens || 0) + (u.cacheWriteTokens || 0) : null;
+              event.usage = tokenCounts(input, u?.outputTokens, u?.cacheReadTokens,
+                u?.cacheReadTokens != null && input != null ? input - u.cacheReadTokens : null);
+              if (["max-tokens", "error", "aborted"].includes(assembler.finish?.kind)) event.status = "failed";
+            }
+          }
         }, { requestLabel: label, provider: prepared.config.provider, model: prepared.config.model, reasoningEffort: prepared.config.reasoningEffort, maxTokens, attempt: attempt + 1 });
       } catch (error) {
         if (signal.aborted) throw new Error(`${label}${options.signal?.aborted ? "已取消" : `超过 ${Math.round((options.timeoutMs || 120_000) / 1000)} 秒，调用超时`}（${prepared.config.model}，输出上限 ${maxTokens ?? "提供商默认"}）`, { cause: error });
@@ -56,7 +67,8 @@ export function createModelAdapter(ctx, llm) {
       if (assembler.usage) {
         usage ??= {};
         for (const [key, value] of Object.entries(assembler.usage)) if (typeof value === "number") usage[key] = (usage[key] || 0) + value;
-        usage.promptTokens = usage.inputTokens ?? usage.promptTokens;
+        usage.promptTokens = usage.totalTokens != null && usage.outputTokens != null ? usage.totalTokens - usage.outputTokens
+          : usage.inputTokens + (usage.cacheReadTokens || 0) + (usage.cacheWriteTokens || 0);
         usage.completionTokens = usage.outputTokens ?? usage.completionTokens;
       }
       if (assembler.finish.kind === "max-tokens") {

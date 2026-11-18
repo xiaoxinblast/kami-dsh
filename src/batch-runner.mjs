@@ -8,7 +8,7 @@ import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
 import { isIncompleteBatchQa, isIncompleteBatchStage, segmentWorkflowComplete } from "../public/batch-status.js";
 import { translationRetryReason } from "./translation-output.mjs";
 import { microBatchSegments } from "./micro-batch.mjs";
-import { measureStage } from "./performance.mjs";
+import { includePriorModelCalls, measureStage, summarizeModelUsage } from "./performance.mjs";
 import { withRuntimeCall } from "./runtime-context.mjs";
 
 /** 连接层失败自动重试一次：等 2 秒再试，内容层错误不重试。 */
@@ -107,6 +107,7 @@ export async function runServerBatch(batchId, {
   classifyDocument,
   translateSegment,
   translateGroup = null,
+  grouping,
   segmentIds = null,
   loadTermSources = async () => [],
   loadWorkingGlossary = null,
@@ -261,9 +262,10 @@ export async function runServerBatch(batchId, {
         }
       }
       let groupFallback = null;
+      let previousPerformance = segment.result?.performance;
       try {
-        if (translateGroup && !attemptedGroups.has(segment.id)) {
-          const candidates = microBatchSegments(run.segments, position, (_, index) => purposeForIndex(brief, index, contentType || "general"));
+        if (!retryIds && translateGroup && !attemptedGroups.has(segment.id)) {
+          const candidates = microBatchSegments(run.segments, position, (_, index) => purposeForIndex(brief, index, contentType || "general"), grouping);
           const stop = candidates.findIndex(item => !subBatch.segmentIds.includes(item.id) || (retryIds && !retryIds.has(String(item.id))) || attemptedGroups.has(item.id));
           const group = stop < 0 ? candidates : candidates.slice(0, stop);
           if (group.length > 1) {
@@ -271,10 +273,12 @@ export async function runServerBatch(batchId, {
             const groupStarted = Date.now();
             try {
               const generated = await translateGroup(group.map(item => inputFor(item).body));
-              if (generated?.length === group.length && group.every(item => generated.some(draft => draft.id === item.id && draft.source === item.source))) {
+              if (generated?.length && generated.every(draft => group.some(item => draft.id === item.id && draft.source === item.source))) {
                 generated.forEach(draft => drafts.set(draft.id, draft));
+                if (generated[0].groupPerformance) previousPerformance = includePriorModelCalls(generated[0].groupPerformance, previousPerformance);
               }
             } catch (error) {
+              previousPerformance = includePriorModelCalls(error.performance, previousPerformance);
               console.warn(`[Kami] 小批翻译失败，退回逐段流程：${error.message}`);
             }
             if (!drafts.has(segment.id)) groupFallback = { stage: "microBatchAttempt", startedAt: new Date(groupStarted).toISOString(), durationMs: Date.now() - groupStarted, status: "fallback", groupSize: group.length };
@@ -287,10 +291,13 @@ export async function runServerBatch(batchId, {
         const result = await retryTransient(translateOnce, {
           attempts: 2,
           delayMs: SEGMENT_RETRY_DELAY_MS,
-          onRetry: (error) => console.warn(`[Kami] 第 ${position + 1} 段连接失败，自动重试一次：${error.message}`)
+          onRetry: (error) => {
+            previousPerformance = includePriorModelCalls(error.performance, previousPerformance);
+            console.warn(`[Kami] 第 ${position + 1} 段连接失败，自动重试一次：${error.message}`);
+          }
         });
         segment.translation = result.translation;
-        segment.result = compactResult({ ...result, patternKey });
+        segment.result = compactResult({ ...result, patternKey, performance: includePriorModelCalls(result.performance, previousPerformance) });
         if (groupFallback) {
           segment.result.performance ||= { version: 1, events: [] };
           segment.result.performance.events.push(groupFallback);
@@ -299,7 +306,7 @@ export async function runServerBatch(batchId, {
         segment.accepted = false;
         // 本段翻完立刻学本文件术语：下一次请求就能用上；失败不影响本段。
         // 小批初译已共享组内上下文，统一在本组最终译文保存后学习，供下一组使用。
-        if (!retryIds && drafts.has(segment.id) && learnGroupTerms) {
+        if (!retryIds && drafts.has(segment.id) && learnGroupTerms && segmentWorkflowComplete(result.stages)) {
           pendingTerms.push(segment);
         } else if (!retryIds && learnTerms && segmentWorkflowComplete(result.stages)) {
           try {
@@ -313,10 +320,12 @@ export async function runServerBatch(batchId, {
       } catch (error) {
         segment.status = "error";
         segment.error = String(error?.message || error);
-        if (error.performance) segment.result = { ...segment.result, performance: error.performance };
+        const performance = includePriorModelCalls(error.performance, previousPerformance);
+        if (performance) segment.result = { ...segment.result, performance };
       }
       drafts.delete(segment.id);
       if (!drafts.size) await flushGroupTerms();
+      if (segment.result?.performance?.events) segment.result.performance.modelUsage = summarizeModelUsage(segment.result.performance.events);
       run.subBatches = checkpointSubBatches(subBatches, run.segments);
       await withRuntimeCall({ performanceTrace: segment.result?.performance }, () => measureStage("save", () => checkpoint.commit()));
     }
@@ -365,9 +374,10 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
         if (stage !== "proofreading" && qa.translation != null && qa.translation !== originalTranslation) throw new Error("QA 返回的译文与待检查译文不一致，评分未保存，请重试 QA");
         const translation = qa.translation || originalTranslation;
         update = { ...segment, translation, accepted: translation === originalTranslation ? segment.accepted : false,
-          result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation, draft: segment.result?.draft || qa.draft }) } };
+          result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation, draft: segment.result?.draft || qa.draft,
+            performance: includePriorModelCalls(qa.performance, segment.result?.performance) }) } };
       } catch (error) {
-        update = { ...segment, result: { ...segment.result,
+        update = { ...segment, result: { ...segment.result, performance: includePriorModelCalls(error.performance, segment.result?.performance),
           ...(stage ? { stages: { ...segment.result.stages, [stage]: { status: "failed", error: String(error.message || error) } } } : {}),
           aiQa: { ...segment.result?.aiQa, fallbackReason: String(error.message || error) } } };
       }
@@ -375,6 +385,7 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
       run = await loadRun(batchId);
       const current = run?.segments.find((item) => item.id === segment.id);
       if (current && !current.accepted && current.translation === originalTranslation && incomplete(current)) {
+        if (update.result?.performance?.events) update.result.performance.modelUsage = summarizeModelUsage(update.result.performance.events);
         run.segments = run.segments.map((item) => item.id === segment.id ? update : item);
         run.runnerOptions = { ...run.runnerOptions, stageRetryOnly: true,
           ...(update.translation !== originalTranslation ? { translationCompletedAt: new Date().toISOString() } : {}) };

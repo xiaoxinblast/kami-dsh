@@ -257,8 +257,26 @@ test("DSH pages share responsive themes; context retries, reports and settings p
     await page.getByRole("button", { name: "保存输出目录", exact: true }).click();
     await page.getByRole("status").filter({ hasText: "已保存输出目录" }).waitFor();
     assert.equal((await workbench.workspace({}, context)).config.outputDirectory, "outputs/settings-test");
+    const groupingTab = () => page.getByRole("tab", { name: "分组翻译", exact: true }).click();
+    const groupSize = page.getByRole("spinbutton", { name: "每组最多句段", exact: true });
+    const groupChars = page.getByRole("spinbutton", { name: "每组最多原文字数", exact: true });
+    await groupingTab();
+    assert.equal(await groupSize.inputValue(), "6");
+    assert.equal(await groupChars.inputValue(), "800");
+    await groupSize.fill("3"); await groupChars.fill("450");
+    await page.getByRole("button", { name: "保存参数", exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "已保存" }).waitFor();
+    await page.reload();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await groupingTab();
+    assert.equal(await groupSize.inputValue(), "3");
+    assert.equal(await groupChars.inputValue(), "450");
     for (const width of [960, 330]) {
       await page.setViewportSize({ width, height: 1000 });
+      await groupingTab();
+      await groupChars.scrollIntoViewIfNeeded();
+      assert.equal(await page.locator(".kami").evaluate(element => element.scrollWidth > element.clientWidth), false);
+      if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `grouping-${width}.png`), animations: "disabled" });
       for (const name of ["常规与备份", "模型", "QA 规则", "质量参数", "参考资料", "检索", "学习与评测"]) {
         await page.getByRole("tab", { name, exact: true }).click();
         assert.equal(await page.getByRole("tabpanel").count(), 1);

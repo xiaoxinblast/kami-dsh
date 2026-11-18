@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createModelAdapter, sessionModelRoute } from "../dsh/model-adapter.mjs";
 import { withRuntimeCall } from "../src/runtime-context.mjs";
 import { invalidateSettingsCache, saveSettings } from "../src/settings-store.mjs";
+import { summarizeModelUsage } from "../src/performance.mjs";
 
 test("new sessions use the DSH default model and pending selections override previous requests", () => {
   let pending;
@@ -68,6 +69,21 @@ function budgetAdapter(responses, { defaultMaxTokens = 32000, prepare = (config)
 }
 const budgetMessages = [{ role: "user", content: "检查译文" }];
 const budgetRoute = { provider: "test", model: "selected-model", reasoningEffort: "high" };
+
+test("每次截断重试独立计量，缓存读写按 SDK 互斥字段计入总输入，缺报保持未知", () => budgetFixture(async () => {
+  saveSettings({ model: { maxTokens: 4000, retryMaxTokens: 6000 } });
+  const trace = { events: [] };
+  const { adapter } = budgetAdapter([
+    { kind: "max-tokens", usage: { inputTokens: 10, cacheReadTokens: 50, cacheWriteTokens: 2, outputTokens: 5 } },
+    { content: "complete", usage: { inputTokens: 12, outputTokens: 3 } }
+  ]);
+  await withRuntimeCall({ performanceTrace: trace }, () => adapter(budgetMessages, { route: budgetRoute }));
+  assert.deepEqual(trace.events.map(e => e.usage), [
+    { inputTokens: 62, outputTokens: 5, cacheHitTokens: 50, cacheMissTokens: 12 },
+    { inputTokens: 12, outputTokens: 3, cacheHitTokens: null, cacheMissTokens: null }
+  ]);
+  assert.deepEqual(summarizeModelUsage(trace.events), { calls: 2, inputTokens: 74, outputTokens: 8, cacheHitTokens: null, cacheMissTokens: null });
+}));
 
 test("performance records the actual prepared model and effort without prompt text", () => budgetFixture(async () => {
   const trace = { events: [] };

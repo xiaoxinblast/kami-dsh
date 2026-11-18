@@ -337,9 +337,10 @@ window.__ModuleLoader__.load({
           const groups = (plan.groups || []).map((group) => ({ ...group, files: group.files.filter((file) => file.status === "pending") })).filter((group) => group.files.length);
           const queued = groups.reduce((sum, group) => sum + group.files.length, 0), skipped = (plan.groups || []).reduce((sum, group) => sum + group.files.filter((file) => file.status === "ready").length, 0);
           token.view.operations[key].compilation = { queued, skipped, failures: plan.failures || [] }; this.emit();
+          if (!queued && plan.failures?.length) throw new Error(plan.failures.map(item => `${item.path}：${item.error}`).join("\n"));
           if (!queued) return skipped ? "所选资源均已编译，无需重复" : "没有可提交的编译资源";
           if (!this.prompt) throw new Error("当前会话的 Agent 入口不可用");
-          await this.prompt(this.sessionId, `请按每个库处理以下增量编译任务 ${JSON.stringify(groups)}。只编译列出的文件，保留未选中文件的已有编译内容。先使用 DSH 原生工具理解原文件的内容和排版，不要求用户调整原件或套用固定模板；再用脚本按识别结果全量提取，不得仅用样本代替全文。每个库只写一个更新 JSON 到该组 updatePath，格式为 {resources:[{path,hash,terms:[{ja,zh,note}]}]}；TM 的每个来源用 entries:[{source,target,context,file}]。术语保留备注，TM 保留上下文和来源。排除表头、空行、memoQ 保护行，不改写原件。同原文的不同译法保留，不只按原文覆盖。然后以该组第一个来源 path、purpose、libraryId 调用 kami_file_import，传 compiledPath:updatePath；Host 会增量合并、去重到该库唯一的编译文件，保留未选中内容。不要给每个来源另建编译文件，也不要重新提交未变化的来源。只有 compilation.status=ready 才报告完成，并汇报各库条数、重复合并和读取失败结果。`, token.view.workspace);
+          await this.prompt(this.sessionId, `请按每个库处理以下增量编译任务 ${JSON.stringify(groups)}。只编译列出的文件，保留未选中文件的已有编译内容。先使用 DSH 原生工具理解原文件的内容和排版，不要求用户调整原件或套用固定模板；再用脚本按识别结果全量提取，不得仅用样本代替全文。每个库只写一个更新 JSON 到该组 updatePath，格式为 {resources:[{path,hash,terms:[{ja,zh,note}]}]}；TM 的每个来源用 entries:[{source,target,context,file}]。风格指南用 {path,hash,format:"kami-guide-v1",complete:true,style_guide:"完整 Markdown 正文"}，按原顺序保留全部标题、规则、适用条件、例外、正反例和表格关系。逐页核对，记录承载规则的字体、颜色、删除线与图示信息；无法完整表达时报告待编译，不要提交摘要或标记完成。术语保留备注，TM 保留上下文和来源。排除表头、空行、memoQ 保护行，不改写原件。同原文的不同译法保留，不只按原文覆盖。然后以该组第一个来源 path、purpose、libraryId 调用 kami_file_import，传 compiledPath:updatePath；Host 会增量合并、去重到该库唯一的编译文件，保留未选中内容。不要给每个来源另建编译文件，也不要重新提交未变化的来源。只有 compilation.status=ready 才报告完成，并汇报各库条数、重复合并和读取失败结果。`, token.view.workspace);
           return "已交给当前会话的 Agent";
         });
       }
@@ -434,7 +435,7 @@ window.__ModuleLoader__.load({
       "旧版记录": "Legacy record", "部分完成": "Partially completed", "段旧版译文未记录此阶段": "legacy segments have no record of this stage",
       "资源编译": "Resource compilation", "资产分类": "Asset categories", "结合当前工作区最新资源，核对原文与译文。": "Check source and translation against the current workspace resources.",
       "将本批次译文写回文件，保存到工作区。": "Write this batch's translations to a file in the workspace.",
-      "输出目录与数据备份": "Output and backups", "规则开关与严重度": "Rules and severity", "模型选择与输出预算": "Model and output budget", "评分与质量阈值": "Quality thresholds", "原件查阅与工具轮数": "Original files and tool rounds", "样本积累与评测": "Samples and evaluation", "资源匹配与检索": "Resource retrieval", "文字与标点规范": "Text and punctuation", "任务执行参数": "Execution parameters"
+      "输出目录与数据备份": "Output and backups", "规则开关与严重度": "Rules and severity", "模型选择与输出预算": "Model and output budget", "评分与质量阈值": "Quality thresholds", "原件查阅与工具轮数": "Original files and tool rounds", "样本积累与评测": "Samples and evaluation", "资源匹配与检索": "Resource retrieval", "文字与标点规范": "Text and punctuation", "任务执行参数": "Execution parameters", "分组翻译": "Translation groups", "初译与校对的分组上限": "Translation and proofreading group limits"
     });
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
@@ -581,7 +582,7 @@ window.__ModuleLoader__.load({
       const enabledResources = resourceSelection(config, model.workspace?.libraries);
       const selectedResources = () => Object.fromEntries(resourceFields.map(({ field }) => [field, enabledResources[field].filter((item) => !excluded.includes(`${field}:${item}`))]));
       const withResources = Object.values(selectedResources()).some((items) => items.length);
-      const agentCreate = () => model.ask(`请为工作区原文件 ${JSON.stringify(path.trim())} 创建 Kami 翻译批次，供我预览，先不要启动翻译。本批次资源为 ${JSON.stringify(selectedResources())}。术语和 TM 使用已编译结果；待编译时由 Agent 理解原件后编译。风格指南和参考资料只关联路径，建批时不预解析、不提前读取全文，也不向 resourceContext 填充正文；翻译前必须使用当前会话的原生工具直接查阅风格指南并遵守完整规则、例外和正反例，参考资料按需查阅。不创建纯文本转换副本，不正式入库。`, "agent-create");
+      const agentCreate = () => model.ask(`请为工作区原文件 ${JSON.stringify(path.trim())} 创建 Kami 翻译批次，供我预览，先不要启动翻译。本批次资源为 ${JSON.stringify(selectedResources())}。术语和 TM 使用已编译结果；待编译时由 Agent 理解原件后编译。风格指南使用关联时编译的完整正文，尚未编译的指南优先完成编译。参考资料按需查阅原件。不创建纯文本转换副本，不正式入库。`, "agent-create");
       const create = () => model.perform("create", async (token) => {
         const resources = selectedResources();
         const value = await model.request({ action: "file", purpose: "translation", path: path.trim(), resources, projectId: token.view.projectId }, token);
@@ -868,7 +869,7 @@ window.__ModuleLoader__.load({
         h("code", null, preview.path), h("p", { className: "muted" }, t(resourceFields.find((item) => item.purpose === preview.purpose)?.label || "资源"), " · ", sizeText(preview.size)),
         preview.compilation && h("div", { className: "stack" }, h("p", { className: "muted" }, t(ready ? "已编译，可用于翻译" : "待 Agent 编译"), ready && ` · ${preview.purpose === "style-guide" ? `${preview.compilation.characters} ${t("字符")}` : `${preview.compilation.itemCount} ${t("条")}`}`), !ready && h("div", { className: "button-row" }, h(Button, { onClick: () => model.compileResource(preview), busy: model.view.operations[compileKey]?.pending }, t("让 Agent 编译")), h(Button, { quiet: true, onClick: refresh }, t("刷新编译状态"))), h(Feedback, { model, name: compileKey, retry: () => model.compileResource(preview), t })),
         preview.compilation && h("p", { className: "muted" }, t("同库文件共用一份编译结果，选中更新会保留其他文件内容。")),
-        preview.purpose === "style-guide" && h("p", { className: "muted" }, t("已关联原文件 · 翻译和审校时直接读取")),
+        preview.purpose === "style-guide" && h("p", { className: "muted" }, t("编译后的完整指南会随每组初译和校对一起发送。")),
         h(Button, { onClick: inspect, busy: model.view.operations[key]?.pending }, t("让 Agent 查看原文件")), h(Feedback, { model, name: key, retry: inspect, t }),
         h("details", null, h("summary", null, t("文件版本")), h("code", null, preview.hash ? `SHA-256 ${preview.hash}` : preview.version)));
     }
@@ -888,10 +889,15 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState(() => new Set());
       const resource = resourceFields.find((item) => item.purpose === purpose), key = `resource:${purpose}:${library?.id || ""}`, unlinkKey = `unlink-resource:${purpose}:${library?.id || ""}`, config = model.workspace?.config || {}, preview = model.view.sections.preview;
       const files = linkedPaths(config, purpose, library?.id);
-      const selectable = ["terms", "tm"].includes(purpose), selectedPaths = files.filter((path) => selected.has(path)), batchKey = `compile-selected:${purpose}:${library?.id || ""}`, busy = model.view.operations[batchKey]?.pending;
+      const selectable = purpose !== "reference", selectedPaths = files.filter((path) => selected.has(path)), batchKey = `compile-selected:${purpose}:${library?.id || ""}`, busy = model.view.operations[batchKey]?.pending;
       const statusKey = `resource-status:${purpose}:${library?.id || ""}`;
       const statuses = useSection(model, statusKey, (token) => selectable && files.length ? model.request({ action: "workspace", actionType: "compilations", selection: files.map((path) => ({ path, purpose, ...(library ? { libraryId: library.id } : {}) })) }, token) : Promise.resolve({}), [model.workspace]);
       const compilations = new Map((statuses?.groups || []).flatMap((group) => group.files.map((file) => [file.path, file])));
+      const listed = preview?.purpose === purpose ? compilations.get(preview.path) : null;
+      useEffect(() => {
+        if (listed?.status !== "ready" || !preview || (preview.compilation?.status === "ready" && preview.hash === listed.hash)) return;
+        model.loadSection("preview", token => model.request({ action: "file", path: preview.path, purpose, libraryId: library?.id, register: false, projectId: token.view.projectId }, token));
+      }, [model, model.scopeKey, listed?.status, listed?.hash, preview?.path, preview?.compilation?.status, preview?.hash]);
       for (const failure of statuses?.failures || []) compilations.set(failure.path, { status: "error", error: failure.error });
       const statusError = model.view.operations[`section:${statusKey}`]?.error;
       if (statusError) for (const path of files) compilations.set(path, { status: "error", error: statusError });
@@ -920,7 +926,7 @@ window.__ModuleLoader__.load({
         h("details", { className: "card", open: !files.length || undefined }, h("summary", null, t("关联工作区文件")), h("div", { className: "quick-form" }, h("label", null, t("工作区相对路径"), h("input", { value: paths[purpose] || "", placeholder: resource.placeholder, onChange: (event) => setPaths({ ...paths, [purpose]: event.target.value }) })),
           h(Button, { primary: true, disabled: !paths[purpose]?.trim(), busy: model.view.operations[key]?.pending, onClick: link }, t("关联文件")), h(Feedback, { model, name: key, retry: link, t }))),
         h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("关联本地文件")), h("span", { className: "muted" }, `${files.length} ${t("个文件")}`)),
-          !selectable && h("p", { className: "muted" }, t(purpose === "style-guide" ? "风格指南只关联原件，翻译和审校前由 Agent 直接查阅并遵守，不预解析或编译。" : "参考资料只关联原件，翻译时由 Agent 按需直接查阅，不预解析或编译。")),
+          h("p", { className: "muted" }, t(purpose === "reference" ? "参考资料只关联原件，翻译时由 Agent 按需直接查阅，不预解析或编译。" : purpose === "style-guide" ? "关联后自动编译，完整规则和示例随每组初译与校对发送。" : "关联后自动提交编译，未变化的文件直接复用。")),
           h("input", { type: "search", value: query, placeholder: t("搜索文件名或路径"), "aria-label": t("搜索资源文件"), onChange: (event) => { setQuery(event.target.value); setOffset(0); } }),
           selectable && h("div", { className: "button-row" }, h(Button, { small: true, disabled: busy || !listing.paths.length, onClick: () => select(listing.paths, true) }, t("全选筛选结果")), h(Button, { small: true, disabled: busy || !selectedPaths.length, onClick: clearSelection }, t("清空选择")), h("span", { className: "muted" }, `${t("已选择")} ${selectedPaths.length} ${t("个文件")}`), h(Button, { primary: true, small: true, disabled: !selectedPaths.length, busy, onClick: compileSelected }, t("编译选中"))),
           selectable && h(Feedback, { model, name: batchKey, retry: compileSelected, t }),
@@ -987,7 +993,7 @@ window.__ModuleLoader__.load({
     function StandaloneQa({ model, t }) {
       const [source, setSource] = useState(""), [target, setTarget] = useState("");
       const withResources = Object.values(resourceSelection(model.workspace?.config, model.workspace?.libraries)).some((paths) => paths.length);
-      const agentInspect = () => model.ask(`请用当前工作区已关联的资源执行 Kami 独立审校，并在主会话中说明问题。术语和 TM 使用已编译结果；风格指南和参考资料只关联原件。审校前必须用当前会话的原生工具直接查阅风格指南并遵守完整规则、例外和正反例，参考资料按需查阅；不预解析或生成转换副本。原文：${JSON.stringify(source)}；译文：${JSON.stringify(target)}。`, "agent-qa");
+      const agentInspect = () => model.ask(`请用当前工作区已关联的资源执行 Kami 独立审校，并在主会话中说明问题。术语和 TM 使用已编译结果；风格指南使用当前版本的完整编译正文，尚未编译的指南必须查阅原件。参考资料按需查阅。原文：${JSON.stringify(source)}；译文：${JSON.stringify(target)}。`, "agent-qa");
       const inspect = () => model.perform("standalone-qa", async (token) => { token.view.sections.standaloneQa = await model.invoke("/api/auto-qa", "POST", scopeArgs(model, token, { source, translation: target }), token); });
       return h("div", { className: "stack standalone-view" }, h(PageHeading, { icon: "check", title: "独立审校", description: "结合当前工作区最新资源，核对原文与译文。", t }),
         h("div", { className: "pairs qa-inputs" }, h("label", { className: "card" }, h("span", { className: "input-heading" }, h(Glyph, { name: "context" }), t("原文")), h("textarea", { value: source, onChange: (event) => setSource(event.target.value) })), h("label", { className: "card" }, h("span", { className: "input-heading" }, h(Glyph, { name: "check" }), t("译文")), h("textarea", { value: target, onChange: (event) => setTarget(event.target.value) }))),
@@ -1111,9 +1117,10 @@ window.__ModuleLoader__.load({
       useEffect(() => { if (data) setSettings(data.settings || data); }, [data]);
       useEffect(() => { if (project) setProjectSettings(structuredClone(project.settings)); }, [project]);
       const groups = data?.groups || [], rules = project?.qaRuleMetadata || [];
-      const titles = { model: "模型", quality: "质量参数", reference: "参考资料", learning: "学习与评测", retrieval: "检索", orthography: "标点", performance: "性能" };
+      const titles = { grouping: "分组翻译", model: "模型", quality: "质量参数", reference: "参考资料", learning: "学习与评测", retrieval: "检索", orthography: "标点", performance: "性能" };
       const categories = { general: ["folder", "输出目录与数据备份"], qa: ["check", "规则开关与严重度"], model: ["model", "模型选择与输出预算"], quality: ["check", "评分与质量阈值"], reference: ["context", "原件查阅与工具轮数"], learning: ["learning", "样本积累与评测"], retrieval: ["search", "资源匹配与检索"], orthography: ["terms", "文字与标点规范"], performance: ["settings", "任务执行参数"] };
       const tabs = [{ id: "general", title: "常规与备份" }, { id: "qa", title: "QA 规则" }, ...groups.map((group) => ({ id: group.group, title: titles[group.group] || group.fields[0]?.label || group.group }))];
+      categories.grouping = ["tasks", "初译与校对的分组上限"];
       const group = groups.find((item) => item.group === active), qa = active === "qa", saving = model.view.operations[qa ? "qa-settings-save" : "settings-save"]?.pending;
       const save = () => model.perform("settings-save", async (token) => {
         const result = await model.invoke("/api/settings", "POST", settings, token);

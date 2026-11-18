@@ -268,12 +268,12 @@ test("style guides are read from current originals for translation and QA, even 
     await writeFile(join(cwd, "source.txt"), "設定を保存します。");
     await workbench.invoke({ method: "POST", path: "/api/style-guides/import", body: { projectId: state.project.id, filename: "legacy.txt", base64: Buffer.from("legacy_style_probe").toString("base64") } }, context);
     const linked = await workbench.importFile({ path: "guide.custom", purpose: "style-guide" }, context);
-    assert.equal(linked.compilation, undefined); assert.equal(linked.hash, undefined); assert.ok(linked.version);
+    assert.equal(linked.compilation.status, "pending"); assert.match(linked.hash, /^[a-f0-9]{64}$/);
     const prepared = await workbench.importFile({ path: "source.txt" }, context);
     const snapshot = (await workbench.store.request(`/items/batch_runs/${prepared.batchId}`)).runner_options.workspaceSnapshot;
     assert.equal(snapshot.guide, null); assert.equal(snapshot.styleGuideMode, "agent-native"); assert.equal(calls.length, 0);
     assert.doesNotMatch(JSON.stringify(snapshot), /stale_style_probe/);
-    assert.equal((await workbench.workspace({ action: "compilations" }, context)).groups.length, 0);
+    assert.equal((await workbench.workspace({ action: "compilations" }, context)).groups[0].files[0].status, "pending");
     await writeFile(join(cwd, "guide.custom"), "live_style_probe：按钮使用保存；例外和正反例均按本原件。");
     const translated = await workbench.invoke({ path: "/api/translate", method: "POST", body: { batchId: prepared.batchId, projectId: state.project.id, locale: "zh-CN", source: "設定を保存します。", qualityTier: "fast", reflect: false } }, context);
     assert.equal(translated.translation, "保存设置。");

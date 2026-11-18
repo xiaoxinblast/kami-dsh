@@ -29,7 +29,7 @@ test("workspace guide controller previews and links paths without changing legac
     const model = new WorkbenchModel({ sessionId: "session", call: async (_session, operation) => { calls.push(operation); return workbench.perform(operation, context); } });
     await model.refresh();
     assert.equal(model.workspace.project.name, "界面验收");
-    assert.doesNotMatch(source, /FileReader|type:\s*["']file["']|agentInstruction/);
+    assert.doesNotMatch(source, /FileReader|agentInstruction/);
     await model.loadSection("preview", (token) => model.request({ action: "file", path: "rules/style.md", purpose: "style-guide", register: false }, token));
     assert.equal(model.view.sections.preview.path, "rules/style.md");
     assert.equal(model.view.sections.preview.readMode, "agent");

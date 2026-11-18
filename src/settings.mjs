@@ -29,6 +29,8 @@ import { LOCALES } from "./config.mjs";
 
 /** 每项都写明区间与含义，界面直接用这份定义渲染，避免说明和校验各写一遍。 */
 export const SETTING_SPECS = Object.freeze({
+  "grouping.maxSegments": { min: 1, max: 20, step: 1, default: 6, label: "每组最多句段", hint: "批次初译和校对共用此上限。设为 1 时逐段处理。保存后从下次启动或继续批次时生效。" },
+  "grouping.maxChars": { min: 1, max: 12000, step: 1, default: 800, label: "每组最多原文字数", hint: "按连续句段累计原文字符数，先达到任一上限就分组。单段超过字数上限时单独处理，保留完整原文。" },
   "model.maxTokens": { min: 0, max: 1_000_000, step: 1, default: 0, label: "初始输出上限（token）", hint: "用于 Kami 的所有 DSH 模型任务；0 跟随 DSH 会话或提供商，正数覆盖任务内部的固定预算。保存后从下一次模型调用生效" },
   "model.retryMaxTokens": { min: 0, max: 1_000_000, step: 1, default: 256_000, label: "截断重试上限（token）", hint: "截断后最多重试一次，预算翻倍但不超过此值；0 关闭重试。小于或等于初始上限时不重试，不会降低初始上限。请勿超过提供商支持的输出容量" },
   "quality.qaPassScore": { min: 60, max: 100, step: 1, default: 90, label: "AIQA 通过分", hint: "低于此分自动进入最小修订重审" },

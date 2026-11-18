@@ -1,4 +1,5 @@
 import http from "node:http";
+import { Readable } from "node:stream";
 import { runtimeOptions, withRuntimeCall } from "./src/runtime-context.mjs";
 import { measureStage } from "./src/performance.mjs";
 import { translateMicroBatchWithModel } from "./src/provider.mjs";
@@ -83,7 +84,7 @@ import { WorkbenchSessionMonitor, shutdownDockerDesktop } from "./src/workbench-
 import { BACKGROUND_TASK_STALE_MS, interruptedTaskPatch, selectStaleRunningTasks } from "./src/background-task-sweep.mjs";
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 import { runServerBatch, retryServerBatchQa, batchNeighborContext } from "./src/batch-runner.mjs";
-import { runSegmentWorkflow } from "./src/segment-workflow.mjs";
+import { runSegmentWorkflow, proofreadingHints } from "./src/segment-workflow.mjs";
 import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows } from "./public/batch-status.js";
 import { translationRetryReason } from "./src/translation-output.mjs";
 
@@ -2722,7 +2723,7 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
 }
 
 async function translateBatchSegment(body, path = "/api/translate", { draft = null } = {}) {
-  const performance = { version: 1, events: [], ...(draft ? { groupId: draft.groupId, groupSize: draft.groupSize, ...(draft.groupPerformance ? { group: draft.groupPerformance } : {}) } : {}) };
+  const performance = { version: 1, events: [], ...(draft ? { groupId: draft.groupId, groupSize: draft.groupSize } : {}) };
   return withRuntimeCall({ performanceTrace: performance, translationDraft: draft }, async () => {
     try {
       const result = await measureStage("segment", () => dispatchBatchSegment(body, path));
@@ -2737,6 +2738,15 @@ async function translateBatchSegment(body, path = "/api/translate", { draft = nu
 async function dispatchBatchSegment(body, path) {
   const dispatch = runtimeOptions().dispatch;
   if (dispatch) return dispatch({ method: "POST", path, body });
+  // Group preparations and validated drafts are private to this worker's async context.
+  if (runtimeOptions().prepareTranslation || runtimeOptions().translationDraft) {
+    const request = Readable.from([Buffer.from(JSON.stringify(body))]);
+    request.method = "POST";
+    let status, payload;
+    await apiHandler(request, { writeHead(code) { status = code; }, end(data) { payload = JSON.parse(data); } }, new URL(path, "http://localhost"));
+    if (status !== 200) throw new Error(payload?.error || "批次译段处理失败");
+    return payload;
+  }
   const response = await fetch(`http://127.0.0.1:${PORT}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -2751,14 +2761,37 @@ async function translateBatchDrafts(requests) {
   const prepared = [];
   for (const body of requests) prepared.push(await withRuntimeCall({ prepareTranslation: true }, () => translateBatchSegment(body)));
   const signature = item => JSON.stringify([item.contextPack.targetLocale, item.contextPack.contentType, item.contextPack.domain, item.contextPack.styleProfile, item.contextPack.userProfile, item.contextPack.translationSkill, item.routing.model, item.routing.modelRole]);
-  if (prepared.some(item => item.contextPack.rhymeLike || item.contextPack.batchVerse?.active || item.routing.reflect || !["direct", "reflective", "fact_guarded"].includes(item.routing.route) || signature(item) !== signature(prepared[0]))) return null;
+  if (prepared.some(item => signature(item) !== signature(prepared[0]))) return null;
   const groupId = randomUUID();
-  const performance = { version: 1, events: prepared.flatMap((item, index) => item.performance.events.map(event => ({ ...event, segmentId: requests[index].segmentId }))) };
-  const drafts = await withRuntimeCall({ performanceTrace: performance }, () => measureStage("translation", () => translateMicroBatchWithModel(prepared.map((item, index) => ({ id: requests[index].segmentId, contextPack: item.contextPack })), {
-    routePlan: prepared[0].routing,
-    toolRunner: buildReferenceToolRunner({ projectId: requests[0].projectId, skill: prepared[0].contextPack.translationSkill })
-  })));
-  return drafts.map((draft, index) => ({ ...draft, projectId: requests[index].projectId, batchId: requests[index].batchId, initial: draft.translation, reflection: "", groupId, groupSize: drafts.length, ...(index === 0 ? { groupPerformance: performance } : {}) }));
+  const performance = { version: 1, groupId, events: prepared.flatMap((item, index) => item.performance.events.map(event => ({ ...event, groupId, segmentId: requests[index].segmentId }))) };
+  const entries = prepared.map((item, i) => ({ id: requests[i].segmentId, contextPack: item.contextPack }));
+  const events = [], refs = [];
+  const toolRunner = buildReferenceToolRunner({ projectId: requests[0].projectId, skill: entries[0].contextPack.translationSkill, allowWeb: true, onActivity: item => events.push({ ...item, groupId }) });
+  const options = { referenceSession: { toolRunner }, routePlan: prepared[0].routing };
+  const collectRefs = () => refs.push(...(toolRunner?.refs?.() || []).map(item => ({ ...item, scope: "group", groupId })));
+  return withRuntimeCall({ performanceTrace: performance }, async () => {
+    let drafts, reviewed;
+    try {
+      drafts = await measureStage("translation", () => translateMicroBatchWithModel(entries, options), { groupId });
+      collectRefs();
+      const byId = new Map(drafts.map(draft => [draft.id, draft.translation]));
+      const reviewEntries = entries.flatMap((entry, i) => byId.has(entry.id) ? [{ ...entry, translation: byId.get(entry.id), hints: proofreadingHints(segmentRuleIssues(prepared[i], byId.get(entry.id), "draftQa")) }] : []);
+      if (reviewEntries.length > 1) reviewed = await measureStage("proofreading", () => translateMicroBatchWithModel(reviewEntries, { ...options, part: "proofread" }), { groupId });
+      collectRefs();
+    } catch (error) {
+      if (!drafts) { error.performance = performance; throw error; }
+      performance.events.push({ stage: "groupProofreadingFallback", status: "fallback", groupId, error: error.message });
+    } finally { await toolRunner?.dispose?.(); }
+    return drafts.map((draft, i) => ({ ...draft, projectId: requests[0].projectId, batchId: requests[0].batchId, initial: draft.translation, proofread: reviewed?.find(item => item.id === draft.id)?.translation, reflection: "", groupId, groupSize: entries.length, referenceUsage: { refs, events }, ...(i === 0 ? { groupPerformance: performance } : {}) }));
+  });
+}
+
+function segmentRuleIssues({ contextPack, matches, projectSettings, factSchema }, translation, phase) {
+  const locale = contextPack.targetLocale;
+  return [
+    ...runQa({ source: contextPack.source, translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings, draftCheck: phase === "draftQa" }),
+    ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation, locale }), projectSettings || undefined)
+  ];
 }
 
 /**
@@ -4394,9 +4427,10 @@ function startBatchQaRetry(batchId, taskId, segmentIds, stage = null) {
     await worker?.followupPromise;
     await Promise.all([consistencyCheckTasks.get(batchId), termSurveyTasks.get(batchId)]);
     await attachBatchWorkflowTask(batchId, "aiQa", taskId);
+    const evidenceCache = { batchId, guides: new Map(), snippets: new Map() };
     const outcome = await retryServerBatchQa(batchId, {
       loadRun: getBatchRun, saveRun: saveBatchRun, segmentIds, stage,
-      recheckSegment: (body) => translateBatchSegment(body, stage ? "/api/translate" : "/api/qa"),
+      recheckSegment: (body) => withRuntimeCall({ evidenceCache }, () => translateBatchSegment(body, stage ? "/api/translate" : "/api/qa")),
       shouldCancel: () => control.cancelRequested,
       report: ({ completed, failed, total }) => updateBackgroundTaskProgress(taskId, {
         progress: { phase: "checking", message: `${label} 重试：${completed} / ${total} 段${failed ? ` · ${failed} 段仍未完成` : ""}`,
@@ -4427,7 +4461,7 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
   const heartbeat = setInterval(() => workbenchSessionMonitor?.touch(sessionId), 5_000);
   heartbeat.unref?.();
   workbenchSessionMonitor?.touch(sessionId);
-  controller.promise = Promise.resolve().then(async () => withRuntimeCall({ workspaceSnapshot: (await getBatchRun(batchId))?.runnerOptions?.workspaceSnapshot || null }, () => runServerBatch(batchId, {
+  controller.promise = Promise.resolve().then(async () => withRuntimeCall({ workspaceSnapshot: (await getBatchRun(batchId))?.runnerOptions?.workspaceSnapshot || null, evidenceCache: { batchId, guides: new Map(), snippets: new Map() } }, () => runServerBatch(batchId, {
     loadRun: getBatchRun,
     segmentIds,
     saveRun: async (run) => {
@@ -4454,7 +4488,8 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
     loadProject: getProject,
     classifyDocument: async (text) => (await classify({ text, hint: "auto", useModel: true })).contentType,
     translateSegment: (body, options) => translateBatchSegment(body, "/api/translate", options),
-    translateGroup: null,
+    translateGroup: translateBatchDrafts,
+    grouping: getSettings().grouping,
     loadTermSources: async (run) => (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [],
     loadWorkingGlossary: async (run) => workingGlossaryOverrides.get(run.batchId) || null,
     learnTerms: async ({ run, segment, translation }) => {
@@ -4475,17 +4510,6 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
         targetText: translation,
         sourceSegmentId: segment.id
       });
-    },
-    learnGroupTerms: async ({ run, segments }) => {
-      if (getSettings().learning.workingTermsEnabled === false) return [];
-      const formalTerms = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [];
-      const raw = await learnWorkingTermsWithModel({
-        entries: segments.map(segment => ({ id: segment.id, source: segment.source, translation: segment.translation })),
-        existingTerms: formalTerms, workingTerms: run.runnerOptions?.workingGlossary?.terms || [], filename: run.filename, locale: run.locale, purpose: run.contentType || "general"
-      });
-      return segments.flatMap(segment => normalizeWorkingTerms(raw.filter(term => term.sourceSegmentId === segment.id), {
-        formalTerms, sourceText: segment.source, targetText: segment.translation, sourceSegmentId: segment.id
-      }).slice(0, 5));
     },
     shouldPause: () => controller.pauseRequested,
     shouldCancel: () => controller.cancelRequested,
@@ -8670,7 +8694,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     const tierPlanFor = (tier) => planQualityTier({ tier, purpose: classification.contentType, provider, risk, manualRoute: body.route });
     let routing = tierPlanFor(tierDecision.tier);
     runtimeOptions().performanceTrace?.events.push({ stage: "preparation", startedAt: new Date(preparationStarted).toISOString(), durationMs: Date.now() - preparationStarted, status: "completed" });
-    if (runtimeOptions().prepareTranslation) return json(res, 200, { contextPack, routing });
+    if (runtimeOptions().prepareTranslation) return json(res, 200, { contextPack, routing, matches, projectSettings, factSchema });
     let qualityTier = routing.tier;
     let qualityUpgradeFrom = "";
     const tierStrength = describeTierStrength({ tier: routing.tier, provider });
@@ -8702,24 +8726,24 @@ async function evaluateQaBatch(batchId, projectId = "") {
     }
     try {
       const routedPassScore = Math.max(passScore, qualityThresholdForRisk(risk.tier));
-      const deterministicIssues = (translation, phase) => [
-        ...runQa({ source: body.source, translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings, draftCheck: phase === "draftQa" }),
-        ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation, locale }), projectSettings || undefined)
-      ];
+      const deterministicIssues = (translation, phase) => segmentRuleIssues({ contextPack, matches, projectSettings, factSchema }, translation, phase);
       const stage = body.workflowStage || "all";
-      const referenceUsages = [];
+      const generated = runtimeOptions().translationDraft;
+      const draft = generated && generated.id === body.segmentId && generated.source === body.source && generated.batchId === body.batchId && generated.projectId === projectId ? generated : null;
+      const referenceUsages = [...(draft?.referenceUsage.events || [])];
       const referenceToolRunner = stage === "localQa" ? null : buildReferenceToolRunner({
         projectId, skill: translationSkill, allowWeb: true,
         onActivity: (activity) => referenceUsages.push(activity)
       });
       const referenceSession = { toolRunner: referenceToolRunner };
+      const usedRefs = () => [...(draft?.referenceUsage.refs || []), ...(referenceToolRunner?.refs?.() || [])];
       const workflow = await runSegmentWorkflow({
         stage, translation: body.translation || "", stages: body.stages || {},
-        translate: () => measureStage("translation", () => translateWithRoute(contextPack, {
+        translate: () => measureStage("translation", () => draft ? { translation: draft.translation, initial: draft.initial, reflection: draft.reflection } : translateWithRoute(contextPack, {
           routePlan: { ...routing, route: "direct", candidateCount: 1, reflect: false },
           reflect: false, singlePass: true, toolRunner: referenceToolRunner, referenceSession
         })),
-        proofread: (translation, hints) => measureStage("proofreading", () => proofreadTranslationWithModel({ contextPack, translation, hints, referenceSession, model: routing.model, modelRole: routing.modelRole })),
+        proofread: (translation, hints) => measureStage("proofreading", () => draft?.proofread || proofreadTranslationWithModel({ contextPack, translation, hints, referenceSession, model: routing.model, modelRole: routing.modelRole })),
         check: (translation, phase) => measureStage(phase, () => deterministicIssues(translation, phase))
       });
       const result = workflow.generated || { initial: workflow.draft, translation: workflow.translation };
@@ -8782,7 +8806,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
             qaBefore: { score: null, status: "not_run", issues: [] },
             qaAfter: checked ? { ...trajectoryMetricsFromIssues(aiQa.issues, aiQa.score, matches), issues: aiQa.issues, iterations: aiQa.iterations }
               : { status: "not_run", score: null, issues: [] },
-            referenceUsage: { refs: referenceToolRunner?.refs?.() || [], events: referenceUsages },
+            referenceUsage: { refs: usedRefs(), events: referenceUsages },
             events: [
               { type: "started", at: trajectory.createdAt },
               { type: "completed", at: new Date().toISOString(), latencyMs: Date.now() - startedAt, aiQaIterations: aiQa.iterations, ...(runtimeOptions().performanceTrace ? { performance: runtimeOptions().performanceTrace } : {}) }
@@ -8804,7 +8828,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
         translation: aiQa.translation,
         draft: workflow.draft,
         stages: workflow.stages,
-        referenceUsage: { refs: referenceToolRunner?.refs?.() || [], events: referenceUsages },
+        referenceUsage: { refs: usedRefs(), events: referenceUsages },
         candidates: [
           ...((result.candidates || []).some((item) => item.translation === aiQa.translation)
             ? []

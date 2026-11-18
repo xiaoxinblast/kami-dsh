@@ -127,3 +127,14 @@ test("独立审校及修订不接收未核实的工作术语，正式术语仍�
   }
   assert.equal(source.workingTerms.length, 1, "投影不修改初译的上下文");
 });
+
+test("同一人工译例兼作前文和句式时只发送一次，异段与不同确认状态分别保留", () => {
+  const ref = { segmentId: "s1", source: "購入", target: "重用探针", accepted: true };
+  const input = pack({ batchReferences: [ref], patternReferences: [
+    { ...ref, similarity: 1 }, { ...ref, segmentId: "s2" }, { ...ref, accepted: false }
+  ] });
+  for (const prompt of [packPrompt(input), contextPackText(input, "review")]) {
+    assert.equal(prompt.split("重用探针").length - 1, 3);
+    assert.match(prompt, /本批前文兼同句式参考·人工确认稿/);
+  }
+});

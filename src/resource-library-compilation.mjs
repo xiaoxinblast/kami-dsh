@@ -67,7 +67,7 @@ export function libraryResource(record, source) {
 export function createResourceLibraryCompiler(dataDirectory) {
   const writes = new Map();
   const identity = (group) => JSON.stringify([group.workspace, group.projectId, group.purpose, group.libraryId || ""]);
-  const path = (group) => join(dataDirectory, "runtime", "compiled-resources", `${createHash("sha256").update(identity(group)).digest("hex")}.json`);
+  const path = (group) => join(dataDirectory, "runtime", "compiled-resources", `${createHash("sha256").update(identity(group) + (group.purpose === "style-guide" ? ":kami-guide-v1" : "")).digest("hex")}.json`);
   async function read(group, memo) {
     const file = path(group);
     if (memo?.has(file)) return memo.get(file);
@@ -106,7 +106,7 @@ export function createResourceLibraryCompiler(dataDirectory) {
       }
       candidates = mergeLibraryEntries(candidates, group.purpose, group.libraryId);
       const record = { version: 2, workspace: group.workspace, projectId: group.projectId, purpose: group.purpose, libraryId: group.libraryId || "",
-        sources: [...sources.values()], ...(group.purpose === "style-guide" ? { guides: [...guides.values()] } : { candidates }),
+        sources: [...sources.values()], ...(group.purpose === "style-guide" ? { format: "kami-guide-v1", guides: [...guides.values()] } : { candidates }),
         duplicateCount: group.purpose === "style-guide" ? sources.size - guides.size : [...sources.values()].reduce((sum, source) => sum + source.candidateCount, 0) - candidates.length };
       const temporary = `${file}.${randomUUID()}.tmp`;
       await mkdir(dirname(file), { recursive: true });

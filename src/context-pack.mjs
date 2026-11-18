@@ -83,6 +83,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
     })) : [],
     userProfile: userProfile ? {
       id: String(userProfile.id || ""),
+      ...(userProfile.nativeGuidePointer === true ? { nativeGuidePointer: true } : {}),
       name: String(userProfile.name || "译者画像"),
       instruction: String(userProfile.instruction || ""),
       version: Number(userProfile.version) || 1,

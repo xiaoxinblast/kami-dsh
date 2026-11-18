@@ -54,7 +54,7 @@ test("local resources use original files and agent observations without upload l
     const snapshot = (await workbench.store.request(`/items/batch_runs/${prepared.batchId}`)).runner_options.workspaceSnapshot;
     assert.equal(snapshot.guide, null);
     assert.doesNotMatch(JSON.stringify(snapshot), /按钮使用保存/);
-    assert.equal(fullResourceReads, 0); assert.equal(referenceRanges, 0);
+    assert.equal(fullResourceReads, 0); assert.ok(referenceRanges > 0, "guide versions use a content hash");
     assert.equal(snapshot.resources[0].reader, "agent-native");
     const qa = await workbench.invoke({ path: "/api/auto-qa", method: "POST", body: { projectId: snapshot.projectId, locale: "zh-CN", source: "設定を保存します。", translation: "保存设置。", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "独立审校同样查阅原始 PDF，按钮使用保存。" }] } }, context);
     assert.match(qa.styleProfile.instruction, /风格.pdf/);
@@ -63,8 +63,8 @@ test("local resources use original files and agent observations without upload l
     await writeFile(join(cwd, "风格.pdf"), "changed original");
     const current = await workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "stale" }] }, context);
     assert.equal((await workbench.store.request(`/items/batch_runs/${current.batchId}`)).runner_options.workspaceSnapshot.guide, null);
-    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", compiledPath: "unread.json" }, context), /不提交编译结果/);
-    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "stale" }] }, context), /不提交编译结果/);
+    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", compiledPath: "unread.json" }, context), /ENOENT|FS_NOT_FOUND/);
+    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "stale" }] }, context), /版本发生变化/);
     assert.equal(await readFile(join(cwd, "风格.pdf"), "utf8"), "changed original");
   } finally {
     await workbench.close(); await close();

@@ -2,7 +2,7 @@ const actionable = new Set(["protected_token", "fact_url_missing", "fact_placeho
   "forbidden_term", "tm_exact_target_mismatch", "fact_number_missing", "fact_percentage_mismatch", "fact_date_missing",
   "fact_money_mismatch", "fact_platform_missing", "fact_region_missing", "length_limit_exceeded"]);
 
-function proofreadingHints(issues) {
+export function proofreadingHints(issues) {
   const exactTokens = new Set(issues.filter(issue => ["fact_url_missing", "fact_placeholder_missing"].includes(issue.type))
     .map(issue => issue.fact?.value).filter(Boolean));
   const hints = new Set(issues.filter(issue => actionable.has(issue.type) && issue.severity !== "info"
