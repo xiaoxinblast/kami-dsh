@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
-import { saveAsset, saveLearningTrajectory } from "../src/store.mjs";
+import { getBatchRun, saveAsset, saveBatchRun, saveLearningTrajectory } from "../src/store.mjs";
 
 const xml = (targets = ["", "", "保存。"]) => `<?xml version="1.0" encoding="UTF-8"?><xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:mq="MQXliff" version="1.2"><file original="story"><body>${["星屑結晶を使います。", "帰還します。", "保存します。"].map((source, index) => `<trans-unit id="${index + 1}"><source>${source}</source><target>${targets[index]}</target><context-group><context context-type="x-mmq-context">STORY_${index + 1}</context></context-group></trans-unit>`).join("")}</body></file></xliff>`;
 
@@ -143,4 +143,36 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
     assert.ok(skill.evidenceIds.every((id) => !holdoutIds.includes(id)));
     assert.equal(evaluated.champion.id, overview.champion.id, "evaluation never activates a candidate automatically");
   } finally { release(); await pendingReview?.catch(() => {}); await workbench.close(); await close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("旧版批次缺少冻结资源快照时仍可关联人工终稿，跨工作区快照仍被拒绝", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kami-legacy-reviewed-final-")), cwd = join(directory, "workspace");
+  await mkdir(cwd);
+  const { fs, close } = await workspaceFs();
+  const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async () => ({ content: "{}" }) });
+  const context = { cwd, fs, human: true };
+  try {
+    const state = await workbench.workspace({ action: "bind", name: "legacy reviewed final" }, context);
+    const projectId = state.project.id, master = state.libraries.find((library) => library.role === "master");
+    await writeFile(join(cwd, "source.mqxliff"), xml());
+    const prepared = await workbench.importFile({ path: "source.mqxliff" }, context);
+    const segments = prepared.segments.map((segment) => ({ ...segment, translation: "返航。", status: "done", result: { translation: "返航。" } }));
+    await workbench.invoke({ path: "/api/batch/run", method: "POST", body: { batchId: prepared.batchId, projectId, segments, runState: "completed" } }, context);
+    const operation = { action: "review-final", batchId: prepared.batchId, projectId, path: "reviewed.mqxliff", libraryId: master.id };
+    // 有快照但属于别的工作区：仍然拒绝。
+    const snapshot = await getBatchRun(prepared.batchId);
+    await saveBatchRun({ ...snapshot, runnerOptions: { ...snapshot.runnerOptions, workspaceSnapshot: { ...snapshot.runnerOptions.workspaceSnapshot, workspace: "/another/workspace" } } });
+    await writeFile(join(cwd, "reviewed.mqxliff"), xml(["使用星屑晶石。", "返回。", "保存。"]));
+    await assert.rejects(workbench.perform(operation, context), /工作区/);
+    // 旧版批次没有快照：原文件与项目已能定位来源，允许关联。
+    const legacy = await getBatchRun(prepared.batchId), runnerOptions = { ...legacy.runnerOptions };
+    delete runnerOptions.workspaceSnapshot;
+    await saveBatchRun({ ...legacy, runnerOptions });
+    const report = await workbench.perform(operation, context);
+    assert.equal(report.matched, 2);
+    assert.equal(report.memoriesWritten, 3, "含未参与 AI 翻译、已有译文的条目");
+    const linked = await getBatchRun(prepared.batchId);
+    assert.equal(linked.runnerOptions.reviewFinal.path, "reviewed.mqxliff");
+    assert.equal(linked.runnerOptions.reviewFinal.complete, true);
+  } finally { await workbench.close(); await close(); await rm(directory, { recursive: true, force: true }); }
 });

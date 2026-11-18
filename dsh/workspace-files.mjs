@@ -485,7 +485,9 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     if (!args.batchId) throw new Error("关联人工终稿需要原翻译批次 ID");
     const response = await invoke({ path: `/api/batch/run/${encodeURIComponent(args.batchId)}?projectId=${encodeURIComponent(state.config.projectId)}` }, context);
     const run = response.run || response;
-    if (run.runnerOptions?.workspaceSnapshot?.workspace !== state.workspace) throw new Error("原批次属于另一个工作区，不能关联此终稿");
+    // 旧版批次没有冻结资源快照；原文件快照与项目校验已能定位来源，不按工作区阻断关联。
+    const snapshotWorkspace = run.runnerOptions?.workspaceSnapshot?.workspace;
+    if (snapshotWorkspace && snapshotWorkspace !== state.workspace) throw new Error("原批次属于另一个工作区，不能关联此终稿");
     if (["running", "queued"].includes(run.runState) || run.workflow?.writeBusy) throw new Error("当前翻译或 QA 尚未结束，请稍后关联人工终稿");
     if (!/\.(mqxliff|xliff)$/iu.test(args.path || "") || !["mqxliff", "xliff"].includes(run.format)) throw new Error("人工终稿需要与原批次对应的 MQXLIFF / XLIFF 双语文件");
     const library = fileLibrary(state.libraries, "tm", args.libraryId || state.libraries.find((item) => item.kind === "translation_memory" && item.role === "master")?.id);
