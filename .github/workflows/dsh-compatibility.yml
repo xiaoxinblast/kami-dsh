@@ -1,0 +1,104 @@
+name: DSH Windows compatibility
+run-name: DSH compatibility - ${{ inputs.version || 'upstream check' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact official DSH version; empty selects highest published SemVer (including RCs)'
+        required: false
+        type: string
+      retry:
+        description: 'Repeat an already completed upstream version + plugin SHA attempt'
+        default: false
+        type: boolean
+  schedule:
+    - cron: '41 7 * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: dsh-compatibility
+  cancel-in-progress: false
+
+jobs:
+  select:
+    name: Select official upstream release
+    runs-on: windows-2022
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      should_run: ${{ steps.release.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.21.0'
+      - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run test:compatibility
+      - id: release
+        run: node scripts/ci/dsh-release.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DSH_UPSTREAM_VERSION: ${{ inputs.version }}
+          DSH_RETRY: ${{ inputs.retry }}
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: upstream-selection
+          path: .cache/compatibility/selection.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  smoke:
+    name: Windows smoke (${{ needs.select.outputs.version }})
+    needs: select
+    if: needs.select.outputs.should_run == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.21.0'
+      - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run portable regression suite
+        run: npm test -- --test-concurrency=1 --test-timeout=120000
+      - name: Build, pack, install and activate in an isolated Windows profile
+        shell: pwsh
+        run: ./scripts/ci/windows-smoke.ps1 -Version $env:DSH_UPSTREAM_VERSION
+        env:
+          DSH_UPSTREAM_VERSION: ${{ needs.select.outputs.version }}
+      - name: Report smoke outcome
+        if: always()
+        shell: pwsh
+        run: |
+          $reports = Get-ChildItem -Path .cache/compatibility -Filter result.json -Recurse -ErrorAction SilentlyContinue
+          foreach ($report in $reports) {
+            "``````json" >> $env:GITHUB_STEP_SUMMARY
+            Get-Content -LiteralPath $report.FullName >> $env:GITHUB_STEP_SUMMARY
+            "``````" >> $env:GITHUB_STEP_SUMMARY
+          }
+          if (-not $reports) { 'Smoke did not produce a passing report; inspect the failed step.' >> $env:GITHUB_STEP_SUMMARY }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: windows-dsh-${{ needs.select.outputs.version }}-${{ github.sha }}
+          retention-days: 30
+          include-hidden-files: true
+          path: |
+            .cache/compatibility/*/result.json
+            .cache/compatibility/*/network.jsonl
+            .cache/compatibility/*/pack.json
+            .cache/compatibility/*/*.tgz
+            .cache/compatibility/*/install/*/package-lock.json

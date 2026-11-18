@@ -1,6 +1,6 @@
 {
   "name": "kami-dsh",
-  "version": "0.9.36",
+  "version": "0.9.37",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,17 +17,18 @@
     "directus:drop-shares": "node --env-file=directus/.env scripts/cleanup-shares-collection.mjs",
     "directus:snapshot": "docker compose --env-file directus/.env -f directus/docker-compose.yml exec -T directus node /directus/cli.js schema snapshot --yes /directus/schema/snapshot.yaml",
     "dsh:check": "node scripts/check-bundle.mjs",
-    "migrate:local": "node scripts/migrate-local.mjs"
+    "migrate:local": "node scripts/migrate-local.mjs",
+    "test:compatibility": "node --test tests/compatibility-ci.test.mjs tests/compatibility-selection.test.mjs tests/dsh-runtime-compatibility.test.mjs"
   },
   "engines": {
     "node": ">=24.2",
-    "dsh": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3"
+    "dsh": ">=0.2.2-rc.2 <0.2.3-0"
   },
   "dependencies": {
-    "@napi-rs/canvas": "^1.0.9",
-    "exceljs": "^4.4.0",
-    "jszip": "^3.10.1",
-    "pdfjs-dist": "^6.3.289",
+    "@napi-rs/canvas": "1.0.9",
+    "exceljs": "4.4.0",
+    "jszip": "3.10.1",
+    "pdfjs-dist": "6.3.289",
     "saxes": "5.0.1"
   },
   "overrides": {
@@ -53,7 +54,8 @@
     "locale/",
     "scripts/migrate-local.mjs",
     "docs/DSH.md",
-    "scripts/check-bundle.mjs"
+    "scripts/check-bundle.mjs",
+    "docs/compatibility-ci.md"
   ],
   "dsh": {
     "bundle": {
@@ -76,16 +78,16 @@
     "url": "https://github.com/xiaoxinblast/kami-dsh.git"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-tool-executor-native": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-bash-local": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-tool-bash": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-tool-pwsh": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-tool-skill": "0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3"
+    "@deepseek-ai/dsh-home-paths": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-tool-executor-native": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-bash-local": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-tool-bash": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-tool-pwsh": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-skill-filesystem": ">=0.2.2-rc.2 <0.2.3-0",
+    "@deepseek-ai/dsh-tool-skill": ">=0.2.2-rc.2 <0.2.3-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-home-paths": {
@@ -118,5 +120,8 @@
     "@deepseek-ai/dsh-tool-skill": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "semver": "7.8.5"
   }
 }
