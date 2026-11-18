@@ -19,11 +19,9 @@ function escapeRegExp(value) {
 }
 
 function decodeXml(value) {
-  return String(value || "")
-    .replace(/&lt;/gu, "<").replace(/&gt;/gu, ">")
-    .replace(/&quot;/gu, '"').replace(/&apos;/gu, "'").replace(/&amp;/gu, "&")
-    .replace(/&#(\d+);/gu, (_, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/giu, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)));
+  const named = { lt: "<", gt: ">", quot: '"', apos: "'", amp: "&" };
+  return String(value || "").replace(/&(lt|gt|quot|apos|amp|#(\d+)|#x([\da-fA-F]+));/gu, (_, entity, decimal, hex) =>
+    named[entity] ?? String.fromCodePoint(decimal ? Number(decimal) : Number.parseInt(hex, 16)));
 }
 
 function encodeXml(value) {
@@ -422,9 +420,27 @@ export function prepareXliffDocument(buffer, filename) {
 }
 
 /** Read existing bilingual XLIFF/MQXLIFF pairs for manual TM import. */
-export function extractXliffPairs(buffer, filename, { includeEmptyTargets = false } = {}) {
+export function extractXliffPairs(buffer, filename, { includeEmptyTargets = false, verifyLibrary = false } = {}) {
   const extension = String(filename || "").toLowerCase().endsWith(".mqxliff") ? "mqxliff" : "xliff";
   const parsed = parseXliffXml(decodeXmlBuffer(buffer), extension);
+  if (verifyLibrary) {
+    const attr = (node, name) => node && attributeValue(attributes(parsed.xml, node), name);
+    if (attr(parsed.root, "version") !== "1.2") fail("本地规则只支持 XLIFF 1.2。");
+    const files = parsed.root.children.filter((child) => child.local === "file");
+    if (!files.length || descendants(parsed.root).some((child) => ["bin-unit", "alt-trans", "seg-source", "unit", "segment"].includes(child.local))) fail("XLIFF 缺少文件或含二进制、分段、备选翻译结构，需要核对原件。");
+    for (const unit of parsed.units) {
+      let file = unit.node.parent;
+      while (file && file.local !== "file") file = file.parent;
+      const sourceLangs = [attr(file, "source-language"), attr(unit.source, "xml:lang")].filter(Boolean);
+      const targetLangs = [attr(file, "target-language"), attr(unit.target, "xml:lang")].filter(Boolean);
+      if (!file || !sourceLangs.length || !targetLangs.length || !sourceLangs.every((lang) => /^ja(?:-jp)?$/iu.test(lang))
+          || !targetLangs.every((lang) => /^zh-(?:cn|sg|hans(?:-(?:cn|sg))?)$/iu.test(lang))) fail(`XLIFF 条目 ${unit.id} 缺少明确的日语到简中语言标记。`);
+      if (!unit.sourceText.trim() || !unit.targetText.trim()) fail(`XLIFF 条目 ${unit.id} 缺少原文或译文。`);
+      if (unit.source.children.length || unit.target.children.length || /<!\[CDATA\[|<!--/u.test(rawInner(parsed.xml, unit.source) + rawInner(parsed.xml, unit.target))) fail(`XLIFF 条目 ${unit.id} 含内联标记，需要核对原译文对应关系。`);
+      if (unit.node.children.filter((node) => node.local === "target").length !== 1 || unit.node.children.filter((node) => node.local === "source").length !== 1) fail(`XLIFF 条目 ${unit.id} 的原文或译文列不唯一。`);
+      unit.file = attr(file, "original") || filename;
+    }
+  }
   return parsed.units
     .filter((unit) => unit.sourceText.trim() && (includeEmptyTargets || unit.targetText.trim()))
     .map((unit) => ({
@@ -432,6 +448,7 @@ export function extractXliffPairs(buffer, filename, { includeEmptyTargets = fals
       entryKey: unit.memoQContext || "",
       source: unit.sourceText,
       target: unit.targetText,
+      ...(verifyLibrary ? { file: unit.file, rowNumber: unit.index } : {}),
       previousSource: parsed.units[unit.index - 2]?.sourceText || "",
       nextSource: parsed.units[unit.index]?.sourceText || "",
       context: [unit.context, unit.note].filter(Boolean).join(" | "),

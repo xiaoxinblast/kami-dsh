@@ -15,7 +15,7 @@ export function mergeLibraryEntries(entries, purpose, scope = "") {
   const merged = new Map();
   for (const entry of entries) {
     const key = JSON.stringify([scope || entry.linkedLibraryId || entry.libraryId || "", entry.source, entry.target, entry.domain || "", entry.contentType || "", entry.enforcement || "", entry.preserveOriginal || false,
-      ...(purpose === "tm" ? [entry.context || "", entry.entryKey || "", entry.entryId || ""] : [])]);
+      entry.context || "", ...(purpose === "tm" ? [entry.entryKey || "", entry.entryId || ""] : [])]);
     let value = merged.get(key);
     if (!value) { value = { entry, origins: new Map() }; merged.set(key, value); }
     for (const origin of entry.origins || []) value.origins.set(JSON.stringify(origin), origin);
@@ -85,9 +85,12 @@ export function createResourceLibraryCompiler(dataDirectory) {
     const file = path(group), previous = writes.get(file) || Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
       const saved = await read(group), replaced = new Set(updates.map((item) => item.source.path));
-      const changes = saved ? updates : [...(await seed()).filter((item) => !replaced.has(item.source.path)), ...updates];
+      const changes = saved ? updates.filter(({ source, parsed }) => !(parsed.method === "local" || parsed.reason) || !librarySource(saved, source))
+        : [...(await seed()).filter((item) => !replaced.has(item.source.path)), ...updates];
+      if (saved && !changes.length) return saved;
       const changed = new Set(changes.map((item) => item.source.path));
       const sources = new Map((saved?.sources || []).map((source) => [source.path, source]));
+      const pending = new Map((saved?.pending || []).map((item) => [item.path, item]));
       let candidates = (saved?.candidates || []).map((entry) => ({ ...entry,
         origins: entry.origins.filter((origin) => !changed.has(origin.path)) })).filter((entry) => entry.origins.length);
       const guides = new Map();
@@ -96,17 +99,23 @@ export function createResourceLibraryCompiler(dataDirectory) {
         if (origins.length) guides.set(guide.text, { text: guide.text, origins });
       }
       for (const { source, parsed } of changes) {
-        sources.set(source.path, { path: source.path, hash: source.hash, candidateCount: parsed.candidates?.length || 0, characters: parsed.characters || [...(parsed.text || "")].length, skippedCount: parsed.skippedCount || 0 });
+        if (parsed.reason) {
+          sources.delete(source.path);
+          pending.set(source.path, { path: source.path, hash: source.hash, reason: parsed.reason });
+          continue;
+        }
+        pending.delete(source.path);
+        sources.set(source.path, { path: source.path, hash: source.hash, ...(parsed.method ? { method: parsed.method } : {}), candidateCount: parsed.candidates?.length || 0, characters: parsed.characters || [...(parsed.text || "")].length, skippedCount: parsed.skippedCount || 0 });
         if (group.purpose === "style-guide") {
           if (!guides.has(parsed.text)) guides.set(parsed.text, { text: parsed.text, origins: [] });
           guides.get(parsed.text).origins.push({ path: source.path, hash: source.hash });
         }
         else for (const entry of parsed.candidates) candidates.push({ ...entry, origins: [{ path: source.path, hash: source.hash,
-          note: entry.note || "", aliases: entry.aliases || [], file: entry.file || source.path, ...(entry.rowNumber ? { rowNumber: entry.rowNumber } : {}) }] });
+          note: entry.note || "", aliases: entry.aliases || [], file: entry.file || source.path, ...(entry.sheet ? { sheet: entry.sheet } : {}), ...(entry.entryId ? { entryId: entry.entryId } : {}), ...(entry.rowNumber ? { rowNumber: entry.rowNumber } : {}) }] });
       }
       candidates = mergeLibraryEntries(candidates, group.purpose, group.libraryId);
       const record = { version: 2, workspace: group.workspace, projectId: group.projectId, purpose: group.purpose, libraryId: group.libraryId || "",
-        sources: [...sources.values()], ...(group.purpose === "style-guide" ? { format: "kami-guide-v1", guides: [...guides.values()] } : { candidates }),
+        sources: [...sources.values()], ...(pending.size ? { pending: [...pending.values()] } : {}), ...(group.purpose === "style-guide" ? { format: "kami-guide-v1", guides: [...guides.values()] } : { candidates }),
         duplicateCount: group.purpose === "style-guide" ? sources.size - guides.size : [...sources.values()].reduce((sum, source) => sum + source.candidateCount, 0) - candidates.length };
       const temporary = `${file}.${randomUUID()}.tmp`;
       await mkdir(dirname(file), { recursive: true });

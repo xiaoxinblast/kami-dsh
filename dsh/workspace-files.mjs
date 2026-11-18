@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { extractTermPairs } from "../src/table-term-extractor.mjs";
+import { localResourceInput, unsupportedResource } from "../src/local-resource-compiler.mjs";
 import { extractXliffPairs } from "../src/xliff-document.mjs";
 import { readBatchOriginal } from "../src/batch-originals.mjs";
 import { matchReviewPairsToSegments } from "../src/external-review.mjs";
@@ -132,7 +132,7 @@ async function readSource(root, path, context, maxBytes, metadataOnly = false, c
   } else bytes = Buffer.from(await context.fs.readBytes(entry.target, context.signal, maxBytes ?? info.size));
   const after = await context.fs.stat(entry.target, context.signal);
   if ((maxBytes !== undefined && bytes?.length > maxBytes) || after?.version !== info.version || await realpath(context.fs.processPath(entry.target)) !== entry.actual) throw new Error(`读取期间文件发生变化，请重试：${entry.name}`);
-  const source = { path: entry.name, filename: basename(entry.name), hash: digest || hash(bytes), ...(metadataOnly ? {} : { bytes }), size: info.size };
+  const source = { path: entry.name, filename: basename(entry.name), hash: digest || hash(bytes), ...(metadataOnly ? {} : { bytes, version: info.version }), size: info.size };
   if (metadataOnly && info.version !== undefined) cache?.set(entry.actual, { version: info.version, source });
   return source;
 }
@@ -219,6 +219,25 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     memo?.set(file, pending);
     return pending;
   }
+  async function localParse(state, purpose, source, context) {
+    const original = await readSource(state.workspace, source.path, context);
+    if (original.hash !== source.hash) throw new Error(`本地编译期间原文件版本发生变化，请重试：${source.path}`);
+    let parsed;
+    try {
+      const input = await localResourceInput(purpose, source.path, original.bytes);
+      parsed = { ...compiledResource(purpose, input), method: "local" };
+    } catch (error) {
+      parsed = { reason: error.message };
+    }
+    const unchanged = original.version !== undefined
+      ? (await referenceSource(state.workspace, source.path, context)).version === original.version
+      : (await readSource(state.workspace, source.path, context, undefined, true)).hash === source.hash;
+    if (!unchanged) throw new Error(`本地编译期间原文件版本发生变化，请重试：${source.path}`);
+    return parsed;
+  }
+  function pendingReason(record, purpose, source) {
+    return record?.pending?.find((item) => item.path === source.path && item.hash === source.hash)?.reason || unsupportedResource(purpose, source.path);
+  }
   async function compilation(state, purpose, source, args, context, memo) {
     if (args.register === false && (args.compiledPath || args.resourceContext?.length)) throw new Error("仅核查文件信息时不能提交编译结果");
     const group = compilationGroup(state, purpose, source.path, args.libraryId);
@@ -229,17 +248,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       inputs = value.resources ?? [{ ...value, path: value.source?.path, hash: value.source?.hash }];
       if (!Array.isArray(inputs) || !inputs.length) throw new Error("库更新文件需要非空的 resources 编译结果数组");
     } else inputs = resourceObservations(args.resourceContext);
-    // Plain UTF-8 already carries the full guide, including Markdown examples and tables.
-    if (!inputs.length && purpose === "style-guide" && args.register !== false && /\.(txt|md)$/iu.test(source.path) && !librarySource(await libraryRecord(group, context, memo), source)) {
-      const original = await readSource(state.workspace, source.path, context);
-      if (original.hash !== source.hash) throw new Error("风格指南读取期间发生变化，请重新关联");
-      let text = "";
-      try { text = new TextDecoder("utf-8", { fatal: true }).decode(original.bytes); }
-      catch (error) { if (error.code !== "ERR_ENCODING_INVALID_ENCODED_DATA") throw error; }
-      // Embedded images or local links may carry additional rules and require visual inspection.
-      if (text.trim() && !/\0|!\[|<img\b|\]\([^)]*\)/iu.test(text)) inputs = [{ path: source.path, hash: source.hash, format: "kami-guide-v1", complete: true, style_guide: text }];
-    }
-    let record;
+    let record, reason;
     if (inputs.length) {
       if (!inputs.some((item) => item?.path === source.path)) throw new Error("资源编译结果的来源路径与原文件不一致");
       const seen = new Set(), allowed = new Set(group.paths), updates = [];
@@ -252,9 +261,18 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
         updates.push({ source: original, parsed: compiledResource(purpose, input) });
       }
       record = await compiler.update(group, updates, { seed: () => legacyCompilations(group, context, seen) });
-    } else record = await libraryRecord(group, context, memo);
+    } else {
+      record = await libraryRecord(group, context, memo);
+      reason = pendingReason(record, purpose, source);
+      if (args.register !== false && !reason && !librarySource(record, source)) {
+        const parsed = await localParse(state, purpose, source, context);
+        reason = parsed.reason;
+        record = await compiler.update(group, [{ source, parsed }], { seed: () => legacyCompilations(group, context, new Set([source.path])) });
+      }
+    }
+    memo?.set(compiler.path(group), record);
     const parsed = librarySource(record, source);
-    return { status: parsed ? "ready" : "pending", format: purpose, libraryId: group.libraryId, libraryName: group.libraryName,
+    return { status: parsed ? "ready" : "pending", ...(parsed ? { method: parsed.method || "agent" } : { reason: reason || "当前版本尚未尝试本地编译。" }), format: purpose, libraryId: group.libraryId, libraryName: group.libraryName,
       compiledFile: compiler.path(group), librarySourceCount: group.paths.length, libraryItemCount: record?.candidates?.length || 0,
       duplicateCount: record?.duplicateCount || 0, ...(parsed ? { itemCount: parsed.candidateCount || 0, characters: parsed.characters || 0, skippedCount: parsed.skippedCount || 0 } : {}) };
   }
@@ -271,14 +289,14 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       const version = await compilationVersion(file), cached = statusCoverage.get(file);
       if (cached?.version === version) return cached.sources;
       const record = await libraryRecord(group, context);
-      const sources = new Map((record?.sources || []).map((source) => [source.path, source.hash]));
+      const sources = new Map([...(record?.pending || []), ...(record?.sources || [])].map((source) => [source.path, source]));
       if (version === await compilationVersion(file)) statusCoverage.set(file, { version, sources });
       return sources;
     })();
     memo.set(file, pending);
     return pending;
   }
-  async function compilationRequests(state, selection, context) {
+  async function compilationRequests(state, selection, context, localFirst) {
     const catalog = compilationCatalog(state), enabled = new Set(state.libraries.filter((library) => library.enabled !== false).map((library) => library.id));
     if (selection === undefined) selection = Object.entries(fields).filter(([purpose]) => purpose !== "reference").flatMap(([purpose, field]) => state.config[field].filter((path) => {
       const group = catalog.files.get(`${purpose}\0${path}`);
@@ -299,7 +317,18 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
         updatePath: `.kami/compiled/${purpose}-${hash(`${state.config.projectId}\0${id}`).slice(0, 16)}.json`, files: [] });
       try {
         const source = await readSource(state.workspace, path, context, undefined, true, statusSources), coverage = await compilationCoverage(group, context, memo);
-        groups.get(id).files.push({ path, hash: source.hash, status: coverage.get(path) === source.hash ? "ready" : "pending" });
+        const saved = coverage.get(path), current = saved?.hash === source.hash ? saved : null;
+        let reason = current?.reason || unsupportedResource(purpose, path);
+        let ready = current && !current.reason;
+        let compiledNow = false;
+        if (localFirst && !ready && !reason) {
+          const result = await compilation(state, purpose, source, {}, context);
+          ready = result.status === "ready";
+          compiledNow = ready;
+          reason = result.reason;
+          memo.delete(compiler.path(group));
+        }
+        groups.get(id).files.push({ path, hash: source.hash, status: ready ? "ready" : "pending", ...(compiledNow ? { compiledNow } : {}), ...(!ready && reason ? { reason } : {}) });
       } catch (error) { failures.push({ path, purpose, error: error.message }); }
     }
     return { projectId: state.config.projectId, groups: [...groups.values()], failures };
@@ -341,7 +370,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     const action = args.action || "status";
     const compilations = [];
     if (action === "status") return status(context);
-    if (action === "compilations") return compilationRequests(await bound(context, args.projectId), args.selection, context);
+    if (action === "compilations") return compilationRequests(await bound(context, args.projectId), args.selection, context, args.localFirst === true);
     if (action === "bind") {
       if (Boolean(args.projectId) === Boolean(args.name)) throw new Error("请明确指定已有 projectId 或新项目 name，二者选一");
       const root = await workspaceRoot(context);
@@ -383,7 +412,7 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     if (!fields[purpose]) throw new Error("未知的文件用途");
     const root = state.workspace;
     const observation = resourceContext.find((item) => relativePath(item.path) === relativePath(path));
-    let source = await readSource(root, path, context, undefined, true);
+    const source = await readSource(root, path, context, undefined, true);
     if (observation) {
       if (observation.hash !== source.hash) throw new Error(`Agent 查阅后原文件版本发生变化，请重新查看：${source.path}`);
       const text = String(observation.text || "").trim();
@@ -392,29 +421,14 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       return { path: source.path, filename: source.filename, purpose, hash: source.hash, size: source.size, reader: "agent",
         parsed: { text, candidates, characters: text.length } };
     }
-    if (purpose !== "reference") {
-      const parsed = libraryResource(await libraryRecord(compilationGroup(state, purpose, path, libraryId), context, memo), source);
-      if (parsed) return { path: source.path, filename: source.filename, purpose, hash: source.hash, size: source.size, reader: "agent", parsed };
-    }
-    if (!source.bytes) {
-      const originalHash = source.hash;
-      source = await readSource(root, path, context);
-      if (source.hash !== originalHash) throw new Error(`读取期间原文件版本发生变化，请重试：${source.path}`);
-    }
-    const cachePath = join(dataDirectory, "runtime", "workspace-resources", hash(`${root}\0${purpose}\0${source.path}`), `${source.hash}.json`);
-    let parsed;
-    try { parsed = JSON.parse(await readFile(cachePath, "utf8")); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
-    if (!parsed) {
-      if (/\.(?:mqxliff|xliff)$/iu.test(source.filename)) parsed = { candidates: extractXliffPairs(source.bytes, source.filename) };
-      else {
-        parsed = await extractTermPairs({ filename: source.filename, buffer: source.bytes, locale: "zh-CN" });
-        if (parsed.statistics.truncated) throw new Error(`表格超出解析行数上限：${source.path}`);
-      }
-      await mkdir(dirname(cachePath), { recursive: true });
-      await writeFile(cachePath, JSON.stringify(parsed));
-    }
-    return { path: source.path, filename: source.filename, purpose, hash: source.hash, size: source.size, parsed };
+    const group = compilationGroup(state, purpose, path, libraryId);
+    const record = await libraryRecord(group, context, memo);
+    let parsed = libraryResource(record, source);
+    if (parsed) return { ...source, purpose, reader: librarySource(record, source).method || "agent", parsed };
+    const reason = pendingReason(record, purpose, source);
+    parsed = reason ? { reason } : await localParse(state, purpose, source, context);
+    if (parsed.reason) return { ...source, purpose, reader: "pending", reason: parsed.reason, parsed: { candidates: [] } };
+    return { ...source, purpose, reader: "local", parsed };
   }
   async function snapshot(state, resources, context, resourceContext = []) {
     if (!resources || Array.isArray(resources) || typeof resources !== "object" || !Object.keys(resources).every((key) => [...Object.values(fields), "outputDirectory"].includes(key))) throw new Error("未知的任务资源字段");

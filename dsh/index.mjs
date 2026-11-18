@@ -4,6 +4,7 @@ import * as llm from "@deepseek-ai/dsh-llm";
 import { createWorkbench } from "./workbench.mjs";
 import { createModelAdapter, sessionModelRoute } from "./model-adapter.mjs";
 import { createWorkspaceReferenceTools } from "./reference-tools.mjs";
+import { sendWindowsAttention } from "./windows-notification.mjs";
 import { KamiUiService, TYPERT } from "./ui-bridge.mjs";
 
 export const inject = ["llm", "commands", "attachments", "sessionProjections", "agentDefaultModel", "typert", "workingDirectory", "fs", "sandboxPolicy", "agentPresets", "tools"];
@@ -12,7 +13,7 @@ export async function apply(ctx) {
   const profile = ctx.get("profileContext")?.name || process.env.DSH_PROFILE || "desktop";
   const dataDirectory = join(resolveDshHome(), "kami-dsh", profile);
   const abort = new AbortController();
-  const ready = createWorkbench({ dataDirectory, modelAdapter: createModelAdapter(ctx, llm) });
+  const ready = createWorkbench({ dataDirectory, modelAdapter: createModelAdapter(ctx, llm), notifyAttention: sendWindowsAttention });
   await ready;
   const contextFor = (agent, signal, human = false) => ({
     human,

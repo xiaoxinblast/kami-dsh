@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import ExcelJS from "exceljs";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { createWorkspaceReferenceTools } from "../dsh/reference-tools.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
@@ -43,7 +44,7 @@ async function fixture(run) {
   }
 }
 
-test("linking requests agent compilation and accepts native compilation files without a source layout template", async () => fixture(async ({ cwd, workbench, context, compile, state, messages }) => {
+test("linking nonstandard files offers agent compilation and accepts native results without a source layout template", async () => fixture(async ({ cwd, workbench, context, compile, state, messages }) => {
   const originals = { "terms.custom": "第三列是词名：星の剣；第七列是译名：星刃_术语探针；说明：装备名称。", "tm.custom": "旧译：星の剣を装備します。 → TM_句对探针。", "style.custom": "译文保持简洁。风格末尾探针_8137。" };
   for (const [path, text] of Object.entries(originals)) await writeFile(join(cwd, path), text);
   const pending = await workbench.importFile({ path: "terms.custom", purpose: "terms" }, context);
@@ -242,4 +243,89 @@ test("first library update migrates unchanged per-file caches without recompilin
   const record = JSON.parse(await readFile(result.compilation.compiledFile, "utf8"));
   assert.equal(record.sources.length, 2);
   assert.ok(record.candidates.some((item) => item.target === "保留旧编译"));
+}));
+
+test("link and configure compile every supported source locally, preserve provenance and cache by hash", async () => fixture(async (env) => {
+  const { cwd, context, messages } = env;
+  const workbook = new ExcelJS.Workbook();
+  for (const [sheet, target] of [["道具", "星石"], ["技能", "星晶"]]) {
+    const page = workbook.addWorksheet(sheet);
+    page.addRows([["备注", "日语", "简体中文"], [sheet, "星の石", target]]);
+  }
+  await workbook.xlsx.writeFile(join(cwd, "terms.xlsx"));
+  const guide = "# 指南\n\n| 正例 | 反例 |\n|---|---|\n|保存|存盘|";
+  const xml = '<xliff version="1.2"><file original="dialogue" source-language="ja-JP" target-language="zh-CN"><body><trans-unit id="42"><source>猫&amp;#65;</source><target>猫咪</target><note>台词</note></trans-unit></body></file></xliff>';
+  const tmx = '<tmx version="1.4"><header srclang="ja"/><body><tu tuid="123"><prop type="scene">仓库</prop><note>拾取</note><tuv xml:lang="zh-Hans"><seg>钥匙</seg></tuv><tuv xml:lang="ja"><seg>鍵</seg></tuv></tu></body></tmx>';
+  const files = { "style.md": guide, "plain.txt": "采用简体中文。", "terms.csv": '原文,译文,备注\n星,星星,"夜空, 天体"\n', "tm.tsv": "source\ttarget\tcontext\n旅に出る\t出发旅行\t地图", "cat.xliff": xml, "cat.mqxliff": xml, "keys.tmx": tmx };
+  for (const [file, value] of Object.entries(files)) await writeFile(join(cwd, file), value);
+  const resources = { terms: ["terms.xlsx", "terms.csv"], translationMemories: ["tm.tsv", "keys.tmx", "cat.xliff", "cat.mqxliff"], styleGuides: ["style.md", "plain.txt"] };
+  const configured = await env.workbench.workspace({ action: "configure", resources }, context);
+  assert.equal(configured.compilations.length, 8);
+  assert.ok(configured.compilations.every(({ compilation }) => compilation.status === "ready" && compilation.method === "local"));
+  const info = await env.workbench.importFile({ path: "terms.xlsx", purpose: "terms" }, context);
+  assert.equal(info.compilation.itemCount, 2);
+  const before = await readFile(info.compilation.compiledFile);
+  const fullRead = context.fs.readBytes.bind(context.fs);
+  context.fs.readBytes = (target, ...args) => {
+    assert.ok(!context.fs.processPath(target).endsWith("terms.xlsx"), "unchanged workbook should never reach the parser");
+    return fullRead(target, ...args);
+  };
+  await env.restart();
+  assert.equal((await env.workbench.importFile({ path: "terms.xlsx", purpose: "terms" }, context)).compilation.status, "ready");
+  assert.deepEqual(await readFile(info.compilation.compiledFile), before);
+  await writeFile(join(cwd, "source.txt"), "猫");
+  const prepare = async () => {
+    const batch = await env.workbench.importFile({ path: "source.txt" }, context);
+    return (await env.workbench.store.request(`/items/batch_runs/${batch.batchId}`)).runner_options.workspaceSnapshot;
+  };
+  const snapshot = await prepare();
+  assert.match(snapshot.guide.instruction, /\| 正例 \| 反例 \|/u);
+  assert.deepEqual(snapshot.terms.filter((t) => t.source === "星の石").map((t) => [t.target, t.origins[0].sheet, t.origins[0].rowNumber]), [["星石", "道具", 2], ["星晶", "技能", 2]]);
+  assert.equal(snapshot.terms.find((t) => t.source === "星").note, "夜空, 天体");
+  assert.equal(snapshot.memories.find((t) => t.target === "出发旅行").context, "地图");
+  const key = snapshot.memories.find((t) => t.target === "钥匙"), cat = snapshot.memories.find((t) => t.target === "猫咪");
+  assert.deepEqual([key.entryId, key.context, key.note], ["123", "scene: 仓库", "拾取"]);
+  assert.equal(cat.source, "猫&#65;");
+  assert.deepEqual([cat.entryId, cat.file, cat.context, cat.origins.length], ["42", "dialogue", "台词", 2]);
+  await writeFile(join(cwd, "terms.csv"), "原文,译文,译文\n星,天星,星");
+  const ambiguous = await env.workbench.importFile({ path: "terms.csv", purpose: "terms" }, context);
+  assert.equal(ambiguous.compilation.status, "pending"); assert.match(ambiguous.compilation.reason, /2 个.*译文列/);
+  await env.restart();
+  const pending = await prepare();
+  assert.ok(!pending.terms.some((t) => t.source === "星"));
+  assert.equal(pending.resources.find((r) => r.path === "terms.csv").reader, "pending");
+  assert.equal(pending.terms.length, 2);
+  const preview = await env.workbench.importFile({ path: "terms.csv", purpose: "terms", register: false }, context);
+  assert.equal(preview.compilation.reason, ambiguous.compilation.reason);
+  await writeFile(join(cwd, "terms.csv"), "原文,译文\n星,天星");
+  const plan = await env.workbench.workspace({ action: "compilations", localFirst: true }, context);
+  assert.ok(plan.groups.every((g) => g.files.every((f) => f.status === "ready")));
+  assert.equal((await prepare()).terms.find((t) => t.source === "星").target, "天星");
+  assert.deepEqual(messages, []);
+}));
+
+test("incomplete sheets, XML and illustrated guides give per-file reasons without publishing partial entries", async () => fixture(async ({ cwd, workbench, context, messages }) => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.addWorksheet("术语").addRows([["日语", "译文"], ["猫", "猫"]]);
+  workbook.addWorksheet("补录").addRows([["原文", "译文"], ["欠ける", ""]]);
+  await workbook.xlsx.writeFile(join(cwd, "mixed.xlsx"));
+  const xliff = (lang, target) => `<xliff version="1.2"><file source-language="ja" target-language="${lang}"><body><trans-unit id="b"><source>刀</source><target>${target}</target></trans-unit></body></file></xliff>`;
+  const cases = [
+    ["terms", "mixed.xlsx", null, /补录.*2 行.*缺少/],
+    ["tm", "inline.xlf", xliff("zh-CN", "刀<x id='1'/>"), /内联/],
+    ["tm", "wrong.xliff", xliff("zh-TW", "刀"), /语言/],
+    ["tm", "bad.tmx", "<tmx><body><tu><tuv xml:lang='ja'><seg>犬</seg></tuv></tu></body></tmx>", /日语和简中/],
+    ["style-guide", "image.md", "规则见图。\n![例外](example.png)", /图片/],
+    ["style-guide", "invalid.txt", Buffer.from([0xff, 0x81]), /解码/]
+  ];
+  for (const [purpose, path, content, expected] of cases) {
+    if (content !== null) await writeFile(join(cwd, path), content);
+    const result = await workbench.importFile({ path, purpose }, context);
+    assert.equal(result.registered, true);
+    assert.equal(result.compilation.status, "pending"); assert.match(result.compilation.reason, expected);
+    assert.equal(result.compilation.libraryItemCount, 0);
+  }
+  const plan = await workbench.workspace({ action: "compilations" }, context);
+  assert.equal(plan.groups.flatMap((g) => g.files).filter((f) => f.reason).length, cases.length);
+  assert.deepEqual(messages, []);
 }));

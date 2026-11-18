@@ -4,6 +4,8 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { batchAttention } from "../src/batch-attention.mjs";
+import { checkRoundedField } from "./helpers/rounded-field.mjs";
 import { buildBatchWorkflow } from "../public/batch-status.js";
 
 test("DSH exposes single, cross-page and all-failed retries at wide and narrow widths", { skip: !process.env.KAMI_BROWSER_TEST_MODULE || !process.env.KAMI_REACT_DIRECTORY, timeout: 60000 }, async () => {
@@ -11,7 +13,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
   const operations = [], segments = Array.from({ length: 25 }, (_, i) => ({ id: `s${i + 1}`, source: `設定を保存します。${i + 1}`, translation: i === 24 ? "" : `保存设置。${i + 1}`, selected: true,
     status: i === 24 ? "pending" : i === 0 ? "error" : "done", error: i === 0 ? "模型输出被截断" : "", retryTranslationReason: i === 0 ? "模型输出被截断" : "",
     accepted: i === 3, result: { aiQa: i === 1 || i === 20 ? { fallbackReason: "请求中断，QA 未完成" } : { used: true, score: 95 } } }));
-  const run = { batchId: "retry-batch", projectId: "p", locale: "zh-CN", filename: "重试验收.mqxliff", runState: "paused", segments, runnerOptions: {}, workflow: {} };
+  const run = { batchId: "retry-batch", projectId: "p", locale: "zh-CN", filename: "重试验收.mqxliff", runState: "needs_attention", segments, runnerOptions: {}, workflow: {} };
   for (const [index, status] of [[4, "pending"], [5, "completed"], [6, "completed"]]) {
     segments[index].result.stages = { translation: { status: "completed" }, proofreading: { status }, localQa: { status: index === 6 ? "completed" : "pending" } };
   }
@@ -45,7 +47,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
       let value = {};
       if (operation.action === "workspace") value = { workspace: "D:/retry", config: { projectId: "p" }, project: { id: "p", name: "重试验收" } };
       else if (operation.path === "/api/projects") value = { projects: [{ id: "p", name: "重试验收" }] };
-      else if (operation.path?.startsWith("/api/batch/files")) value = { files: [run] };
+      else if (operation.path?.startsWith("/api/batch/files")) value = { files: [{ ...run, attention: batchAttention(run) }] };
       else if (operation.path?.startsWith("/api/tasks")) value = [];
       else if (operation.method === "POST" && /\/retry-(translation|qa|proofreading)$/.test(operation.path)) {
         operations.push(operation);
@@ -65,6 +67,12 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     await page.getByRole("button", { name: "重试全部未完成 QA", exact: true }).waitFor();
     await page.getByRole("button", { name: "查看校对润色详情", exact: true }).waitFor();
     assert.deepEqual(await page.locator(".flow-row").first().locator(".flow-node > strong").allTextContents(), ["翻译", "初稿 QA", "校对润色"]);
+    const banner = page.getByRole("region", { name: "任务等待手动处理" });
+    await banner.getByText(/1 段待处理.*模型输出被截断/).waitFor();
+    await banner.getByRole("button", { name: "重试失败译段", exact: true }).click();
+    assert.match(operations.at(-1).path, /retry-translation$/);
+    const primaryRow = page.locator(".button-row").filter({ has: page.getByRole("button", { name: "保存修改", exact: true }) }).first();
+    const secondRow = primaryRow.locator("xpath=following-sibling::*[1]");
     const analysis = page.getByRole("region", { name: "翻译流程", exact: true }).getByRole("region", { name: "语境分析", exact: true });
     assert.equal(await analysis.getAttribute("data-status"), "not_started");
     await analysis.getByText("可选", { exact: true }).waitFor();
@@ -72,6 +80,16 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     for (const width of [960, 330]) {
       await page.setViewportSize({ width, height: 1500 });
       assert.equal(await page.locator(".kami").evaluate(element => element.scrollWidth > element.clientWidth), false);
+      const row1 = await primaryRow.boundingBox(), row2 = await secondRow.boundingBox();
+      assert.ok(row2.y - row1.y - row1.height >= 10, "two action rows need visible vertical separation");
+      if (process.env.KAMI_UI_SCREENSHOTS) {
+        await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+        await banner.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `attention-${width}.png`) });
+        await secondRow.scrollIntoViewIfNeeded();
+        const first = await primaryRow.boundingBox(), last = await secondRow.boundingBox();
+        await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `translation-actions-${width}.png`), clip: { x: first.x - 4, y: first.y - 4, width: first.width + 8, height: last.y + last.height - first.y + 8 } });
+      }
+
       if (process.env.KAMI_UI_SCREENSHOTS) {
         await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
         await page.locator(".workflow-graph").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `workflow-graph-${width}.png`) });
@@ -80,6 +98,8 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     await page.setViewportSize({ width: 960, height: 1050 });
     await page.getByRole("button", { name: "查看翻译详情", exact: true }).click();
     await page.locator(".segment-row").nth(7).click();
+    const editor = page.locator(".segment-editor textarea").last();
+    await checkRoundedField(editor, "translation");
     const manual = page.getByRole("button", { name: "手动检查此句 QA", exact: true });
     assert.equal(await manual.isEnabled(), true);
     if (process.env.KAMI_UI_SCREENSHOTS) await page.locator(".segment-editor").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "manual-qa.png") });

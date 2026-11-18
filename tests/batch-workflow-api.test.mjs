@@ -1,3 +1,4 @@
+import { batchAttention, notifyBatchAttention } from "../src/batch-attention.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -29,6 +30,7 @@ test("QA 补试在任意翻译状态下都不触发一致性检查或术语普�
     let finalizations = 0;
     const batchQaWorkers = new Map(), run = { batchId: "retry", segments: [{ status, selected: true }], runnerOptions: {} };
     const retry = vm.runInNewContext(`(${block("function startBatchQaRetry(", "function startBatchWorker(").trim()})`, {
+      batchAttention, notifyBatchAttention, runtimeOptions: () => ({}),
       beginBackgroundRun: () => ({ cancelRequested: false }), endBackgroundRun: () => {}, batchWorkers: new Map(), batchQaWorkers,
       consistencyCheckTasks: new Map(), termSurveyTasks: new Map(), attachBatchWorkflowTask: async () => {},
       retryServerBatchQa: async () => ({ completed: 1, total: 1, failed: 0 }), translateBatchSegment: async () => {},
@@ -197,6 +199,7 @@ test(`QA 重试沿用译文、合并重复请求并保留已有收尾结果${rev
   const readJsonBody = async (req) => { const chunks = []; for await (const chunk of req) chunks.push(chunk); return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); };
   const json = (res, status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); return true; };
   const context = vm.createContext({
+    batchAttention, notifyBatchAttention, translateBatchDrafts: async () => [],
     withRuntimeCall, measureStage, translationRetryReason, contextAnalysisTasks: new Map(),
     batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchTranslationStarts: new Map(), batchWorkflowWrites: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = structuredClone(value); run.runnerOptions.batchSummary = summarizeBatchSegments(run.segments); },

@@ -20,9 +20,9 @@ export function assertOperation({ method = "GET", path, body }, human = false) {
   return url;
 }
 
-export async function createWorkbench({ dataDirectory, modelAdapter }) {
+export async function createWorkbench({ dataDirectory, modelAdapter, notifyAttention }) {
   const store = new SqliteStore(join(dataDirectory, "kami.sqlite"));
-  configureRuntime({ embedded: true, dataDirectory, store, modelAdapter, dispatch: (operation) => invoke(operation, { ...runtimeOptions(), human: true }) });
+  configureRuntime({ embedded: true, dataDirectory, store, modelAdapter, notifyAttention, dispatch: (operation) => invoke(operation, { ...runtimeOptions(), human: true }) });
   let application;
   try { application = await import("../server.mjs"); }
   catch (error) { store.close(); throw error; }

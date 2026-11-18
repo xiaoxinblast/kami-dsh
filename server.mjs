@@ -86,6 +86,7 @@ import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 import { runServerBatch, retryServerBatchQa, batchNeighborContext } from "./src/batch-runner.mjs";
 import { runSegmentWorkflow, proofreadingHints } from "./src/segment-workflow.mjs";
 import { batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows } from "./public/batch-status.js";
+import { batchAttention, notifyBatchAttention } from "./src/batch-attention.mjs";
 import { translationRetryReason } from "./src/translation-output.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public", import.meta.url));
@@ -4438,7 +4439,14 @@ function startBatchQaRetry(batchId, taskId, segmentIds, stage = null) {
       })
     });
     const latest = await getBatchRun(batchId);
-    if (latest && !outcome.cancelled) await saveBatchRun({ ...latest, runnerOptions: { ...latest.runnerOptions, qaCompletedAt: new Date().toISOString() } });
+    if (latest && !outcome.cancelled) {
+      latest.runnerOptions = { ...latest.runnerOptions, qaCompletedAt: new Date().toISOString(), qaRetryFailed: Boolean(outcome.failed), attentionReason: "" };
+      const attention = batchAttention(latest);
+      latest.runnerOptions.attentionReason = attention?.reason || "";
+      if (!outcome.failed && !attention && latest.runState === "needs_attention" && latest.segments.every((s) => s.selected === false || (s.status === "done" && s.translation?.trim()))) latest.runState = "completed";
+      await saveBatchRun(latest);
+      if (outcome.failed) notifyBatchAttention(latest, runtimeOptions().notifyAttention);
+    }
     await updateBackgroundTaskProgress(taskId, {
       status: outcome.cancelled || outcome.failed ? "needs_attention" : "completed",
       progress: { phase: outcome.cancelled ? "cancelled" : "completed", percent: 100, completed: outcome.completed, total: outcome.total, failed: outcome.failed,
@@ -4447,6 +4455,14 @@ function startBatchQaRetry(batchId, taskId, segmentIds, stage = null) {
     });
   })().catch(async (error) => {
     await updateBackgroundTaskProgress(taskId, { status: "failed", progress: { phase: "failed", message: `${label} 重试失败：${error.message}` }, payload: { batchId, stage } }).catch(() => {});
+    if (!control.cancelRequested) {
+      const latest = await getBatchRun(batchId);
+      if (latest) {
+        latest.runnerOptions = { ...latest.runnerOptions, qaRetryFailed: true, attentionReason: error.message };
+        await saveBatchRun(latest);
+        notifyBatchAttention(latest, runtimeOptions().notifyAttention);
+      }
+    }
   }).finally(() => { endBackgroundRun(taskId); batchQaWorkers.delete(batchId); });
   batchQaWorkers.set(batchId, { taskId, promise: tracked });
 }
@@ -4465,6 +4481,15 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
     loadRun: getBatchRun,
     segmentIds,
     saveRun: async (run) => {
+      run.runnerOptions ||= {};
+      if (run.runState === "running") {
+        if (run.runnerOptions.interruptionReason || run.runnerOptions.translationError || run.runnerOptions.qaRetryFailed || run.runnerOptions.attentionReason) {
+          run.runnerOptions = { ...run.runnerOptions, interruptionReason: "", translationError: "", qaRetryFailed: false, attentionReason: "" };
+        }
+      } else {
+        if (run.runState === "paused" && segmentIds && !controller.pauseRequested && !controller.cancelRequested) run.runnerOptions.interruptionReason = "本轮指定译段已重试，批次仍有未完成译段。";
+        run.runnerOptions.attentionReason = batchAttention(run)?.reason || "";
+      }
       await saveBatchRun(run);
       if (backgroundTaskId) {
         const selected = (run.segments || []).filter((segment) => segment.selected !== false && (!segmentIds || segmentIds.includes(String(segment.id))));
@@ -4535,9 +4560,17 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
       settleTranslation();
       return controller.followupPromise;
     }
-  }))).catch(async (error) => {
+  }))).then((run) => {
+    if (run && !controller.pauseRequested && !controller.cancelRequested) notifyBatchAttention(run, runtimeOptions().notifyAttention);
+    return run;
+  }).catch(async (error) => {
     const run = await getBatchRun(batchId).catch(() => null);
-    if (run) await saveBatchRun({ ...run, runState: "needs_attention", runnerOptions: { ...run.runnerOptions, translationError: error.message } }).catch(() => {});
+    if (run) {
+      run.runState = controller.pauseRequested || controller.cancelRequested ? "paused" : "needs_attention";
+      run.runnerOptions = { ...run.runnerOptions, translationError: run.runState === "needs_attention" ? error.message : "", interruptionReason: "", attentionReason: "" };
+      await saveBatchRun(run);
+      if (run.runState === "needs_attention") notifyBatchAttention(run, runtimeOptions().notifyAttention);
+    }
     if (backgroundTaskId) await updateBackgroundTaskProgress(backgroundTaskId, { status: "failed", progress: { phase: "failed", message: error.message, percent: 100 } }).catch(() => {});
     console.error(`后台批次 ${batchId} 失败`, error);
   }).finally(() => {
@@ -6908,6 +6941,7 @@ async function apiHandler(req, res, url) {
         locale: run.locale,
         projectId: run.projectId || "",
         runState: run.runState,
+        attention: batchWorkers.has(run.batchId) || batchQaWorkers.has(run.batchId) || contextAnalysisTasks.has(run.batchId) ? null : batchAttention(run),
         status: run.status,
         totalSegments: run.totalSegments,
         completedSegments: run.completedSegments,
@@ -9302,19 +9336,24 @@ function startHeapWatchdog() {
 
 async function recoverInterruptedBatchWorkers() {
   const tasks = await listBackgroundTasks({ limit: 500 });
+  const interruptedBatches = new Set();
   for (const project of await getProjects()) {
     const runs = await listBatchRuns({ projectId: project.id, limit: 500 });
     for (const summary of runs) {
       if (!["queued", "running"].includes(summary.runState)) continue;
       const run = await getBatchRun(summary.batchId);
       if (!run) continue;
-      await saveBatchRun({
+      const interrupted = {
         ...run,
         runState: "paused",
+        runnerOptions: { ...run.runnerOptions, interruptionReason: "DSH 重启后，批次需要手动继续。" },
         segments: run.segments.map((segment) => segment.status === "running"
           ? { ...segment, status: "pending", error: "服务重启后等待继续" }
           : segment)
-      });
+      };
+      await saveBatchRun(interrupted);
+      interruptedBatches.add(run.batchId);
+      notifyBatchAttention(interrupted, runtimeOptions().notifyAttention);
       // 对应的后台任务也要收尾，否则任务中心那条「批次翻译」会一直停在"进行中"。
       const task = tasks.find((item) => item.type === "batch_translation" && item.status === "in_progress" && item.payload?.batchId === run.batchId);
       if (task) {
@@ -9327,6 +9366,17 @@ async function recoverInterruptedBatchWorkers() {
       }
       console.log(`[Kami] 已暂停服务重启前未完成的批次：${run.filename}`);
     }
+  }
+  for (const task of tasks.filter((item) => item.type === "batch_qa_retry" && item.status === "in_progress")) {
+    const reason = "DSH 重启后，本轮校对或质量检查已中断。";
+    await saveBackgroundTask({ ...task, status: "needs_attention", progress: { ...task.progress, phase: "interrupted", message: reason } });
+    if (!task.payload?.batchId || interruptedBatches.has(task.payload.batchId)) continue;
+    const run = await getBatchRun(task.payload.batchId);
+    if (!run || run.runnerOptions?.cancelled) continue;
+    run.runnerOptions = { ...run.runnerOptions, qaRetryFailed: true, attentionReason: reason };
+    await saveBatchRun(run);
+    interruptedBatches.add(run.batchId);
+    notifyBatchAttention(run, runtimeOptions().notifyAttention);
   }
 }
 
