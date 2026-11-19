@@ -72,6 +72,11 @@ function persistableTrajectory(trajectory) {
       finalTranslation: String(trajectory.humanDecision.finalTranslation || "")
     } : null,
     batchId: String(trajectory.batchId || ""),
+    segmentId: trajectory.segmentId,
+    contentType: trajectory.contextPack?.contentType ?? trajectory.contentType,
+    contentTags: trajectory.contextPack?.contentTags ?? trajectory.contentTags,
+    documentBrief: trajectory.contextPack?.documentBrief?.section ? { section: { note: trajectory.contextPack.documentBrief.section.note } } : undefined,
+    lineLayout: trajectory.contextPack?.lineLayout ?? trajectory.lineLayout,
     entryId: String(trajectory.assetRefs?.entryId || trajectory.entryId || ""),
     neighborContext: trajectory.contextPack?.neighborContext ?? trajectory.neighborContext ?? ""
   };
@@ -442,11 +447,11 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       const metric = report.metrics?.find((item) => item.key === "editDistance");
       if (metric) metric.label = "可见措辞编辑距离";
       for (const stage of ["first", "final"]) {
-        const count = (rounds) => rounds.reduce((n, round) => n + round[stage].missingLineBreaks + round[stage].extraLineBreaks + (round[stage].misplacedBreaks || 0), 0);
+        const count = (rounds) => rounds.reduce((n, round) => n + round[stage].missingLineBreaks + round[stage].extraLineBreaks + (round[stage].misplacedBreaks || 0) + (round[stage].layoutViolations || 0), 0);
         const champion = count(structure.champion), candidate = count(structure.candidate);
         report.metrics?.push({ key: stage + "LineBreakErrors", label: stage === "first" ? "首稿换行错误" : "修订后换行错误", unit: "", higherIsBetter: false, champion, candidate, delta: candidate - champion });
       }
-      report.evaluationBasis = (report.evaluationBasis || "") + ` 可见措辞编辑距离排除换行及序列化行内标记。首稿与一次定向修订后的结构分别计数。人工终稿结构待核对 ${report.referenceStructureReviewIds.length} 句。`;
+      report.evaluationBasis = (report.evaluationBasis || "") + ` 可见措辞编辑距离排除换行及序列化行内标记。普通换行可按译文增减，结构检查核对固定标记和适用的排版规格。首稿与一次定向修订后的结构分别计数。人工终稿结构待核对 ${report.referenceStructureReviewIds.length} 句。`;
     }
     report.benchmark = {
       requestedPairs: job.requestedCaseIds.length,
@@ -654,14 +659,17 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     async structureFeedback(jobId) {
       const job = jobs.get(String(jobId));
       if (!job || job.status !== COMPLETED) return null;
-      if (job.result?.report?.structure) return job.result.report.structure;
+      if (job.result?.report?.structure && job.evaluationProfile?.policyVersion === evaluationProfileForContentType(job.scope?.contentType).policyVersion) return job.result.report.structure;
       const cases = Object.values(job.caseTrajectories || {});
       const markers = await deps.historicalLineBreaks?.(job.scope, cases) || {};
       const summary = (variant) => summarizeStructure(cases.flatMap((item) => sampleArray(job.caseSamples[item.id]?.[variant])
         .filter((sample) => typeof sample.translation === "string").map((sample) => {
-          const counts = compareBenchmarkStructure(item.source, sample.translation, markers[item.id]);
-          return { repetition: sample.repetition, structure: { first: counts, final: counts, retry: false,
-            extraPhysicalBreaksBesideMarker: extraBreaksBesideMarker(item.source, sample.translation, markers[item.id], counts.extraLineBreaks) } };
+          const fixed = markers[item.id] ?? item.lineLayout?.markers ?? [];
+          const compare = target => compareBenchmarkStructure(item.source, target, fixed, item.lineLayout?.rules);
+          const final = compare(sample.translation);
+          const first = sample.initialTranslation ? compare(sample.initialTranslation) : final;
+          return { repetition: sample.repetition, structure: { first, final, retry: Boolean(sample.initialTranslation && Object.values(first).some(Boolean)),
+            extraPhysicalBreaksBesideMarker: extraBreaksBesideMarker(item.source, sample.translation, fixed) } };
         })));
       return { champion: summary("champion"), candidate: summary("challenger") };
     },

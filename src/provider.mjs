@@ -405,10 +405,13 @@ function segmentReferenceText(pack) {
   ].filter(Boolean).join("\n");
 }
 
+const reflowGuidance = "普通换行按译文语义和目标版式合并或拆分，行数或断句位置与原文不同本身不构成错误。遵守有出处的项目排版限制和固定标记要求。";
+
 /** 把投影后的 pack 渲染成结构化文本：稳定信息在前，逐段变量在后。 */
 export function contextPackText(contextPack = {}, purpose = "review") {
   const pack = projectContextPack(contextPack, purpose);
   const lines = [];
+  if (contextPack.allowLineReflow) lines.push(reflowGuidance);
   if (contextPack.lineLayout) lines.push(formatLineLayout(contextPack.lineLayout));
   lines.push(`目标语言：${pack.targetLanguage || pack.targetLocale || ""}`);
   lines.push(`内容用途：${pack.contentTypeLabel || pack.contentType || "general"}｜语体要求：${pack.register || ""}`);
@@ -479,6 +482,7 @@ export function packPrompt(contextPack, { includeStable = true, batch = false, p
     stable.push(`翻译技能：${translationSkill.name} · v${translationSkill.version} · ${translationSkill.instruction || "沿用当前稳定流程"}${(translationSkill.additionalRules || []).length ? `\n技能增量规则：${JSON.stringify(translationSkill.additionalRules)}` : ""}`);
   }
   const variable = [];
+  if (contextPack.allowLineReflow) variable.push(reflowGuidance);
   if (contextPack.lineLayout) variable.push(formatLineLayout(contextPack.lineLayout, layoutFrom));
   const briefText = formatDocumentBrief(pack.documentBrief);
   const neighborText = formatNeighborContext(pack.neighborContext);
@@ -1061,7 +1065,7 @@ async function segmentMessages(pack, runner, part, task, entries, session) {
         `条目 ID：${id}`, packPrompt(contextPack, { part, includeStable: index === 0, batch: true, layoutFrom: firstLayoutEntry.get(contextPack.lineLayout?.key) === id ? "" : firstLayoutEntry.get(contextPack.lineLayout?.key) }),
         part === "proofread" ? `待校对译文：\n${translation}` : "", hints?.length ? `初稿规则提示：\n${hints.join("\n")}` : ""
       ].filter(Boolean).join("\n")).join("\n\n") : packPrompt(pack, { part }),
-      (entries || [{ contextPack: pack }]).some(entry => /[\r\n]/u.test(entry.contextPack.source)) ? "保留当前原文中的显式格式换行及其与行内标记的位置，人工指南另有规定时遵照指南。" : "", task].filter(Boolean).join("\n\n") }
+      (entries || [{ contextPack: pack }]).some(entry => !entry.contextPack.allowLineReflow && /[\r\n]/u.test(entry.contextPack.source)) ? "保留当前原文中的显式格式换行及其与行内标记的位置，人工指南另有规定时遵照指南。" : "", task].filter(Boolean).join("\n\n") }
   ];
 }
 
@@ -1411,25 +1415,22 @@ export async function reviewEvolutionWithModel({ locale, contentType, domain, qa
 }
 
 export async function proposeTranslationSkillWithModel({ locale, contentType, domain, project = "default", champion, trajectories = [], evaluationFeedback }) {
-  const compact = trajectories.slice(0, 40).map((item) => ({
-    id: item.id,
-    source: item.source,
-    initialTranslation: item.initialTranslation,
-    finalTranslation: item.finalTranslation,
-    ...(Object.values(compareBenchmarkStructure(item.source, item.humanDecision?.finalTranslation || item.finalTranslation)).some(Boolean)
-      ? { layoutReview: "终稿与原文的换行或行内标记不一致，只用作措辞证据，结构待核对" } : {}),
-    qaBefore: item.qaBefore,
-    qaAfter: item.qaAfter,
-    humanDecision: item.humanDecision,
-    error: item.error || ""
-  }));
+  const compact = trajectories.slice(0, 40).map((item) => {
+    const layout = item.lineLayout ?? item.contextPack?.lineLayout;
+    const counts = compareBenchmarkStructure(item.source, item.humanDecision?.finalTranslation || item.finalTranslation, layout?.markers, layout?.rules);
+    return {
+      id: item.id, source: item.source, initialTranslation: item.initialTranslation, finalTranslation: item.finalTranslation,
+      ...(Object.values(counts).some(Boolean) ? { layoutReview: "终稿含固定标记或排版问题，只用作措辞证据，结构待核对" } : {}),
+      qaBefore: item.qaBefore, qaAfter: item.qaAfter, humanDecision: item.humanDecision, error: item.error || ""
+    };
+  });
   if (!compact.length) throw new Error("尚无可用于生成候选技能的翻译轨迹");
   const messages = [
     {
       role: "system",
-      content: `你是本地化翻译流程改进员。你要根据同一目标语言、语体、领域和项目的真实执行轨迹，只提出一份保守、可评测的“候选翻译技能补丁”。不得更改目标语言或把其他语种规则混入；不得发明轨迹中不存在的问题；术语译法仍由术语库负责，不要把个别术语硬编码进技能。重点分析反复出现的准确性、语体、上下文、检索和 QA 修订模式。输出严格 JSON：{"name":"候选技能名","reason":"为什么提出该补丁","strategyPatch":{"prompting":{"additionalInstruction":"整体执行指导","additionalRules":["可执行规则"]},"retrieval":{"translationMemory":{"limit":5},"qaCases":{"limit":3}},"qa":{"minimumScore":90,"maximumRevisionAttempts":2},"context":{"includePreviousSegments":2,"includeNextSegments":1}},"evidenceIds":["轨迹ID"]}`
+      content: `你是本地化翻译流程改进员。你要根据同一目标语言、语体、领域和项目的真实执行轨迹，只提出一份保守、可评测的“候选翻译技能补丁”。不得更改目标语言或把其他语种规则混入；不得发明轨迹中不存在的问题；术语译法仍由术语库负责，不要把个别术语硬编码进技能。普通换行可按译文自然增减，不从换行数量差异推导错误或学习逐行照搬。重点分析反复出现的准确性、语体、上下文、检索和 QA 修订模式。输出严格 JSON：{"name":"候选技能名","reason":"为什么提出该补丁","strategyPatch":{"prompting":{"additionalInstruction":"整体执行指导","additionalRules":["可执行规则"]},"retrieval":{"translationMemory":{"limit":5},"qaCases":{"limit":3}},"qa":{"minimumScore":90,"maximumRevisionAttempts":2},"context":{"includePreviousSegments":2,"includeNextSegments":1}},"evidenceIds":["轨迹ID"]}`
     },
-    ...(evaluationFeedback ? [{ role: "system", content: "上一版候选未通过配对评测。对照两版策略与 structureByRound 的逐轮统计，区分首稿漏换行、多余换行、其他行内标记及修订后残留。extraPhysicalBreaksBesideMarker 表示换行标记旁多出实际换行，同一处断行被表达两次。分别判断结构保真和可见措辞回退，用已有训练材料提出定向修改，写明可验证的预期效果。统计只能定位失败表现，不能证明某条策略是根因。不要推测留出句或人工答案。以当前生效策略为基准，每版只增删或修改一条有训练证据支持的规则，保持其他规则和顺序。strategyPatch 只返回 prompting.additionalRules 修订后的完整列表。引用实际训练轨迹 ID。" }] : []),
+    ...(evaluationFeedback ? [{ role: "system", content: "上一版候选未通过配对评测。对照两版策略与 structureByRound 的逐轮统计，核对缺失或重复的固定标记、重复断行与项目排版违规；普通换行数量可随译文增减。extraPhysicalBreaksBesideMarker 表示换行标记旁多出实际换行，同一处断行被表达两次。分别判断结构保真和可见措辞回退，用已有训练材料提出定向修改，写明可验证的预期效果。统计只能定位失败表现，不能证明某条策略是根因。不要推测留出句或人工答案。以当前生效策略为基准，每版只增删或修改一条有训练证据支持的规则，保持其他规则和顺序。strategyPatch 只返回 prompting.additionalRules 修订后的完整列表。引用实际训练轨迹 ID。" }] : []),
     { role: "user", content: JSON.stringify({ locale, contentType, domain, project, champion, trajectories: compact, evaluationFeedback }) }
   ];
   // 思考 + JSON 都要花输出预算：2200 对推理模型偏紧，一旦截断就拿不到收尾括号。
@@ -1536,7 +1537,7 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
   const messages = [
     {
       role: "system",
-      content: `你是独立于翻译器的亚洲语言本地化 QA 审校员。按照 MQM 思路逐项检查六个一级维度：Accuracy、Fluency、Terminology、Style、Locale、Platform。category 必须以小写一级维度开头，可细分为 accuracy_omission、accuracy_addition、accuracy_mistranslation、fluency_grammar、fluency_naturalness、terminology_required、terminology_forbidden、style_register、style_brand、locale_convention、platform_constraint、platform_placeholder。contextPack.styleProfile.reviewRubric 是评审标准，不是生成提示。contextPack.preferredTerms 中 matchMode 为 exact 只代表字面精确命中；你必须根据原文句义和上下文判断该条正式术语在此处是否适用，不能仅因译文未采用登记译法就报错。approvedReferences 是人工批准的译例，只有同语种、同语体且语义相关时才引用，且仍不能盲从。machineDrafts 是本系统自己此前产出的机器译文，只能用于发现同一文档内自相矛盾，绝不能当作正确与否的依据，也不得以"与 machineDrafts 不一致"为由报告问题。不要直接给总分，只报告可定位的问题。严重度只能是 critical、major、minor。message、suggestion 和其他解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 必须逐字保留原文或译文中的证据片段。特别注意：只有语义确实丢失或凭空添加事实才算漏译/增译；调整语序、换用同义地道表达、重写修辞都不是问题。发现译文逐字直译、翻译腔、不像目标语言原生文案时，记 major（category 用 fluency_naturalness）。原文含押韵、对仗、重复或口号结构时，译文必须用目标语言自然重现节奏与韵律；机械逐字重复、把闲散语气译成命令口吻、韵律完全丢失都应记 major。仅在原文或 batchVerse 明确包含排比韵文时，按原文结构与人工规范检查节奏。batchReferences 和 patternReferences 只有 accepted=true 的条目是人工确认稿；其余为机器草稿或来源未确认稿，仅供上下文与一致性线索，不得当作正确答案或风格规范。与机器草稿措辞不同本身不是错误，不能为保持一致要求沿用其中的误译、生硬表达或不适用词义。没有问题返回空数组。输出严格 JSON：{"issues":[{"severity":"major","category":"accuracy_omission","sourceSpan":"原文片段","targetSpan":"译文片段","message":"简体中文问题原因","suggestion":"简体中文可执行修订意见","evidenceMemoryId":"可选ID","confidence":0.9}]}`
+      content: `你是独立于翻译器的亚洲语言本地化 QA 审校员。按照 MQM 思路逐项检查六个一级维度：Accuracy、Fluency、Terminology、Style、Locale、Platform。category 必须以小写一级维度开头，可细分为 accuracy_omission、accuracy_addition、accuracy_mistranslation、fluency_grammar、fluency_naturalness、terminology_required、terminology_forbidden、style_register、style_brand、locale_convention、platform_constraint、platform_placeholder。contextPack.styleProfile.reviewRubric 是评审标准，不是生成提示。contextPack.preferredTerms 中 matchMode 为 exact 只代表字面精确命中；你必须根据原文句义和上下文判断该条正式术语在此处是否适用，不能仅因译文未采用登记译法就报错。approvedReferences 是人工批准的译例，只有同语种、同语体且语义相关时才引用，且仍不能盲从。machineDrafts 是本系统自己此前产出的机器译文，只能用于发现同一文档内自相矛盾，绝不能当作正确与否的依据，也不得以"与 machineDrafts 不一致"为由报告问题。不要直接给总分，只报告可定位的问题。严重度只能是 critical、major、minor。message、suggestion 和其他解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 必须逐字保留原文或译文中的证据片段。特别注意：只有语义确实丢失或凭空添加事实才算漏译/增译；调整语序、换用同义地道表达、重写修辞都不是问题。发现译文逐字直译、翻译腔、不像目标语言原生文案时，记 major（category 用 fluency_naturalness）。原文含押韵、对仗、重复或口号结构时，译文必须用目标语言自然重现节奏与韵律；机械逐字重复、把闲散语气译成命令口吻、韵律完全丢失都应记 major。仅在原文或 batchVerse 明确包含排比韵文时，按原文结构与人工规范检查节奏。batchReferences 和 patternReferences 只有 accepted=true 的条目是人工确认稿；其余为机器草稿或来源未确认稿，仅供上下文与一致性线索，不得当作正确答案或风格规范。与机器草稿措辞不同本身不是错误，不能为保持一致要求沿用其中的误译、生硬表达或不适用词义。没有问题返回空数组。输出严格 JSON：{"issues":[{"severity":"major","category":"accuracy_omission","sourceSpan":"原文片段","targetSpan":"译文片段","message":"简体中文问题原因","suggestion":"简体中文可执行修订意见","evidenceMemoryId":"可选ID","confidence":0.9}]}` + (contextPack.allowLineReflow ? reflowGuidance + "按完整译文核对每句信息是否传达。只涉及普通折行差异时返回空问题列表。" : "")
     },
     {
       role: "user",
@@ -2576,7 +2577,7 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
     // 这里补一轮不带工具的直译，明确告诉它不要再查资料、直接给译文。
     const reason = firstPass.exhausted ? "上一轮把工具轮次用完了还没给译文" : initial ? "上一轮混入了非译文说明" : "上一轮返回了空白";
     initial = String(await chat([
-      { role: "system", content: "你是日语到简体中文的本地化译者。不要再调用任何工具，直接输出完整译文，保留原文格式换行，不附加说明。" },
+      { role: "system", content: "你是日语到简体中文的本地化译者。不要再调用任何工具，直接输出完整译文，不附加说明。" + (contextPack.allowLineReflow ? reflowGuidance : "保留原文格式换行。") },
       ...nativeMessages,
       { role: "user", content: `${nativeMessages.length ? "" : packPrompt(contextPack)}\n\n补充要求（${reason}）：请只输出这一条的简体中文译文本身。` }
     ], callConfig, { ...initialOptions, requestLabel: initial ? "翻译（非译文重试）" : "翻译（空译文重试）", tools: undefined })).trim();

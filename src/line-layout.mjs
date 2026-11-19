@@ -35,8 +35,8 @@ function flatRules(file, contentType) {
   return rules;
 }
 
-export async function resolveLineLayout({ pack, scopeId = "", markers = [], guides = [], files = [], cache, previous, readText, inspect, verifyVersions }) {
-  if (!hasSourceBreak(pack.source, markers)) return null;
+export async function resolveLineLayout({ pack, scopeId = "", markers = [], guides = [], files = [], cache, previous, readText, inspect, verifyVersions, includeUnbroken = false }) {
+  if (!includeUnbroken && !hasSourceBreak(pack.source, markers)) return null;
   const n = pack.neighborContext || {};
   const entryNote = String(n.note || "").split("相邻原文（只用于消歧）：")[0].trim();
   const note = layoutCue.test(entryNote) ? entryNote : "";

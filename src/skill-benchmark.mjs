@@ -12,6 +12,7 @@ import { DATA_ROOT, getAssets, getBatchRun, getMemories, getProjectStyleProfile,
 import { readBatchOriginal } from "./batch-originals.mjs";
 import { extractXliffPairs } from "./xliff-document.mjs";
 import { runtimeOptions } from "./runtime-context.mjs";
+import { checkLineLayout } from "./line-layout.mjs";
 import { compareBenchmarkStructure, extraBreaksBesideMarker, visibleWording } from "./benchmark-structure.mjs";
 import { matchTerms } from "./matcher.mjs";
 import { embedSource } from "./embedding.mjs";
@@ -70,7 +71,7 @@ export async function benchmarkLineBreakMarkers(trajectories, project) {
  * variants and every repetition then see the same term library, memories, QA
  * cases, profiles and query embeddings even if Directus changes mid-run.
  */
-export async function createBenchmarkSnapshot(scope, trajectories = [], { promptVersion = "" } = {}) {
+export async function createBenchmarkSnapshot(scope, trajectories = [], { promptVersion = "", resolveLayouts } = {}) {
   const normalizedScope = benchmarkScope(scope);
   const [assets, styleProfile, qaCases, memories, userProfile] = await Promise.all([
     getAssets(normalizedScope.locale, { projectId: normalizedScope.project }),
@@ -86,6 +87,7 @@ export async function createBenchmarkSnapshot(scope, trajectories = [], { prompt
     const caseId = String(trajectory?.id || "");
     if (caseId) queryEmbeddings[caseId] = await embedSource(String(trajectory?.source || ""));
   }
+  const lineLayouts = resolveLayouts ? await resolveLayouts(normalizedScope, trajectories, userProfile) : {};
   const frozen = {
     scope: normalizedScope,
     assets,
@@ -94,7 +96,8 @@ export async function createBenchmarkSnapshot(scope, trajectories = [], { prompt
     memories,
     userProfile,
     queryEmbeddings,
-    lineBreakMarkers: await benchmarkLineBreakMarkers(trajectories, normalizedScope.project),
+    lineLayouts,
+    lineBreakMarkers: await benchmarkLineBreakMarkers(trajectories.filter(t => !lineLayouts[t.id]?.markers.length), normalizedScope.project),
     provider: snapshotProvider(getProviderConfig()),
     promptVersion: String(promptVersion || "")
   };
@@ -190,7 +193,14 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
   const usage = createUsageCollector();
   const reproducibilityWarnings = new Set();
   const onSeedUnsupported = (warning) => reproducibilityWarnings.add(String(warning || "固定 seed 未生效"));
-  const lineBreaks = snapshot?.lineBreakMarkers?.[trajectory.id] || [];
+  const layout = snapshot?.lineLayouts?.[trajectory.id] ?? trajectory.lineLayout ?? trajectory.contextPack?.lineLayout;
+  const lineBreaks = snapshot?.lineBreakMarkers?.[trajectory.id] ?? layout?.markers ?? [];
+  const rules = layout?.rules || [];
+  const compare = target => compareBenchmarkStructure(source, target, lineBreaks, rules);
+  for (const pack of [contextPack, qaContextPack]) {
+    pack.allowLineReflow = true;
+    if (rules.length || lineBreaks.length) pack.lineLayout = { markers: lineBreaks, rules };
+  }
   const translated = await translateWithReflection(contextPack, {
     reflect: false,
     lineBreakMarkers: lineBreaks,
@@ -200,26 +210,26 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
     onSeedUnsupported,
     toolRunner: referenceRunner
   });
-  const first = compareBenchmarkStructure(source, translated.translation, lineBreaks);
+  const first = compare(translated.translation);
   let translation = translated.translation;
   const retry = Object.values(first).some(Boolean);
   if (retry) {
     const repaired = await reviseTranslationWithQa({ contextPack, translation, onUsage: usage.onUsage,
       seed, onSeedUnsupported,
-      issues: [{ type: "layout", message: "只修复与原文不一致的换行和行内标记，保留译文措辞并按原文分句定位。", counts: first, lineBreakMarkers: lineBreaks }] });
+      issues: [{ type: "layout", message: "只修复已指出的固定标记或排版违规，保留译文措辞。普通换行可根据译文合并或拆分。", counts: first, layoutIssues: checkLineLayout(translation, { markers: lineBreaks, rules }).map(issue => issue.message), lineBreakMarkers: lineBreaks }] });
     if (visibleWording(repaired) === visibleWording(translation)
-      && !Object.values(compareBenchmarkStructure(source, repaired, lineBreaks)).some(Boolean)) translation = repaired;
+      && !Object.values(compare(repaired)).some(Boolean)) translation = repaired;
   }
-  const final = retry ? compareBenchmarkStructure(source, translation, lineBreaks) : first;
+  const final = retry ? compare(translation) : first;
   const hardIssues = runQa({ source, translation, matches, locale: scope.locale });
   // Count each layout fault once, even when both token QA and sequence QA reported it.
   const structuralErrors = Object.values(final).reduce((sum, count) => sum + count, 0);
   if (structuralErrors) {
-    const otherIssues = hardIssues.filter(issue => issue.type !== "inline_tag_sequence"
+    const otherIssues = hardIssues.filter(issue => issue.type !== "inline_tag_sequence" && !issue.type.startsWith("line_layout_")
       && !(issue.type === "protected_token" && /^(?:<tag\s|<br\s*\/?>)/iu.test(issue.token)));
     hardIssues.length = 0;
     hardIssues.push(...otherIssues);
-    for (let i = 0; i < structuralErrors; i++) hardIssues.push({ type: "layout", severity: "error", message: "换行或行内标记与原文不一致" });
+    for (let i = 0; i < structuralErrors; i++) hardIssues.push({ type: "layout", severity: "error", message: "固定标记或译文排版不符合要求" });
   }
   // 评测里的裁判同样不能把机器译例当标准，否则两个变体都在向系统自己的历史输出收敛。
   const referenceAuthority = splitReferenceAuthority(translationReferences);
@@ -246,8 +256,8 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
     repetition: Number(repetition) || 0,
     scope,
     translation,
-    structure: { first, final, retry, reference: compareBenchmarkStructure(source, gold, lineBreaks),
-      extraPhysicalBreaksBesideMarker: extraBreaksBesideMarker(source, translation, lineBreaks, final.extraLineBreaks) },
+    structure: { first, final, retry, reference: compare(gold),
+      extraPhysicalBreaksBesideMarker: extraBreaksBesideMarker(source, translation, lineBreaks) },
     ...(retry ? { initialTranslation: translated.translation } : {}),
     requiredTermHits,
     requiredTermTotal: required.length,

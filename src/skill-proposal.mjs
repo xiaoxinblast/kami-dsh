@@ -1,3 +1,4 @@
+import { EVALUATION_POLICY_VERSION } from "./evaluation-policy.mjs";
 /**
  * Shared challenger proposal used by both the manual "生成候选技能" button and
  * the automatic proposer. Keeps the two paths on identical logic: trajectory
@@ -47,7 +48,7 @@ function isSingleRuleChange(before, after) {
  * Propose and persist a challenger for one exact scope. Throws the same 409 as
  * the manual endpoint when no usable trajectory exists.
  */
-export async function proposeChallengerSkill({ scope, champion, trajectories = [], revision, loadSelected, promptVersion = "kami-translation-v1" }) {
+export async function proposeChallengerSkill({ scope, champion, trajectories = [], revision, loadSelected, resolveLayouts, promptVersion = "kami-translation-v1" }) {
   const previous = revision?.candidate;
   const historicalIds = new Set(previous?.evidenceIds || []);
   const training = previous ? trajectories.filter((item) => historicalIds.has(item.id)) : trajectories;
@@ -66,9 +67,12 @@ export async function proposeChallengerSkill({ scope, champion, trajectories = [
     failedVersion: previous.version, failedStrategy: previous.strategy,
     ...(revision.report.structure ? { structureByRound: revision.report.structure } : {}),
     failedGates: (revision.report.gates || []).filter((gate) => gate.passed === false).map(({ id, label, detail }) => ({ id, label, detail })),
-    metrics: (revision.report.metrics || []).map(({ key, champion, candidate, delta }) => ({ key, champion, candidate, delta }))
+    // Older line-count metrics used strict source parity. Only the recomputed summary can diagnose those samples.
+    metrics: (revision.report.metrics || []).filter(metric => revision.report.reproducibility?.policyVersion === EVALUATION_POLICY_VERSION || !["firstLineBreakErrors", "finalLineBreakErrors"].includes(metric.key)).map(({ key, champion, candidate, delta }) => ({ key, champion, candidate, delta }))
   };
-  const proposed = await proposeTranslationSkillWithModel({ ...scope, champion: { id: champion.id, name: champion.name, version: champion.version, strategy: champion.strategy }, trajectories: usable, evaluationFeedback });
+  const layouts = resolveLayouts ? await resolveLayouts(scope, usable) : {};
+  const examples = usable.map(item => layouts[item.id] ? { ...item, lineLayout: layouts[item.id] } : item);
+  const proposed = await proposeTranslationSkillWithModel({ ...scope, champion: { id: champion.id, name: champion.name, version: champion.version, strategy: champion.strategy }, trajectories: examples, evaluationFeedback });
   // 模型返回的策略补丁是不可信输入：白名单校验、数值夹紧、长度截断与注入特征拦截。
   const sanitized = sanitizeStrategyPatch(proposed.strategyPatch);
   if (!Object.keys(sanitized.patch).length) {

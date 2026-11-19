@@ -348,7 +348,7 @@ async function runQualityGate({ scope, skill, triggeredBy = "", onProgress = nul
     const snapshot = await createBenchmarkSnapshot(
       scope,
       queue.map((entry) => ({ id: entry.key, source: entry.source })),
-      { promptVersion: TRANSLATION_PROMPT_VERSION }
+      { promptVersion: TRANSLATION_PROMPT_VERSION, resolveLayouts: learningLineLayouts }
     );
     for (const [index, entry] of queue.entries()) {
       // 中断在样本边界生效：已经跑完的样本全部保留，剩下的按"未执行"如实记录。
@@ -2795,7 +2795,7 @@ async function translateBatchDrafts(requests) {
   });
 }
 
-async function prepareSegmentLayout(pack, projectId, run, segment, localOnly) {
+async function prepareSegmentLayout(pack, projectId, run, segment, localOnly, includeUnbroken = false) {
   const runtime = runtimeOptions();
   if (runtime.followupOnly) return segment?.result?.lineLayout || null;
   const shared = runtime.evidenceCache?.batchId === run?.batchId ? runtime.evidenceCache : null;
@@ -2811,7 +2811,7 @@ async function prepareSegmentLayout(pack, projectId, run, segment, localOnly) {
     const unit = index.get(Number(segment.locator.unitIndex));
     if (unit && unit.entryId === String(segment.locator.unitId) && unit.source === pack.source) markers = unit.lineBreakMarkers;
   }
-  if (!hasSourceBreak(pack.source, markers || [])) return null;
+  if (!includeUnbroken && !hasSourceBreak(pack.source, markers || [])) return null;
   const snapshot = taskResources(projectId);
   const humanGuide = snapshot?.guide || (!pack.userProfile?.nativeGuidePointer ? pack.userProfile : null);
   const guides = [];
@@ -2858,7 +2858,7 @@ async function prepareSegmentLayout(pack, projectId, run, segment, localOnly) {
       if (shared) shared.layoutRules = cache;
     }
     return await resolveLineLayout({ pack, scopeId: [projectId, run?.batchId, snapshot?.id, humanGuide?.version], guides: embedded, files: [...originals, ...indexed],
-      markers: markers || [], cache, previous: segment?.result?.lineLayout,
+      markers: markers || [], cache, includeUnbroken, previous: segment?.result?.lineLayout,
       readText: f => {
         if (f.text !== undefined) return f.text;
         const recorded = linkedGuides.find(g => g.path === f.path && g.reader === "compiled");
@@ -2874,6 +2874,37 @@ async function prepareSegmentLayout(pack, projectId, run, segment, localOnly) {
       } : undefined
     });
   } finally { await runner?.dispose?.(); }
+}
+
+// Freeze the same sourced rules for training evidence and both sides of a paired evaluation.
+async function learningLineLayouts(scope, trajectories, userProfile) {
+  const batches = new Map(), caches = new Map(), layouts = {};
+  for (const item of trajectories) {
+    let layout = item.lineLayout ?? item.contextPack?.lineLayout;
+    if (!layout) {
+      if (item.batchId && !batches.has(item.batchId)) batches.set(item.batchId, await getBatchRun(item.batchId));
+      const batch = batches.get(item.batchId);
+      const run = batch?.projectId === scope.project ? batch : null;
+      const entryId = item.entryId || item.assetRefs?.entryId;
+      const entries = entryId ? run?.segments.filter(s => s.source === item.source && s.locator?.unitId === entryId) : [];
+      const segment = run?.segments.find(s => s.id === item.segmentId && s.source === item.source) ?? (entries?.length === 1 ? entries[0] : null);
+      layout = segment?.result?.lineLayout;
+      if (!layout) {
+        const key = run?.batchId;
+        if (!caches.has(key)) caches.set(key, { batchId: key, layoutRules: new Map() });
+        if (userProfile === undefined) userProfile = await getUserProfile(scope.locale, { projectId: scope.project }) || null;
+        const pack = { source: item.source, targetLocale: scope.locale, contentType: item.contextPack?.contentType || item.contentType || scope.contentType,
+          userProfile, contentTags: item.contextPack?.contentTags ?? item.contentTags, neighborContext: item.contextPack?.neighborContext ?? item.neighborContext ?? segment?.context,
+          documentBrief: item.contextPack?.documentBrief ?? item.documentBrief ?? (segment ? contextBriefSlice(run.contextBrief, run.segments.indexOf(segment), segment.id) : null) };
+        layout = await withRuntimeCall({ evidenceCache: caches.get(key), workspaceSnapshot: run?.runnerOptions?.workspaceSnapshot || taskResources(scope.project),
+          followupOnly: false }, () => prepareSegmentLayout(pack, scope.project, run, segment, false, true));
+      }
+    }
+    // Keep verified limits and provenance. Free-form excerpts may contain bilingual examples.
+    if (layout) layouts[item.id] = { markers: layout.markers || [], rules: (layout.rules || []).map(({ source, counting, maxChars, maxLines }) =>
+      ({ source, counting, maxChars, maxLines })) };
+  }
+  return layouts;
 }
 
 function segmentRuleIssues({ contextPack, matches, projectSettings, factSchema }, translation, phase) {
@@ -6367,7 +6398,7 @@ async function apiHandler(req, res, url) {
     const champion = await ensureChampionTranslationSkill(scope);
     const trajectories = await listLearningSampleIndex(scope);
     // 手动与自动提议共用同一实现，保证轨迹筛选、补丁合并与证据隔离完全一致。
-    const skill = await proposeChallengerSkill({ scope, champion, trajectories, loadSelected: loadLearningSampleDetails, promptVersion: TRANSLATION_PROMPT_VERSION });
+    const skill = await proposeChallengerSkill({ scope, champion, trajectories, loadSelected: loadLearningSampleDetails, resolveLayouts: learningLineLayouts, promptVersion: TRANSLATION_PROMPT_VERSION });
     // 手动成功也要刷新自动提议的记账：否则卡片上会一直挂着"上次自动提议失败"的旧报错，
     // 而候选其实已经生成出来了。（失败只由自动链路记录，这里只负责清掉它。）
     const acceptedCount = trajectories.filter(isCompletedHumanFinal).length;
@@ -9315,7 +9346,7 @@ async function disposeEmbeddedWorkbench() {
 
 const evaluationJobs = createEvaluationJobRunner({
   benchmark: benchmarkTranslationSkill,
-  createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION }),
+  createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION, resolveLayouts: learningLineLayouts }),
   jobsDirectory: join(DATA_ROOT, "learning", "jobs"),
   concurrency: 5,
   automaticRetryLimit: 1,
@@ -9359,7 +9390,7 @@ async function resolveStyleVariant(id, scope) {
 // 风格草稿评测：唯一变量是风格规范本身，技能、留出集与检索隔离两边完全一致。
 const styleEvaluationJobs = createEvaluationJobRunner({
   benchmark: benchmarkStyleVariant,
-  createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION }),
+  createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION, resolveLayouts: learningLineLayouts }),
   jobsDirectory: join(DATA_ROOT, "learning", "jobs"),
   concurrency: 5,
   kind: "style-evaluation",
@@ -9429,7 +9460,7 @@ const autoProposer = createAutoProposer({
     },
     listTrajectories: listLearningSampleIndex,
     selectTrajectories: (trajectories) => selectProposalTrajectories(trajectories),
-    propose: ({ scope, champion, trajectories }) => proposeChallengerSkill({ scope, champion, trajectories, loadSelected: loadLearningSampleDetails, promptVersion: TRANSLATION_PROMPT_VERSION }),
+    propose: ({ scope, champion, trajectories }) => proposeChallengerSkill({ scope, champion, trajectories, loadSelected: loadLearningSampleDetails, resolveLayouts: learningLineLayouts, promptVersion: TRANSLATION_PROMPT_VERSION }),
     recordMetadata: async (championId, existingMetadata, autoPropose) => {
       try {
         await updateTranslationSkill(championId, { metadata: { ...(existingMetadata || {}), autoPropose } });
@@ -9460,7 +9491,7 @@ const learningAutomation = createLearningAutomation({ deps: {
     const training = await Promise.all((candidate.evidenceIds || []).map((id) => getLearningTrajectory(id)));
     const trajectories = training.filter((item) => item && item.project === scope.project && item.locale === scope.locale);
     const report = { ...job.result.report, structure: await evaluationJobs.structureFeedback(job.jobId) };
-    return proposeChallengerSkill({ scope, champion, trajectories, revision: { candidate, report, holdout: evaluationJobs.holdoutCases(job.jobId), jobId: job.jobId, round }, promptVersion: TRANSLATION_PROMPT_VERSION });
+    return proposeChallengerSkill({ scope, champion, trajectories, revision: { candidate, report, holdout: evaluationJobs.holdoutCases(job.jobId), jobId: job.jobId, round }, resolveLayouts: learningLineLayouts, promptVersion: TRANSLATION_PROMPT_VERSION });
   },
   evaluate: async (candidate) => (await startSkillEvaluation(candidate.id)).value,
   resume: (id) => evaluationJobs.resume(id),

@@ -1,13 +1,15 @@
+import { checkLineLayout } from "./line-layout.mjs";
+
 // Only strip serialized layout. Numbers, variables, ordinary punctuation and names remain wording.
 const layout = /<tag\s+[^<>]*?\/>|<br\s*\/?>|\r\n|[\r\n]/giu;
 const inline = /^<tag\s/iu;
+const fixedTokens = text => String(text ?? "").match(/<tag\s+[^<>]*?\/>|<br\s*\/?>/giu) || [];
 export const visibleWording = (text) => String(text ?? "").replace(layout, "");
 
-export function compareBenchmarkStructure(source, translation, lineBreakMarkers = []) {
+export function compareBenchmarkStructure(source, translation, lineBreakMarkers = [], rules = []) {
   const differences = new Map();
   for (const [text, sign] of [[source, 1], [translation, -1]]) {
-    for (let token of String(text ?? "").match(layout) || []) {
-      if (/^[\r\n]+$/u.test(token)) token = "\n";
+    for (const token of fixedTokens(text)) {
       differences.set(token, (differences.get(token) || 0) + sign);
     }
   }
@@ -17,9 +19,8 @@ export function compareBenchmarkStructure(source, translation, lineBreakMarkers 
     result[(delta > 0 ? "missing" : "extra") + kind] += Math.abs(delta);
   }
   if (!Object.values(result).some(Boolean)) {
-    const tokens = text => (String(text ?? "").match(layout) || []).map(token => token.replace(/\r\n?/gu, "\n"));
-    const actual = tokens(translation);
-    if (tokens(source).some((token, index) => token !== actual[index])) result.outOfOrder = 1;
+    const actual = fixedTokens(translation);
+    if (fixedTokens(source).some((token, index) => token !== actual[index])) result.outOfOrder = 1;
     for (const marker of lineBreakMarkers) {
       const [before, after] = String(source).split(marker);
       const [left, right] = String(translation).split(marker);
@@ -28,19 +29,36 @@ export function compareBenchmarkStructure(source, translation, lineBreakMarkers 
       }
     }
   }
+  const duplicateBreaks = extraBreaksBesideMarker(source, translation, lineBreakMarkers);
+  result.extraLineBreaks += duplicateBreaks;
+  const constraints = checkLineLayout(translation, { markers: lineBreakMarkers, rules }).filter(issue => issue.type !== "line_layout_marker");
+  if (constraints.length) result.layoutViolations = constraints.length;
   return result;
 }
 
 // A serialized break already creates a line break on export. Count surplus physical breaks
 // touching such a marker, excluding physical breaks also present in the source.
-export function extraBreaksBesideMarker(source, translation, markers, extraLineBreaks) {
-  if (!extraLineBreaks || !markers?.length) return 0;
+export function extraBreaksBesideMarker(source, translation, markers = []) {
+  const expected = fixedTokens(source);
+  const actual = fixedTokens(translation);
+  // A duplicated or missing fixed token already has its own fault.
+  markers = [...new Set([...markers, ...expected.filter(token => !inline.test(token))])].filter(marker =>
+    expected.filter(t => t === marker).length === actual.filter(t => t === marker).length);
+  if (!markers.length) return 0;
+  // Compare adjacency at each fixed marker, independently of natural wrapping elsewhere.
   const adjacent = (text) => {
+    const counts = new Map();
     const parts = String(text).split(/(\r\n|\r|\n)/u);
-    return parts.filter((part, i) => i % 2 && markers.some((marker) =>
-      parts[i - 1].endsWith(marker) || parts[i + 1].startsWith(marker))).length;
+    for (let i = 1; i < parts.length; i += 2) {
+      const marker = markers.find(m => parts[i - 1].endsWith(m) || parts[i + 1].startsWith(m));
+      if (marker) counts.set(marker, (counts.get(marker) || 0) + 1);
+    }
+    return counts;
   };
-  return Math.min(extraLineBreaks, Math.max(0, adjacent(translation) - adjacent(source)));
+  const before = adjacent(source);
+  let extra = 0;
+  for (const [marker, count] of adjacent(translation)) extra += Math.max(0, count - (before.get(marker) || 0));
+  return extra;
 }
 
 export function summarizeStructure(samples) {

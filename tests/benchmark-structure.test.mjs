@@ -16,13 +16,13 @@ test("只把原始 XML 已证实的 ph 计为换行；可见措辞不计布局�
   const [unit] = extractXliffPairs(Buffer.from(xml), "a.mqxliff", { includeLineBreakMarkers: true });
   assert.deepEqual(unit.lineBreakMarkers, [br]);
   const source = br + other + "\n\n";
-  assert.deepEqual(compareBenchmarkStructure(source, other + "\n", [br]), { missingLineBreaks: 2, extraLineBreaks: 0, missingInline: 0, extraInline: 0 });
+  assert.deepEqual(compareBenchmarkStructure(source, other + "\n", [br]), { missingLineBreaks: 1, extraLineBreaks: 0, missingInline: 0, extraInline: 0 });
   assert.equal(compareBenchmarkStructure(source, br + br + "\n\n", [br]).extraLineBreaks, 1);
   assert.equal(visibleWording(br + "文字42{user}\r\n" + other), "文字42{user}");
   assert.equal(visibleWording("C:\\new\\note"), "C:\\new\\note");
-  assert.equal(extraBreaksBesideMarker("甲"+br+"乙", "甲"+br+"\r\n乙", [br], 1), 1);
-  assert.equal(extraBreaksBesideMarker("甲"+br+"乙", "甲\n"+br+"乙", [br], 1), 1);
-  assert.equal(extraBreaksBesideMarker("甲"+br+"\n乙", "甲"+br+"\n乙\n丙", [br], 1), 0);
+  assert.equal(extraBreaksBesideMarker("甲"+br+"乙", "甲"+br+"\r\n乙", [br]), 1);
+  assert.equal(extraBreaksBesideMarker("甲"+br+"乙", "甲\n"+br+"乙", [br]), 1);
+  assert.equal(extraBreaksBesideMarker("甲"+br+"\n乙", "甲"+br+"\n乙\n丙", [br]), 0);
 });
 
 test("旧评测按轮离线还原结构失败，只给修订器统计，且不能混入新评分", async () => {
@@ -124,4 +124,66 @@ test("正常译文跳过结构修订，定向修订只接受保留措辞且换�
     assert.deepEqual(calls, repair ? ["翻译", "AIQA 修订", "AIQA"] : ["翻译", "AIQA"]);
   }
   assert.equal(compareBenchmarkStructure(br + other, other + br).outOfOrder, 1);
+  assert.equal(compareBenchmarkStructure("甲<br/>乙", "甲\n乙").missingLineBreaks, 1);
+  assert.equal(compareBenchmarkStructure("甲" + br + "乙\n丙", "甲" + br + "\n乙丙", [br]).extraLineBreaks, 1);
+});
+
+test("普通折行在候选评测中可增可减，两侧不修订、不扣分；显式排版规格仍生效", async () => {
+  const scope = { locale: "zh-CN", contentType: "dialogue", domain: "game", project: "fixture" };
+  const lineLayout = { key: "layout", markers: [], rules: [{ maxChars: 8, maxLines: 2, source: "对白排版", counting: "characters" }] };
+  for (const [source, draft, hardErrors] of [
+    ["雨だ。\n傘を持って。\n行こう。", "下雨了，带上伞。\n走吧。", 0],
+    ["雨だ。傘を持って。行こう。", "下雨了，带上伞。\r\n走吧。", 0],
+    ["朝だ。\n" + other + "帰ろう。", "天亮" + other + "了。\n回家吧。", 0],
+    ["雨だ。\n傘を持って。\n行こう。", "下雨了，\n带上伞。\n走吧。", 1],
+    ["雨だ。\n傘を持って。\n行こう。", "下雨了，带上雨伞再走吧。", 1],
+    ["雨だ。\n傘を持って。\n行こう。", "下雨了\n，走吧。", 1]
+  ]) {
+    const trajectory = { id: "reflow", source, finalTranslation: draft.replace(/[\r\n]+/gu, ""), lineLayout };
+    const calls = [];
+    const snapshot = { scope, assets: { locale: scope.locale, terms: [] }, queryEmbeddings: { reflow: [] } };
+    const modelAdapter = async (messages, { requestLabel }) => {
+      calls.push({ requestLabel, messages });
+      return { content: requestLabel === "AIQA" ? '{"issues":[]}' : draft };
+    };
+    for (const variant of ["champion", "challenger"]) {
+      calls.length = 0;
+      const sample = await withRuntimeCall({ embedded: true, modelAdapter }, () => benchmarkTranslationSkill({ ...scope, id: variant }, trajectory, { snapshot }));
+      assert.deepEqual(calls.map(c => c.requestLabel), hardErrors ? ["翻译", "AIQA 修订", "AIQA"] : ["翻译", "AIQA"]);
+      assert.equal(sample.hardErrorCount, hardErrors);
+      if (!hardErrors) {
+        assert.equal(sample.humanEditDistance, 0);
+        assert.equal(sample.qaScore, 100);
+        assert.equal(sample.humanAccepted, true);
+        assert.ok(Object.values(sample.structure.first).every(n => n === 0));
+      }
+      assert.ok(calls.every(c => /普通换行/u.test(JSON.stringify(c.messages))));
+      assert.ok(calls.every(c => /每行最多 8 字/u.test(JSON.stringify(c.messages))));
+    }
+  }
+});
+
+test("旧版报告里已保存的普通换行错误不流入策略修订，原报告逐字保持", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kami-v3-reflow-"));
+  const id = "archived", path = join(directory, id + ".json");
+  const stats = { champion: [{ first: { missingLineBreaks: 1 } }], candidate: [{ first: { missingLineBreaks: 1 } }] };
+  const sample = { translation: "下雨了。走吧。", initialTranslation: "下雨了。\n走吧。", repetition: 0 };
+  const archived = JSON.stringify({ jobId: id, kind: "skill-evaluation", status: "completed", scope: { contentType: "dialogue" },
+    evaluationProfile: { policyVersion: "kami-evaluation-v3" }, result: { report: { structure: stats, score: 73 } },
+    requestedCaseIds: ["c"], caseTrajectories: { c: { id: "c", source: "雨だ。\n行こう。" } },
+    caseSamples: { c: { champion: [sample], challenger: [sample] } }, caseFailures: {} });
+  await writeFile(path, archived);
+  const unused = () => assert.fail("读取旧报告不应运行评测");
+  const runner = createEvaluationJobRunner({ jobsDirectory: directory, benchmark: unused, deps: { getSkill: unused, getCurrentChampion: unused,
+    validatePromotionState: unused, saveEvaluation: unused, updateSkillMetrics: unused, buildUiReport: unused } });
+  try {
+    await runner.initialize();
+    const feedback = await runner.structureFeedback(id);
+    for (const side of ["champion", "candidate"]) {
+      assert.equal(feedback[side][0].first.missingLineBreaks, 0);
+      assert.equal(feedback[side][0].final.missingLineBreaks, 0);
+    }
+    assert.deepEqual(runner.get(id).result.report.structure, stats);
+    assert.equal(await readFile(path, "utf8"), archived);
+  } finally { await runner.stop(); await rm(directory, { recursive: true, force: true }); }
 });
