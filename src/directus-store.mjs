@@ -2649,10 +2649,30 @@ export async function saveDirectusLearningTrajectory(input) {
   return mapLearningTrajectory(saved);
 }
 
+export async function listDirectusLearningSampleIndex(scope) {
+  const fields = "id,project,target_locale,content_type,domain,status,source,final_translation,human_decision,batch_id,date_created,date_updated";
+  const local = Boolean(runtimeOptions().store);
+  const params = addLearningScopeFilters(new URLSearchParams({ fields, sort: "-date_updated,-date_created,id", limit: local ? "-1" : "500" }), scope);
+  const rows = [];
+  do {
+    params.set("offset", String(rows.length));
+    const page = await request(`/items/learning_trajectories?${params}`);
+    if (!page.length) break;
+    for (const item of page) rows.push({
+      id: item.id, locale: item.target_locale, project: item.project || "default",
+      contentType: item.content_type || "general", domain: item.domain || "general", status: item.status || "running",
+      source: item.source || "", finalTranslation: item.final_translation || "", humanDecision: directusJson(item.human_decision),
+      batchId: item.batch_id, createdAt: item.date_created, updatedAt: item.date_updated || item.date_created
+    });
+  } while (!local);
+  return rows;
+}
+
 export async function listDirectusLearningTrajectories(filters = {}) {
   const params = addLearningScopeFilters(new URLSearchParams({ limit: directusListLimit(filters.limit), sort: "-date_updated,-date_created", fields: "*" }), filters);
   if (filters.batchId) params.set("filter[batch_id][_eq]", filters.batchId);
   if (filters.status) params.set("filter[status][_eq]", filters.status);
+  if (filters.ids) params.set("filter[id][_in]", filters.ids.join(","));
   return (await request(`/items/learning_trajectories?${params}`)).map(mapLearningTrajectory);
 }
 

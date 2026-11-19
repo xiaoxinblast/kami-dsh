@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { evaluateSkillPromotion } from "./learning-engine.mjs";
 import { runPairedSkillBenchmarks } from "./learning-benchmark.mjs";
 import { benchmarkSnapshotFingerprint, evaluationProfileForContentType } from "./evaluation-policy.mjs";
+import { compareBenchmarkStructure, extraBreaksBesideMarker, summarizeStructure } from "./benchmark-structure.mjs";
 
 const QUEUED = "queued";
 const RUNNING = "running";
@@ -70,7 +71,9 @@ function persistableTrajectory(trajectory) {
       accepted: trajectory.humanDecision.accepted === true,
       finalTranslation: String(trajectory.humanDecision.finalTranslation || "")
     } : null,
-    neighborContext: trajectory.contextPack?.neighborContext || ""
+    batchId: String(trajectory.batchId || ""),
+    entryId: String(trajectory.assetRefs?.entryId || trajectory.entryId || ""),
+    neighborContext: trajectory.contextPack?.neighborContext ?? trajectory.neighborContext ?? ""
   };
 }
 
@@ -266,7 +269,13 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
   async function execute(job) {
     job.status = RUNNING;
     job.error = "";
-    job.evaluationProfile ||= evaluationProfileForContentType(job.scope?.contentType);
+    const currentPolicy = evaluationProfileForContentType(job.scope?.contentType);
+    if (job.evaluationProfile?.policyVersion !== currentPolicy.policyVersion) {
+      if (Object.keys(job.caseSamples || {}).length) return markFailed(job, "旧版评分口径与当前版本不同，请重新发起完整评测");
+      job.evaluationProfile = currentPolicy;
+      job.snapshotFingerprint = "";
+      job.benchmarkSnapshot = null;
+    }
     job.updatedAt = now();
     await persist(job);
     notifyChanged(job);
@@ -426,6 +435,19 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       };
     });
     const report = deps.buildUiReport(result);
+    if (championSamples.some((item) => item.structure)) {
+      const structure = { champion: summarizeStructure(championSamples), candidate: summarizeStructure(challengerSamples) };
+      report.structure = structure;
+      report.referenceStructureReviewIds = [...new Set(championSamples.filter((item) => Object.values(item.structure?.reference || {}).some(Boolean)).map((item) => item.sourceCaseId))];
+      const metric = report.metrics?.find((item) => item.key === "editDistance");
+      if (metric) metric.label = "可见措辞编辑距离";
+      for (const stage of ["first", "final"]) {
+        const count = (rounds) => rounds.reduce((n, round) => n + round[stage].missingLineBreaks + round[stage].extraLineBreaks + (round[stage].misplacedBreaks || 0), 0);
+        const champion = count(structure.champion), candidate = count(structure.candidate);
+        report.metrics?.push({ key: stage + "LineBreakErrors", label: stage === "first" ? "首稿换行错误" : "修订后换行错误", unit: "", higherIsBetter: false, champion, candidate, delta: candidate - champion });
+      }
+      report.evaluationBasis = (report.evaluationBasis || "") + ` 可见措辞编辑距离排除换行及序列化行内标记。首稿与一次定向修订后的结构分别计数。人工终稿结构待核对 ${report.referenceStructureReviewIds.length} 句。`;
+    }
     report.benchmark = {
       requestedPairs: job.requestedCaseIds.length,
       completedPairs: Object.keys(job.caseSamples).length,
@@ -625,6 +647,24 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       const job = jobs.get(String(jobId));
       return job ? publicJob(job) : null;
     },
+    holdoutCases(jobId) {
+      const cases = jobs.get(String(jobId))?.caseTrajectories || {};
+      return Object.values(cases).map(({ id, source }) => ({ id, source }));
+    },
+    async structureFeedback(jobId) {
+      const job = jobs.get(String(jobId));
+      if (!job || job.status !== COMPLETED) return null;
+      if (job.result?.report?.structure) return job.result.report.structure;
+      const cases = Object.values(job.caseTrajectories || {});
+      const markers = await deps.historicalLineBreaks?.(job.scope, cases) || {};
+      const summary = (variant) => summarizeStructure(cases.flatMap((item) => sampleArray(job.caseSamples[item.id]?.[variant])
+        .filter((sample) => typeof sample.translation === "string").map((sample) => {
+          const counts = compareBenchmarkStructure(item.source, sample.translation, markers[item.id]);
+          return { repetition: sample.repetition, structure: { first: counts, final: counts, retry: false,
+            extraPhysicalBreaksBesideMarker: extraBreaksBesideMarker(item.source, sample.translation, markers[item.id], counts.extraLineBreaks) } };
+        })));
+      return { champion: summary("champion"), candidate: summary("challenger") };
+    },
     list(scope = null) {
       const matchesScope = (job) => !scope || ["locale", "project"].every((field) => job.scope?.[field] === scope[field]);
       return [...jobs.values()].filter(matchesScope).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).map(publicJob);
@@ -662,19 +702,24 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       // 只有跑完/中断/失败的任务才谈得上"重试失败样本"：正在排队或正在跑的别插队。
       if (![COMPLETED, FAILED, INTERRUPTED].includes(job.status)) return publicJob(job);
       if (!Object.keys(job.caseFailures || {}).length) return publicJob(job);
-      if (!job.benchmarkSnapshot) {
+      let snapshot = job.benchmarkSnapshot;
+      if (!snapshot) {
         // 已完成的检查点会把输入快照从内存里放掉（实测 77MB JSON），而只重试失败样本
         // 必须用同一份冻结输入重跑，所以从磁盘读回来；磁盘上也没有就只能重新发起完整评测。
         try {
           const persisted = JSON.parse(await readFile(await jobPath(job.jobId), "utf8"));
-          if (persisted?.benchmarkSnapshot) job.benchmarkSnapshot = persisted.benchmarkSnapshot;
+          snapshot = persisted?.benchmarkSnapshot;
         } catch { /* 读不出来就走下面这条明确失败 */ }
-        if (!job.benchmarkSnapshot) {
+        if (!snapshot) {
           const error = new Error("这份评测检查点缺少输入快照，无法只重试失败样本，请重新发起完整评测");
           error.statusCode = 409;
           throw error;
         }
       }
+      if (Object.keys(job.caseSamples || {}).length && job.evaluationProfile?.policyVersion !== evaluationProfileForContentType(job.scope.contentType).policyVersion) {
+        throw Object.assign(new Error("旧版评分口径与当前版本不同，请重新发起完整评测"), { statusCode: 409 });
+      }
+      job.benchmarkSnapshot = snapshot;
       job.caseFailures = {};
       job.caseFailureCodes = {};
       job.status = QUEUED;

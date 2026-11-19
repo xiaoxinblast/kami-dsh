@@ -30,6 +30,69 @@ async function fixture(run) {
   finally { await close(); assert.ok(directory.startsWith(join(tmpdir(), "kami-native-reference-"))); await rm(directory, { recursive: true, force: true }); }
 }
 
+test("从旧批次原件还原换行标记，编译指南换版后采用新上限", async () => fixture(async ({ directory, cwd, fs, ctx, agent }) => {
+  const br = "<tag id='tag-1' type='inline' desc='ph'/>";
+  const guide = "排版.txt";
+  const prompts = [];
+  const workbench = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
+    prompts.push({ label: options.requestLabel, messages });
+    return { content: "天亮了" + br + "回家吧。" };
+  } });
+  const context = { cwd, fs, human: true, referenceTools: options => createWorkspaceReferenceTools(ctx, agent, options) };
+  try {
+    const state = await workbench.workspace({ action: "bind", name: "带标记旧批次" }, context);
+    await writeFile(join(cwd, guide), "每行最多 6 字，最多 2 行。");
+    await workbench.importFile({ path: guide, purpose: "style-guide" }, context);
+    await writeFile(join(cwd, "story.mqxliff"), '<xliff version="1.2"><file><body><trans-unit id="u"><source>朝だ。<ph id="1">&lt;mq:ch val="&#10;" /&gt;</ph>帰ろう。</source></trans-unit></body></file></xliff>');
+    const prepared = await workbench.importFile({ path: "story.mqxliff" }, context);
+    const record = await workbench.store.request("/items/batch_runs/" + prepared.batchId);
+    assert.ok(record.runner_options.workspaceSnapshot.resources.some(r => r.path === guide && r.reader === "compiled"));
+    const segment = record.segments[0];
+    delete segment.locator.lineBreakMarkers;
+    await workbench.store.request("/items/batch_runs/" + prepared.batchId, { method: "PATCH", body: { segments: record.segments } });
+    const translate = () => workbench.invoke({ method: "POST", path: "/api/translate", body: {
+      batchId: prepared.batchId, projectId: state.project.id, segmentId: segment.id, source: segment.source, locale: "zh-CN",
+      contentType: "dialogue", useModelClassification: false, qualityTier: "fast"
+    } }, context);
+    const initial = await translate();
+    assert.deepEqual(initial.contextPack.lineLayout.markers, [br]);
+    assert.equal(initial.stages.proofreading.status, "completed");
+    assert.equal(initial.contextPack.lineLayout.rules[0].source, guide);
+    await writeFile(join(cwd, guide), "每行最多 2 字，最多 2 行。");
+    const changed = await translate();
+    assert.equal(changed.contextPack.lineLayout.rules[0].maxChars, 2);
+    assert.equal(changed.stages.proofreading.status, "failed");
+    assert.match(changed.stages.proofreading.error, /第 1 行有 3 字.*排版.txt/u);
+    assert.ok(prompts.every(c => ["翻译", "模型校对"].includes(c.label)));
+    assert.ok(prompts.every(c => c.messages.at(-1).content.includes(br)));
+  } finally { await workbench.close(); }
+}));
+
+test("已关联的换行规格按当前原件版本复用；换版重读，未关联和已切换工作区被拒绝", async () => fixture(async ({ cwd, ctx, agent, switchRoot }) => {
+  const { resolveLineLayout } = await import("../src/line-layout.mjs");
+  const path = "规格.txt", cache = new Map();
+  await writeFile(join(cwd, path), "对白：每行最多 8 字，最多 2 行。");
+  const runner = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, references: [{ path, purpose: "reference" }] });
+  let reads = 0;
+  async function lookup() {
+    return resolveLineLayout({ pack: { source: "朝だ。\n帰ろう。", contentType: "dialogue" }, files: await runner.layoutFiles(), cache,
+      readText: file => { reads++; return runner.readLayoutText(file); }, inspect: () => assert.fail("简单规则不需要模型") });
+  }
+  try {
+    const first = await Promise.all([lookup(), lookup(), lookup()]);
+    assert.equal(reads, 1);
+    assert.deepEqual(first[0].rules.map(r => [r.source, r.maxChars, r.maxLines]), [[path, 8, 2]]);
+    await writeFile(join(cwd, path), "对白：每行最多 12 字，最多 3 行。");
+    const revised = await lookup();
+    assert.equal(reads, 2);
+    assert.equal(revised.rules[0].maxChars, 12);
+    assert.notEqual(revised.key, first[0].key);
+    await assert.rejects(runner.readLayoutText({ path: "未关联.txt", size: 1 }), /未关联/u);
+    switchRoot();
+    await assert.rejects(lookup(), /工作区已切换/u);
+  } finally { await runner.dispose?.(); }
+}));
+
 test("翻译校对按需开放宿主搜索与抓取，保留来源，网页不能冒充已读指南", async () => fixture(async ({ cwd, ctx, agent }) => {
   const events = [], calls = [];
   ctx.tools.schemas = () => ["read", "web_search", "web_fetch", "write", "send_message"].map(name => ({ name, parameters: { type: "object" } }));

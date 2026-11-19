@@ -187,10 +187,35 @@ test("界面与后端同口径：只有人工采纳终稿能生成候选", async
     readFile(new URL("../server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../public/app.js", import.meta.url), "utf8")
   ]);
-  assert.match(server, /const trajectories = await listLearningTrajectories\(\{ \.\.\.scope, limit: 500 \}\);/u, "手动入口取 500 条窗口，别被最新一批机器稿挤掉人工终稿");
-  assert.match(server, /listTrajectories: async \(scope\) => listLearningTrajectories\(\{ \.\.\.scope, limit: 500 \}\)/u);
+  assert.match(server, /const trajectories = await listLearningSampleIndex\(scope\);/u);
+  assert.match(server, /listTrajectories: listLearningSampleIndex/u);
   assert.match(app, /function proposalTrajectories\(items = \[\]\)/u);
   assert.match(app, /proposalTrajectories\(payload\.trajectories \|\| payload\.evidence\)\.length/u, "按钮可用性要按人工采纳算");
   assert.match(app, /条轨迹（\$\{proposalCount\} 条人工采纳）/u, "总量与可生成候选的数量要分开显示");
   assert.match(app, /根据人工采纳终稿生成候选技能/u);
+});
+
+test("修订从生效规则出发，只允许一处变化，忽略失败版的其他改动", async () => {
+  const { withRuntimeCall } = await import("../src/runtime-context.mjs");
+  const scope = { locale: "zh-CN", contentType: "dialogue", domain: "game", project: "single-rule" };
+  const baseline = Array.from({ length: 12 }, (_, index) => "基准规则" + index);
+  const champion = await store.saveTranslationSkill({ ...scope, status: "champion", strategy: { prompting: { additionalRules: baseline } } });
+  const candidate = await store.saveTranslationSkill({ ...scope, parentId: champion.id, status: "challenger",
+    strategy: { prompting: { additionalRules: ["上一版引起回退的规则"] }, retrieval: { qaCases: { limit: 9 } } }, evidenceIds: ["train"] });
+  const trajectories = [{ id: "train", source: "原文", finalTranslation: "人工终稿", status: "completed", humanDecision: { accepted: true } }];
+  const holdout = [{ id: "holdout", source: "保留给独立测试的原句" }];
+  const proposeRules = additionalRules => withRuntimeCall({
+    embedded: true,
+    modelAdapter: async messages => {
+      assert.doesNotMatch(JSON.stringify(messages), /保留给独立测试的原句/);
+      return { content: JSON.stringify({ name: "新候选", reason: "仅修改措辞规则", strategyPatch: { prompting: { additionalRules } }, evidenceIds: ["train"] }) };
+    }
+  }, () => proposal.proposeChallengerSkill({ scope, champion, trajectories, revision: { candidate, round: 1, jobId: "failed-eval", report: {}, holdout } }));
+  await assert.rejects(() => proposeRules(baseline), /只增删或修改一条/);
+  await assert.rejects(() => proposeRules(["改变多处", "整体替换"]), /只增删或修改一条/);
+  const changed = baseline.with(4, "标记随对应分句保留");
+  const revised = await proposeRules(changed);
+  assert.deepEqual(revised.strategy.prompting.additionalRules, changed);
+  assert.equal(revised.strategy.retrieval, undefined);
+  assert.deepEqual(revised.metadata.evaluationRevision.excludedCaseIds, ["holdout"]);
 });

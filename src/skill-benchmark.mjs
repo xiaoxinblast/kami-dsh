@@ -8,12 +8,16 @@
 
 import { assertLocale } from "./config.mjs";
 import { classifyContent } from "./classifier.mjs";
-import { getAssets, getMemories, getProjectStyleProfile, getQaCases, getUserProfile, listReferenceChunksForProject } from "./store.mjs";
+import { DATA_ROOT, getAssets, getBatchRun, getMemories, getProjectStyleProfile, getQaCases, getUserProfile, listReferenceChunksForProject } from "./store.mjs";
+import { readBatchOriginal } from "./batch-originals.mjs";
+import { extractXliffPairs } from "./xliff-document.mjs";
+import { runtimeOptions } from "./runtime-context.mjs";
+import { compareBenchmarkStructure, extraBreaksBesideMarker, visibleWording } from "./benchmark-structure.mjs";
 import { matchTerms } from "./matcher.mjs";
 import { embedSource } from "./embedding.mjs";
 import { rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./translation-memory.mjs";
 import { buildContextPack } from "./context-pack.mjs";
-import { createUsageCollector, estimateUsageCost, evaluateTranslationWithModel, getProviderConfig, translateWithReflection } from "./provider.mjs";
+import { createUsageCollector, estimateUsageCost, evaluateTranslationWithModel, getProviderConfig, reviseTranslationWithQa, translateWithReflection } from "./provider.mjs";
 import { calculateQaScore, runQa } from "./qa.mjs";
 import { normalizedEditDistance } from "./learning-engine.mjs";
 import { isolateBenchmarkAssets } from "./benchmark-isolation.mjs";
@@ -41,6 +45,24 @@ function snapshotProvider(config = {}) {
     inputPricePerMTok: config.inputPricePerMTok ?? "",
     outputPricePerMTok: config.outputPricePerMTok ?? ""
   };
+}
+
+export async function benchmarkLineBreakMarkers(trajectories, project) {
+  const markers = {};
+  for (const batchId of new Set(trajectories.filter((item) => item.source?.includes("<tag ")).map((item) => item.batchId).filter(Boolean))) {
+    const run = await getBatchRun(batchId);
+    if (run?.projectId && run.projectId !== project) continue;
+    if (!/\.(?:mqxliff|xliff)$/iu.test(run?.filename || "")) continue;
+    const bytes = await readBatchOriginal({ dataRoot: runtimeOptions().dataDirectory || DATA_ROOT, relativePath: run.runnerOptions?.originalFile });
+    if (!bytes) continue;
+    const pairs = extractXliffPairs(bytes, run.filename, { includeEmptyTargets: true, includeLineBreakMarkers: true });
+    const units = new Map(pairs.map((pair) => [pair.entryId, pair]));
+    for (const item of trajectories.filter((item) => item.batchId === batchId)) {
+      const unit = units.get(String(item.entryId || item.assetRefs?.entryId || ""));
+      if (unit?.source === item.source && unit.lineBreakMarkers.length) markers[item.id] = unit.lineBreakMarkers;
+    }
+  }
+  return markers;
 }
 
 /**
@@ -72,6 +94,7 @@ export async function createBenchmarkSnapshot(scope, trajectories = [], { prompt
     memories,
     userProfile,
     queryEmbeddings,
+    lineBreakMarkers: await benchmarkLineBreakMarkers(trajectories, normalizedScope.project),
     provider: snapshotProvider(getProviderConfig()),
     promptVersion: String(promptVersion || "")
   };
@@ -95,11 +118,12 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
   styleProfileOverride = undefined,
   qaStyleProfile = undefined,
   snapshot = null,
+  scope: pairedScope = null,
   evaluationProfile = null,
   repetition = 0,
   seed = undefined
 } = {}) {
-  const scope = benchmarkScope(skill);
+  const scope = benchmarkScope(snapshot?.scope || pairedScope || skill);
   if (snapshot?.provider) {
     const liveProvider = getProviderConfig();
     if (String(liveProvider.baseUrl || "") !== String(snapshot.provider.baseUrl || "")
@@ -108,7 +132,9 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
     }
   }
   const source = String(trajectory.source || "");
-  // 评测固定使用本地启发式分类并把语体钉死在技能作用域，避免额外模型调用与分类漂移。
+  const context = trajectory.neighborContext ?? trajectory.contextPack?.neighborContext;
+  const neighborContext = typeof context === "string" ? context : { previous: context?.previous, next: context?.next, note: context?.note };
+  // 两侧共用冻结的任务语体；历史技能自身可以带有不同的注册语体。
   const classification = classifyContent(source, scope.contentType);
   classification.contentType = scope.contentType;
   const assets = snapshot?.assets || await getAssets(scope.locale, { projectId: scope.project });
@@ -145,7 +171,7 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
   const qaGuidance = rankQaCases(source, isolated.qaCases, { limit: qaCaseLimit, queryEmbedding });
   const contextPack = buildContextPack({
     source, locale: scope.locale, classification, matches, domain: scope.domain,
-    neighborContext: trajectory.contextPack?.neighborContext || "",
+    neighborContext,
     styleProfile: isolated.styleProfile, translationSkill: skill, qaGuidance, userProfile: isolated.userProfile, translationReferences
   });
   // The judge gets its own pack so the style profile under test never becomes
@@ -157,26 +183,48 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
     ? contextPack
     : buildContextPack({
       source, locale: scope.locale, classification, matches, domain: scope.domain,
-      neighborContext: trajectory.contextPack?.neighborContext || "",
+      neighborContext,
       styleProfile: judgeStyleProfile, translationSkill: skill, qaGuidance, userProfile: isolated.userProfile, translationReferences
     });
   const startedAt = Date.now();
   const usage = createUsageCollector();
   const reproducibilityWarnings = new Set();
   const onSeedUnsupported = (warning) => reproducibilityWarnings.add(String(warning || "固定 seed 未生效"));
+  const lineBreaks = snapshot?.lineBreakMarkers?.[trajectory.id] || [];
   const translated = await translateWithReflection(contextPack, {
     reflect: false,
+    lineBreakMarkers: lineBreaks,
     onUsage: usage.onUsage,
     temperature: evaluationProfile?.translationTemperature,
     seed,
     onSeedUnsupported,
     toolRunner: referenceRunner
   });
-  const hardIssues = runQa({ source, translation: translated.translation, matches, locale: scope.locale });
+  const first = compareBenchmarkStructure(source, translated.translation, lineBreaks);
+  let translation = translated.translation;
+  const retry = Object.values(first).some(Boolean);
+  if (retry) {
+    const repaired = await reviseTranslationWithQa({ contextPack, translation, onUsage: usage.onUsage,
+      seed, onSeedUnsupported,
+      issues: [{ type: "layout", message: "只修复与原文不一致的换行和行内标记，保留译文措辞并按原文分句定位。", counts: first, lineBreakMarkers: lineBreaks }] });
+    if (visibleWording(repaired) === visibleWording(translation)
+      && !Object.values(compareBenchmarkStructure(source, repaired, lineBreaks)).some(Boolean)) translation = repaired;
+  }
+  const final = retry ? compareBenchmarkStructure(source, translation, lineBreaks) : first;
+  const hardIssues = runQa({ source, translation, matches, locale: scope.locale });
+  // Count each layout fault once, even when both token QA and sequence QA reported it.
+  const structuralErrors = Object.values(final).reduce((sum, count) => sum + count, 0);
+  if (structuralErrors) {
+    const otherIssues = hardIssues.filter(issue => issue.type !== "inline_tag_sequence"
+      && !(issue.type === "protected_token" && /^(?:<tag\s|<br\s*\/?>)/iu.test(issue.token)));
+    hardIssues.length = 0;
+    hardIssues.push(...otherIssues);
+    for (let i = 0; i < structuralErrors; i++) hardIssues.push({ type: "layout", severity: "error", message: "换行或行内标记与原文不一致" });
+  }
   // 评测里的裁判同样不能把机器译例当标准，否则两个变体都在向系统自己的历史输出收敛。
   const referenceAuthority = splitReferenceAuthority(translationReferences);
   const aiIssues = await evaluateTranslationWithModel({
-    contextPack: qaContextPack, translation: translated.translation,
+    contextPack: qaContextPack, translation,
     references: referenceAuthority.approved, machineDrafts: referenceAuthority.machineDrafts,
     qaCases: qaGuidance, onUsage: usage.onUsage,
     temperature: evaluationProfile?.qaTemperature,
@@ -185,9 +233,9 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
   });
   const score = calculateQaScore({ hardIssues, aiIssues });
   const required = matches.filter((item) => item.mode === "exact" && item.term?.enforcement === "required");
-  const requiredTermHits = required.filter(({ term }) => String(translated.translation).includes(String(term.target || ""))).length;
+  const requiredTermHits = required.filter(({ term }) => translation.includes(String(term.target || ""))).length;
   const gold = String(trajectory.humanDecision?.finalTranslation || trajectory.finalTranslation || "");
-  const editDistance = normalizedEditDistance(translated.translation, gold);
+  const editDistance = normalizedEditDistance(visibleWording(translation), visibleWording(gold));
   const usageSnapshot = usage.snapshot();
   const costUsd = usageSnapshot ? estimateUsageCost(usageSnapshot, snapshot?.provider || getProviderConfig()) : null;
   const repetitions = Math.max(1, Number(evaluationProfile?.repetitions) || 1);
@@ -197,7 +245,10 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
     sourceCaseId: trajectory.id,
     repetition: Number(repetition) || 0,
     scope,
-    translation: translated.translation,
+    translation,
+    structure: { first, final, retry, reference: compareBenchmarkStructure(source, gold, lineBreaks),
+      extraPhysicalBreaksBesideMarker: extraBreaksBesideMarker(source, translation, lineBreaks, final.extraLineBreaks) },
+    ...(retry ? { initialTranslation: translated.translation } : {}),
     requiredTermHits,
     requiredTermTotal: required.length,
     hardErrorCount: hardIssues.filter((issue) => issue.severity === "error").length,

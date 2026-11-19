@@ -452,6 +452,7 @@ window.__ModuleLoader__.load({
       "将本批次译文写回文件，保存到工作区。": "Write this batch's translations to a file in the workspace.",
       "输出目录与数据备份": "Output and backups", "规则开关与严重度": "Rules and severity", "模型选择与输出预算": "Model and output budget", "评分与质量阈值": "Quality thresholds", "原件查阅与工具轮数": "Original files and tool rounds", "样本积累与评测": "Samples and evaluation", "资源匹配与检索": "Resource retrieval", "文字与标点规范": "Text and punctuation", "任务执行参数": "Execution parameters", "分组翻译": "Translation groups", "初译与校对的分组上限": "Translation and proofreading group limits"
     });
+    Object.assign(words, { "正在修订候选": "Revising candidate", "修订轮次": "Revision round", "继续修订一版": "Revise once more", "重试失败样本": "Retry failed samples" });
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
       .kami .resource-row.term-survey-row{gap:6px}.kami .term-survey-row p{margin:2px 0}.kami .term-survey-row .stack{gap:6px}
@@ -523,13 +524,13 @@ window.__ModuleLoader__.load({
     function Button({ children, onClick, primary, disabled, busy, small, quiet, title, className = "" }) {
       return h("button", { type: "button", onClick, title, disabled: disabled || busy, "aria-busy": busy || undefined, className: `${primary ? "primary" : ""} ${small ? "small" : ""} ${quiet ? "quiet" : ""} ${className}` }, children);
     }
-    function Feedback({ model, name, retry, t }) {
+    function Feedback({ model, name, retry, t, hidePending = false }) {
       const operation = model.view.operations[name];
       if (!operation) return null;
       return h(React.Fragment, null,
         operation.compilation && h("div", { className: "feedback" }, `${operation.compilation.local ? t("已在本地编译") + " " + operation.compilation.local + " · " : ""}${t("已提交编译")} ${operation.compilation.queued} · ${t("未变化，跳过")} ${operation.compilation.skipped}`),
         ...(operation.compilation?.failures || []).map((failure, index) => h("div", { className: "feedback error", key: index, role: "alert" }, `${failure.path}: ${failure.error}`)),
-        operation.pending && (name !== "task-list" || !model.view.knownFiles) && h("div", { className: "feedback", role: "status" }, t("准备中…")),
+        operation.pending && !hidePending && (name !== "task-list" || !model.view.knownFiles) && h("div", { className: "feedback", role: "status" }, t("准备中…")),
         operation.error && h("div", { className: "feedback error", role: "alert" }, operation.error, retry && h(Button, { onClick: retry, small: true }, t("重试"))),
         operation.message && h("div", { className: "feedback", role: "status" }, t(operation.message)));
     }
@@ -1065,7 +1066,7 @@ window.__ModuleLoader__.load({
       const gate = useSection(model, gateKey, loadGate, [candidateId]);
       const evaluation = (data.evaluations || []).find((item) => item.challengerSkillId === candidateId);
       const automation = data.automation, automaticJob = (data.evaluationJobs || []).find((item) => item.jobId === automation?.jobId);
-      const automationLabels = { waiting: "等待样本", proposing: "准备候选", evaluating: "自动评测中", gating: "自动门禁中", blocked: "需要处理", ready: "等待确认启用" };
+      const automationLabels = { waiting: "等待样本", proposing: "准备候选", revising: "正在修订候选", evaluating: "自动评测中", gating: "自动门禁中", blocked: "需要处理", ready: "等待确认启用" };
       const automaticStep = automation?.candidateId === candidateId ? automation.status : "";
       const evaluationKey = `evaluate-learning:${candidateId}`, gateActionKey = `run-gate:${candidateId}`, activationKey = `activate-learning:${candidateId}`;
       const canPromote = promotionReady(evaluation, gate, candidateId) && candidate?.parentId === champion?.id && evaluation?.championSkillId === champion?.id;
@@ -1078,7 +1079,10 @@ window.__ModuleLoader__.load({
       });
       useEffect(() => {
         if (!model.visible) return;
-        const timer = setInterval(() => { model.loadSection("learning", load); model.loadSection(gateKey, loadGate); }, 5000);
+        const timer = setInterval(() => {
+          if (!model.view.operations["section:learning"]?.pending) model.loadSection("learning", load);
+          if (!model.view.operations[`section:${gateKey}`]?.pending) model.loadSection(gateKey, loadGate);
+        }, 5000);
         return () => clearInterval(timer);
       }, [model, model.visible, model.scopeKey, candidateId]);
       const previewGold = () => model.loadSection("gold-preview", (token) => model.invoke("/api/quality/gold-sets/from-trajectories", "POST", scopeArgs(model, token, scope), token));
@@ -1086,9 +1090,13 @@ window.__ModuleLoader__.load({
       return h("div", { className: "stack learning-view" }, h(PageHeading, { icon: "learning", title: "学习中心", description: "按当前项目积累人工终稿；候选通过评测和门禁后，由你启用。", t }),
         automation && h("section", { className: "card stack automation-card", "aria-label": t("自动学习状态"), "data-status": automation.status }, h("div", { className: "section-heading" }, h("h3", null, t("自动学习")), h("span", { className: "badge" }, t(automationLabels[automation.status] || "等待样本"))),
           h("p", null, automation.message), automaticJob && h("p", { className: "muted" }, `${automaticJob.progress.completed} / ${automaticJob.progress.requested} `, t("个配对样本"), automaticJob.automaticRetryCount > 0 && ` · ${t("失败样本已自动重试")} ${automaticJob.automaticRetryCount}`),
-          automation.candidateId && h(Button, { small: true, onClick: () => { setSelected(automation.candidateId); setStep(automation.status === "ready" ? "activate" : "evaluation"); } }, t("查看候选进度"))),
+          automation.revisionRound > 0 && h("span", { className: "muted" }, t("修订轮次"), " · ", automation.revisionRound),
+          h("div", { className: "button-row" }, automation.candidateId && h(Button, { small: true, onClick: () => { setSelected(automation.candidateId); setStep(automation.status === "ready" ? "activate" : "evaluation"); } }, t("查看候选进度")),
+            automation.canContinue && h(Button, { small: true, primary: true, busy: model.view.operations["continue-revision"]?.pending, onClick: () => operation("continue-revision", "/api/learning/continue-revision", { candidateId: automation.candidateId, jobId: automation.jobId }) }, t("继续修订一版")),
+            automation.status === "blocked" && automaticJob?.progress?.failed > 0 && h(Button, { small: true, busy: model.view.operations["retry-evaluation"]?.pending, onClick: () => operation("retry-evaluation", `/api/learning/evaluation-jobs/${encodeURIComponent(automaticJob.jobId)}/retry-failed`) }, t("重试失败样本"))),
+          h(Feedback, { model, name: "continue-revision", t }), h(Feedback, { model, name: "retry-evaluation", t })),
         h("div", { className: "learning-steps", "aria-label": t("学习流程") }, ...[["champion", "生效版本", champion ? `v${champion.version || 1}` : "暂无记录"], ["candidates", "候选", `${candidates.length}`], ["evaluation", "评测", automaticStep === "evaluating" ? "运行中" : evaluation ? statuses[evaluation.decision] || evaluation.decision : "尚未评测"], ["gate", "门禁", automaticStep === "gating" ? "运行中" : gate?.status ? statuses[gate.status] || gate.status : "尚未运行"], ["activate", "启用", canPromote ? "可以启用" : "等待检查"]].map(([value, label, hint], index) => h("button", { type: "button", key: value, "aria-pressed": step === value, onClick: () => setStep(value) }, h("span", { className: "muted" }, String(index + 1).padStart(2, "0")), h("strong", null, t(label)), h("span", { className: "step-hint" }, t(hint))))),
-        h(Feedback, { model, name: "section:learning", retry: () => model.loadSection("learning", load), t }),
+        h(Feedback, { model, name: "section:learning", hidePending: Object.hasOwn(model.view.sections, "learning"), retry: () => model.loadSection("learning", load), t }),
         step === "champion" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("当前生效版本")), champion && h("span", { className: "badge" }, `v${champion.version || 1}`)), champion ? h(React.Fragment, null, h("strong", null, skillLabel(champion, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h("p", null, champion.description || ""), h("details", null, h("summary", null, t("策略内容")), h("div", { className: "preview-text" }, skillStrategyText(champion)))) : h(Empty, { title: "暂无条目", t }), h(Button, { onClick: () => setStep("candidates") }, t("查看候选"))),
         step === "candidates" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("候选版本")), h(Button, { small: true, onClick: () => operation("generate", "/api/learning/skills/generate"), busy: model.view.operations.generate?.pending }, t("生成候选策略"))),
           h(Feedback, { model, name: "generate", t }), ...candidates.slice(offset, offset + 20).map((item) => h("article", { className: "candidate-row", key: item.id, "data-selected": candidateId === item.id }, h("div", { className: "section-heading" }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h(Button, { small: true, primary: candidateId === item.id, onClick: () => { setSelected(item.id); setStep("evaluation"); } }, t("选择候选"))), h("p", null, item.description || ""), h("details", null, h("summary", null, t("变更内容")), h("div", { className: "preview-text" }, skillStrategyText(item, champion))))), !candidates.length && h(Empty, { title: "暂无候选", description: "从人工确认的终稿生成候选，不会自动替换生效版本。", t }), h(Pager, { offset, total: candidates.length, onChange: setOffset, t })),
@@ -1097,7 +1105,7 @@ window.__ModuleLoader__.load({
           h(Button, { disabled: !candidateId, busy: model.view.operations[evaluationKey]?.pending, onClick: () => operation(evaluationKey, `/api/learning/skills/${encodeURIComponent(candidateId)}/evaluate`) }, t("开始评测")), h(Feedback, { model, name: evaluationKey, t }),
           evaluation ? h(React.Fragment, null, h("span", { className: "badge" }, t(statuses[evaluation.decision] || evaluation.decision)), h("p", null, evaluation.report?.conclusion || evaluation.result?.conclusion || ""), h("p", { className: "muted" }, `${evaluation.sampleCount || 0} ${t("个配对样本")}`),
             h("table", { className: "metric-table" }, h("thead", null, h("tr", null, h("th", null, t("指标")), h("th", null, t("生效版本")), h("th", null, t("候选")))), h("tbody", null, ...[["qaScore", "QA 分数"], ["hardErrorCount", "硬错误"], ["mandatoryTermAccuracy", "术语准确率"]].map(([key, label]) => h("tr", { key }, h("td", null, t(label)), h("td", null, Number.isFinite(evaluation.championMetrics?.[key]) ? evaluation.championMetrics[key] : "—"), h("td", null, Number.isFinite(evaluation.challengerMetrics?.[key]) ? evaluation.challengerMetrics[key] : "—")))))) : h(Empty, { title: "尚未评测", t }), h(Button, { quiet: true, onClick: () => setStep("gate") }, t("查看门禁"))),
-        step === "gate" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("固定 Gold Set 与失败回归")), h("span", { className: "badge" }, t(statuses[gate?.status] || "尚未运行"))), h(Feedback, { model, name: `section:${gateKey}`, retry: () => model.loadSection(gateKey, loadGate), t }),
+        step === "gate" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("固定 Gold Set 与失败回归")), h("span", { className: "badge" }, t(statuses[gate?.status] || "尚未运行"))), h(Feedback, { model, name: `section:${gateKey}`, hidePending: Object.hasOwn(model.view.sections, gateKey), retry: () => model.loadSection(gateKey, loadGate), t }),
           h("div", { className: "gate-metrics" }, h("div", null, h("strong", null, gate?.assets?.goldSampleCount || 0), h("span", null, t("启用 Gold 样本"))), h("div", null, h("strong", null, gate?.assets?.regressionCaseCount || 0), h("span", null, t("启用回归案例")))),
           h("p", { className: "muted" }, gate?.assets?.coverage?.reason || t("尚未运行门禁")), ...(gate?.latestRun?.blocking || []).map((item, index) => h("p", { className: "error", key: index }, item.message)),
           h(Button, { disabled: !candidateId, busy: model.view.operations[gateActionKey]?.pending, onClick: () => operation(gateActionKey, "/api/quality/runs", { skillId: candidateId }) }, t("运行门禁")), h(Feedback, { model, name: gateActionKey, t }),

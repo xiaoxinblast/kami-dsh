@@ -31,6 +31,7 @@ export async function runPairedSkillBenchmarks({
           caseIndex,
           repetition,
           seed,
+          scope,
           snapshot,
           evaluationProfile
         }));

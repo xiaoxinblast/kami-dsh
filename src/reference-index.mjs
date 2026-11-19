@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * 参考资料检索索引。
  *
@@ -74,7 +75,24 @@ export function createReferenceIndex({ loader, ttlMs = DEFAULT_TTL_MS, now = () 
     return items;
   }
 
+  const layoutByItems = new WeakMap();
   return {
+    async layoutSources(projectId) {
+      const items = await itemsFor(String(projectId));
+      if (layoutByItems.has(items)) return layoutByItems.get(items);
+      const documents = new Map();
+      for (const item of items) {
+        if (!item.documentId || item.libraryEnabled === false || ["disabled", "failed"].includes(item.documentStatus) || item.risk && !item.allowed) continue;
+        if (!documents.has(item.documentId)) documents.set(item.documentId, []);
+        documents.get(item.documentId).push(item);
+      }
+      const files = [...documents.entries()].map(([id, chunks]) => {
+        const text = chunks.sort((a, b) => a.ordinal - b.ordinal).map(c => [c.heading, c.text].filter(Boolean).join("\n")).join("\n");
+        return { path: (chunks[0].documentName || "资料") + " · " + id, text, version: createHash("sha256").update(text).digest("hex"), purpose: "reference" };
+      });
+      layoutByItems.set(items, files);
+      return files;
+    },
     invalidate(projectId = "") {
       version += 1;
       if (projectId) cache.delete(String(projectId));

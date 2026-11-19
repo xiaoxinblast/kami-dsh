@@ -16,6 +16,8 @@ const {
   getTranslationSkill,
   initializeStore,
   listLearningTrajectories,
+  listLearningSampleIndex,
+  loadLearningSampleDetails,
   listSkillEvaluations,
   listTranslationSkills,
   rollbackTranslationSkill,
@@ -76,6 +78,17 @@ test("JSON learning trajectories preserve the complete translation decision trai
   assert.equal((await getLearningTrajectory(created.id))?.promptVersion, "translation-v3");
   assert.equal((await listLearningTrajectories({ locale: "ja-JP", project: "wukong", batchId: "batch-1", status: "review" }))[0]?.id, created.id);
   assert.equal((await listLearningTrajectories({ locale: "ko-KR" })).length, 0);
+});
+
+test("JSON 学习选样使用同一项目的人工记录，拒绝在选样后撤销的人工终稿", async () => {
+  const scope = { locale: "zh-CN", project: "json-learning-selection" };
+  const item = await saveLearningTrajectory({ ...scope, source: "入口", initialTranslation: "入口处",
+    finalTranslation: "入口", status: "completed", humanDecision: { accepted: true }, contextPack: { purpose: "ui" } });
+  const selected = await listLearningSampleIndex(scope);
+  assert.deepEqual(selected.map(row => row.id), [item.id]);
+  assert.equal((await loadLearningSampleDetails(selected))[0].contextPack.purpose, "ui");
+  await updateLearningTrajectory(item.id, { humanDecision: { accepted: false } });
+  await assert.rejects(loadLearningSampleDetails(selected), /人工终稿在选样期间发生变化/);
 });
 
 test("JSON translation skills are versioned per isolated scope and support activate plus rollback", async () => {

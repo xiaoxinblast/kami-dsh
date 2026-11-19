@@ -1,8 +1,9 @@
+import { resolveLineLayout, hasSourceBreak, checkLineLayout } from "./src/line-layout.mjs";
 import http from "node:http";
 import { Readable } from "node:stream";
 import { runtimeOptions, withRuntimeCall } from "./src/runtime-context.mjs";
 import { measureStage } from "./src/performance.mjs";
-import { translateMicroBatchWithModel } from "./src/provider.mjs";
+import { translateMicroBatchWithModel, inspectLayoutRules } from "./src/provider.mjs";
 import { mergeWorkspaceMemories, mergeWorkspaceTerms, taskResources, workspaceStyleGuide } from "./src/workspace-resources.mjs";
 import ExcelJS from "exceljs";
 import { createHash, randomUUID } from "node:crypto";
@@ -34,7 +35,7 @@ import { buildPatternKey } from "./src/pattern-memory.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetGenerationToken, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, findQaCase, getQaRuns, getStoreMetadata, getSurveyMemoryRows, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile as getStoredProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemories, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleEvidences, loadStyleEvidenceIndex, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, updateQualityRun, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, saveReferenceFolder, getReferenceFolder, listReferenceFolders, deleteReferenceFolder, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetGenerationToken, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, findQaCase, getQaRuns, getStoreMetadata, getSurveyMemoryRows, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile as getStoredProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemories, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleEvidences, loadStyleEvidenceIndex, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, listLearningSampleIndex, loadLearningSampleDetails, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, updateQualityRun, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, saveReferenceFolder, getReferenceFolder, listReferenceFolders, deleteReferenceFolder, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
 import { MAX_REFERENCE_FILE_BYTES, chunkReferencePages, extractReferenceFile, planReferenceExtraction, scanReferenceRisk } from "./src/reference-materials.mjs";
 import { getMemoryCandidates as getStoredMemoryCandidates, sampleStyleEvidence, saveTmImportAudit } from "./src/store.mjs";
 import { buildReferenceToolRunner as assembleReferenceToolRunner, createProjectReferenceIndex } from "./src/reference-context.mjs";
@@ -53,8 +54,8 @@ import { deleteBatchOriginal, readBatchOriginal, saveBatchOriginal } from "./src
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
 import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories, matchReviewPairsToSegments } from "./src/external-review.mjs";
-import { DEFAULT_TRANSLATION_STRATEGY, createDefaultTranslationSkill, effectiveStrategyValue, evaluateSkillPromotion, normalizedEditDistance, selectSkillHoldout, summarizeTrajectoryAttribution, validateCandidatePromotionState } from "./src/learning-engine.mjs";
-import { benchmarkTranslationSkill, createBenchmarkSnapshot } from "./src/skill-benchmark.mjs";
+import { DEFAULT_TRANSLATION_STRATEGY, createDefaultTranslationSkill, effectiveStrategyValue, evaluateSkillPromotion, normalizedEditDistance, isCompletedHumanFinal, selectSkillHoldout, summarizeTrajectoryAttribution, validateCandidatePromotionState } from "./src/learning-engine.mjs";
+import { benchmarkTranslationSkill, benchmarkLineBreakMarkers, createBenchmarkSnapshot } from "./src/skill-benchmark.mjs";
 import { createEvaluationJobRunner } from "./src/evaluation-jobs.mjs";
 import { createLearningJobTaskBridge } from "./src/learning-task-bridge.mjs";
 import { detectBatchVerse, verifyBatchReferenceAcceptance } from "./src/batch-verse.mjs";
@@ -1586,7 +1587,7 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   const qaCases = contextPack.qaGuidance || [];
   let translation = initialTranslation;
   const deterministicIssues = (value) => [
-    ...runQa({ source: contextPack.source, translation: value, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.classification?.contentType || contentType || "general", registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
+    ...runQa({ source: contextPack.source, lineLayout: contextPack.lineLayout, translation: value, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.classification?.contentType || contentType || "general", registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
     ...applyProjectQaPolicy(checkFactSchema({ schema: contextPack.factSchema || extractFactSchema({ source: contextPack.source }), translation: value, locale }), projectSettings || undefined)
   ];
   let hardIssues = deterministicIssues(translation);
@@ -2747,7 +2748,7 @@ async function dispatchBatchSegment(body, path) {
   const dispatch = runtimeOptions().dispatch;
   if (dispatch) return dispatch({ method: "POST", path, body });
   // 组装译稿和收尾任务的资料范围均保存在当前异步上下文中。
-  if (runtimeOptions().prepareTranslation || runtimeOptions().translationDraft || runtimeOptions().followupOnly) {
+  if (runtimeOptions().evidenceCache || runtimeOptions().prepareTranslation || runtimeOptions().translationDraft || runtimeOptions().followupOnly) {
     const request = Readable.from([Buffer.from(JSON.stringify(body))]);
     request.method = "POST";
     let status, payload;
@@ -2794,10 +2795,91 @@ async function translateBatchDrafts(requests) {
   });
 }
 
+async function prepareSegmentLayout(pack, projectId, run, segment, localOnly) {
+  const runtime = runtimeOptions();
+  if (runtime.followupOnly) return segment?.result?.lineLayout || null;
+  const shared = runtime.evidenceCache?.batchId === run?.batchId ? runtime.evidenceCache : null;
+  let markers = segment?.locator?.lineBreakMarkers;
+  if (!markers && segment?.locator?.type === "xliff-unit" && pack.source.includes("<tag ") && run?.runnerOptions?.originalFile) {
+    const loadMarkers = async () => {
+      const bytes = await readBatchOriginal({ dataRoot: runtime.dataDirectory || DATA_ROOT, relativePath: run.runnerOptions.originalFile });
+      if (!bytes) throw new Error("无法读取批次原件以确认换行标记，请重新关联原文件");
+      const pairs = extractXliffPairs(bytes, run.filename, { includeEmptyTargets: true, includeLineBreakMarkers: true });
+      return new Map(pairs.map(p => [p.unitIndex, p]));
+    };
+    const index = await (shared ? shared.layoutMarkers ||= loadMarkers().catch(error => { delete shared.layoutMarkers; throw error; }) : loadMarkers());
+    const unit = index.get(Number(segment.locator.unitIndex));
+    if (unit && unit.entryId === String(segment.locator.unitId) && unit.source === pack.source) markers = unit.lineBreakMarkers;
+  }
+  if (!hasSourceBreak(pack.source, markers || [])) return null;
+  const snapshot = taskResources(projectId);
+  const humanGuide = snapshot?.guide || (!pack.userProfile?.nativeGuidePointer ? pack.userProfile : null);
+  const guides = [];
+  if (humanGuide?.instruction) {
+    const paths = snapshot?.resources?.filter(file => file.purpose === "style-guide" && file.reader === "compiled").map(file => file.path) || [];
+    // Compiled snapshots wrap each complete guide with its source paths.
+    let current = { path: humanGuide.name || "人工风格指南", text: "" };
+    for (const line of humanGuide.instruction.split(/\r?\n/u)) {
+      const heading = line.match(/^【(.+)】$/u);
+      if (heading && heading[1].split(" · ").every(path => paths.includes(path))) {
+        if (current.text.trim()) guides.push(current);
+        current = { path: heading[1], text: "" };
+      } else current.text += line + "\n";
+    }
+    if (current.text.trim()) guides.push(current);
+  }
+  const resources = snapshot?.resources || [];
+  const linkedGuides = resources.filter(f => f.purpose === "style-guide");
+  const linkedRefs = getSettings().reference?.enabled !== false ? resources.filter(f => f.purpose === "reference") : [];
+  const native = snapshot?.referenceMode === "agent-native" || resources.some(f => f.reader === "agent-native");
+  const runner = (linkedGuides.length || linkedRefs.length) && runtime.referenceTools
+    ? runtime.referenceTools({ workspace: snapshot.workspace, references: linkedRefs, styleGuides: linkedGuides, allowWeb: false, maxRounds: getSettings().reference?.nativeMaxRounds || 6 })
+    : null;
+  if ((linkedRefs.length || linkedGuides.some(f => f.reader !== "compiled")) && !runner?.layoutFiles) {
+    throw new Error("请在原 DSH 工作区核对关联文件的换行规格");
+  }
+  try {
+    const originals = await runner?.layoutFiles?.() || [];
+    const indexed = !native && projectId && getSettings().reference?.enabled !== false ? await referenceIndex.layoutSources(projectId) : [];
+    const compiled = new Map();
+    const embedded = guides.filter(guide => {
+      const paths = guide.path.split(" · ");
+      if (!paths.every(path => originals.some(f => f.path === path))) return true;
+      for (const path of paths) compiled.set(path, guide.text);
+      return false;
+    });
+    let cache = shared?.layoutRules;
+    if (!cache && run) {
+      cache = new Map();
+      for (const item of run.segments) {
+        const saved = item.result?.lineLayout;
+        if (saved?.key && Array.isArray(saved.rules)) cache.set(saved.key, saved.rules);
+      }
+      if (shared) shared.layoutRules = cache;
+    }
+    return await resolveLineLayout({ pack, scopeId: [projectId, run?.batchId, snapshot?.id, humanGuide?.version], guides: embedded, files: [...originals, ...indexed],
+      markers: markers || [], cache, previous: segment?.result?.lineLayout,
+      readText: f => {
+        if (f.text !== undefined) return f.text;
+        const recorded = linkedGuides.find(g => g.path === f.path && g.reader === "compiled");
+        if (compiled.has(f.path) && (recorded?.version ?? recorded?.hash) === f.version) return compiled.get(f.path);
+        return runner.readLayoutText(f);
+      },
+      inspect: (sources, context) => {
+        if (localOnly) throw new Error("换行规格需要重新查证原件，请重试该段校对后再运行本地 QA");
+        return inspectLayoutRules(sources, context, runner);
+      },
+      verifyVersions: originals.length ? async () => {
+        if (JSON.stringify(await runner.layoutFiles()) !== JSON.stringify(originals)) throw new Error("查阅期间换行规则原件已变化，请重试本段");
+      } : undefined
+    });
+  } finally { await runner?.dispose?.(); }
+}
+
 function segmentRuleIssues({ contextPack, matches, projectSettings, factSchema }, translation, phase) {
   const locale = contextPack.targetLocale;
   return [
-    ...runQa({ source: contextPack.source, translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings, draftCheck: phase === "draftQa" }),
+    ...runQa({ source: contextPack.source, lineLayout: contextPack.lineLayout, translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings, draftCheck: phase === "draftQa" }),
     ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation, locale }), projectSettings || undefined)
   ];
 }
@@ -3104,8 +3186,9 @@ async function prepareSkillEvaluation(id, body) {
   const scope = learningScope(challenger);
   const champion = await ensureChampionTranslationSkill(scope);
   assertCurrentCandidate(challenger, champion);
-  const trajectories = await listLearningTrajectories({ ...scope, limit: 500 });
-  const evaluationPool = selectSkillHoldout(trajectories, { scope, trainingEvidenceIds: challenger.evidenceIds || [], trainingSources: challenger.metadata?.trainingSources || [], limit: 60 });
+  const trajectories = await listLearningSampleIndex(scope);
+  const selected = selectSkillHoldout(trajectories, { scope, candidate: challenger, limit: 60 });
+  const evaluationPool = await loadLearningSampleDetails(selected);
   if (evaluationPool.length < 20) {
     // 证据不足：不发起任何模型调用，直接生成可审计的 insufficient 结论。
     const championSamples = evaluationPool.map((item) => trajectoryToEvaluationSample(item, { variant: "champion" }));
@@ -3599,7 +3682,7 @@ function consistencyChunkEvidence({ style = null, termEvidence = { bySegment: ne
 function consistencySegmentIssues(run, segment, translation) {
   return runQa({
     source: segment.source || "",
-    translation: String(translation || ""),
+    translation: String(translation || ""), lineLayout: segment.result?.lineLayout,
     matches: Array.isArray(segment.result?.matches) ? segment.result.matches : [],
     locale: run.locale,
     titleOverrides: getSettings().orthography.titleBrackets,
@@ -6282,15 +6365,12 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     const scope = learningScope(body);
     const champion = await ensureChampionTranslationSkill(scope);
-    // 取 500 条窗口：机器稿会挤在最新的一批里，窗口太小会把人工采纳的老终稿挤出去。
-    const trajectories = await listLearningTrajectories({ ...scope, limit: 500 });
+    const trajectories = await listLearningSampleIndex(scope);
     // 手动与自动提议共用同一实现，保证轨迹筛选、补丁合并与证据隔离完全一致。
-    const skill = await proposeChallengerSkill({ scope, champion, trajectories, promptVersion: TRANSLATION_PROMPT_VERSION });
+    const skill = await proposeChallengerSkill({ scope, champion, trajectories, loadSelected: loadLearningSampleDetails, promptVersion: TRANSLATION_PROMPT_VERSION });
     // 手动成功也要刷新自动提议的记账：否则卡片上会一直挂着"上次自动提议失败"的旧报错，
     // 而候选其实已经生成出来了。（失败只由自动链路记录，这里只负责清掉它。）
-    const acceptedCount = trajectories.filter((item) => item.status === "completed"
-      && item.humanDecision?.accepted === true
-      && String(item.finalTranslation || "").trim()).length;
+    const acceptedCount = trajectories.filter(isCompletedHumanFinal).length;
     await updateTranslationSkill(champion.id, {
       metadata: {
         ...(champion.metadata || {}),
@@ -6308,6 +6388,17 @@ async function apiHandler(req, res, url) {
     triggerQualityGateRefresh(scope, { reason: "candidate-created" });
     triggerAutoProposal(scope);
     return json(res, 201, { skill, candidate: skill });
+  }
+  if (req.method === "POST" && url.pathname === "/api/learning/continue-revision") {
+    const body = await readJsonBody(req), scope = learningScope(body);
+    const [champion] = await listTranslationSkills({ ...scope, status: "champion", limit: 1 });
+    const state = champion?.metadata?.learningAutomation;
+    if (!state?.canContinue || state.jobId !== body.jobId || state.candidateId !== body.candidateId) return json(res, 409, { error: "候选状态已变化，请刷新后查看当前进度" });
+    const job = evaluationJobs.get(state.jobId);
+    if (!job || job.challengerId !== state.candidateId || job.championId !== champion.id || !sameEvaluationScope(job.scope, scope)) return json(res, 409, { error: "原评测与当前候选不匹配，请刷新后重试" });
+    const route = runtimeOptions().modelRoute;
+    learningAutomation.trigger(job.scope, { continueJobId: state.jobId, ...(route ? { modelRoute: { provider: route.provider, model: route.model } } : {}) }).catch((error) => console.error("继续修订候选失败", error));
+    return json(res, 202, { message: "已提交本轮修订，生成后自动复评" });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/evaluate")) {
     const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length, -"/evaluate".length));
@@ -6421,7 +6512,7 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     const activated = await activateTranslationSkill(id);
-    const accepted = (await listLearningTrajectories({ ...scope, limit: 500 })).filter((item) => item.status === "completed" && item.humanDecision?.accepted === true);
+    const accepted = (await listLearningSampleIndex(scope)).filter(isCompletedHumanFinal);
     const metadata = { ...activated.metadata,
       autoPropose: { ...currentChampion.metadata?.autoPropose, lastAcceptedCount: accepted.length, lastError: "", candidateId: "" },
       learningAutomation: { scope, ...(currentChampion.metadata?.learningAutomation?.modelRoute ? { modelRoute: currentChampion.metadata.learningAutomation.modelRoute } : {}), status: "waiting", message: "已启用新版本，等待新增人工终稿", candidateId: "", jobId: "", updatedAt: new Date().toISOString() }
@@ -6545,7 +6636,7 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     const scope = learningScope(body);
     const limit = Math.min(200, Math.max(1, Number(body.limit) || 40));
-    const trajectories = await listLearningTrajectories({ ...scope, limit: 500 });
+    const trajectories = await listLearningSampleIndex(scope);
     // Gold 样本只能来自人工采纳的终稿：机器自评通过的译文没有资格当基准。
     const accepted = trajectories.filter((item) => item.status === "completed"
       && item.humanDecision?.accepted === true
@@ -7862,7 +7953,8 @@ async function apiHandler(req, res, url) {
       })();
       const withMatches = savedMatches ? { ...segment, result: { ...(segment.result || {}), matches: savedMatches } } : segment;
       const matches = resolveSegmentMatches(withMatches, assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
-      return runQa({ source: segment.source || "", translation: segment.translation || "", matches, translationReferences, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
+      const saved = savedById.get(String(segment.id || ""));
+      return runQa({ source: segment.source || "", lineLayout: saved?.source === segment.source ? saved?.result?.lineLayout : null, translation: segment.translation || "", matches, translationReferences, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
     });
     const blocking = issues.filter((issue) => ["error", "critical"].includes(issue.severity));
     return json(res, 200, { ok: blocking.length === 0, blocking, warnings: issues.filter((issue) => !["error", "critical"].includes(issue.severity)), total: issues.length });
@@ -8043,20 +8135,21 @@ async function apiHandler(req, res, url) {
     const contentType = body.contentType || "general";
     const domain = concreteDomain(body.domain, { text: body.source || "", contentType });
     const matches = matchTerms(body.source || "", scopedAssets, { contentType, domain, ...deliveryContext(body, body.source || "") });
-    if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings }) });
+    const batch = body.batchId ? await getBatchRun(body.batchId) : null;
+    const candidates = batch && batch.projectId === body.projectId ? batch.segments.filter(segment => segment.source === body.source && (!body.segmentId || segment.id === body.segmentId)) : [];
+    const segment = candidates.length === 1 ? candidates[0] : null;
+    if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ lineLayout: segment?.result?.lineLayout, source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings }) });
     const classification = await classify({ text: body.source || "", hint: contentType, useModel: false });
     const projectId = String(body.projectId || body.project || "default");
     const styleProfile = await getProjectStyleProfile(locale, { projectId });
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project: projectId }));
     const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { projectId, contentType, domain, limit: -1, scopeFallback: true }), { limit: 3, queryEmbedding: await embedSource(body.source || ""), contentType, domain });
-    const batch = body.batchId ? await getBatchRun(body.batchId) : null;
-    const candidates = batch?.projectId === body.projectId ? batch.segments.filter(segment => segment.source === body.source && (!body.segmentId || segment.id === body.segmentId)) : [];
-    const segment = candidates.length === 1 ? candidates[0] : null;
     const contextPack = buildContextPack({
       titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance,
       userProfile: workspaceStyleGuide(projectId),
       neighborContext: segment ? batchNeighborContext(batch, segment) : body.neighborContext,
       documentBrief: segment ? contextBriefSlice(batch.contextBrief, batch.segments.indexOf(segment), segment.id) : body.documentBrief });
+    if (segment?.result?.lineLayout) contextPack.lineLayout = segment.result.lineLayout;
     const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", maxRevisions: 0, projectSettings, projectId: body.projectId || "" });
     return json(res, 200, { matches, translation: aiQa.translation, issues: aiQa.issues, qaScore: aiQa.score, aiQa, styleProfile: contextPack.styleProfile });
   }
@@ -8873,14 +8966,17 @@ async function evaluateQaBatch(batchId, projectId = "") {
     // 参考稿的人工采纳身份只认已保存且原文、译文均匹配的批次记录。
     let batchVerse = null;
     let referenceSegments = [];
+    let layoutBatch = null;
     if (body.batchId) {
       try {
         const batchRun = await getBatchRun(String(body.batchId));
         batchVerse = detectBatchVerse(batchRun?.segments || []);
-        if (batchRun?.projectId === projectId) referenceSegments = batchRun.segments || [];
+        if (batchRun?.projectId === projectId) { layoutBatch = batchRun; referenceSegments = batchRun.segments || []; }
       } catch { /* 批次记录不可用不影响翻译 */ }
     }
-    const neighborMetadata = Array.isArray(body.neighborContext?.metadata) ? body.neighborContext.metadata : [];
+    const layoutSegment = referenceSegments.find(s => s.id === body.segmentId && s.source === body.source);
+    const neighborContext = body.neighborContext || (layoutSegment ? batchNeighborContext(layoutBatch, layoutSegment) : "");
+    const neighborMetadata = Array.isArray(neighborContext?.metadata) ? neighborContext.metadata : [];
     const factSchema = extractFactSchema({
       source: body.source,
       metadata: neighborMetadata.filter((item) => item?.role !== "constraint"),
@@ -8893,7 +8989,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
       classification,
       matches,
       domain,
-      neighborContext: body.neighborContext || "",
+      neighborContext,
       styleProfile: storedStyleProfile || body.styleProfile || null,
       translationSkill,
       qaGuidance,
@@ -8903,12 +8999,14 @@ async function evaluateQaBatch(batchId, projectId = "") {
       batchReferences: verifyBatchReferenceAcceptance(body.batchReferences, referenceSegments),
       patternReferences: verifyBatchReferenceAcceptance(body.patternReferences, referenceSegments),
       batchGroupEntries: body.batchGroupEntries || [],
-      documentBrief: body.documentBrief || null,
+      documentBrief: body.documentBrief || (layoutSegment ? contextBriefSlice(layoutBatch.contextBrief, referenceSegments.indexOf(layoutSegment), layoutSegment.id) : null),
       factSchema,
       // 当前段落的条目身份（memoQ x-mmq-context / 表格里的条目 ID 列）。
       entryId: body.entryId || "",
       entryKey: body.entryKey || ""
     });
+    const lineLayout = await prepareSegmentLayout(contextPack, projectId, layoutBatch, layoutSegment, body.workflowStage === "localQa");
+    if (lineLayout) contextPack.lineLayout = lineLayout;
     const provider = getProviderConfig();
     const risk = assessTranslationRisk({
       source: body.source,
@@ -8985,6 +9083,10 @@ async function evaluateQaBatch(batchId, projectId = "") {
         proofread: (translation, hints) => measureStage("proofreading", () => draft?.proofread || proofreadTranslationWithModel({ contextPack, translation, hints, referenceSession, model: routing.model, modelRole: routing.modelRole })),
         check: (translation, phase) => measureStage(phase, () => deterministicIssues(translation, phase))
       });
+      if (["all", "proofreading"].includes(stage) && workflow.stages.proofreading?.status === "completed" && (lineLayout || hasSourceBreak(workflow.translation))) {
+        workflow.issues = checkLineLayout(workflow.translation, lineLayout);
+        if (workflow.issues.length) workflow.stages.proofreading = { status: "failed", error: workflow.issues.map(i => i.message).join(" ") };
+      }
       const result = workflow.generated || { initial: workflow.draft, translation: workflow.translation };
       const failure = Object.values(workflow.stages).find(value => value.status === "failed");
       const checked = workflow.stages.localQa?.status === "completed";
@@ -9221,6 +9323,10 @@ const evaluationJobs = createEvaluationJobRunner({
   onChanged: syncLearningJobTask,
   deps: {
     getSkill: getTranslationSkill,
+    historicalLineBreaks: async (scope, cases) => {
+      const trajectories = await Promise.all(cases.map((item) => getLearningTrajectory(item.id)));
+      return benchmarkLineBreakMarkers(trajectories.filter((item, i) => item?.project === scope.project && item.source === cases[i].source), scope.project);
+    },
     getCurrentChampion: async (scope) => (await listTranslationSkills({ ...scope, status: "champion", limit: 1 }))[0] || null,
     validatePromotionState: (input) => validateCandidatePromotionState(input),
     saveEvaluation: saveSkillEvaluation,
@@ -9316,17 +9422,14 @@ const autoProposer = createAutoProposer({
   growthWindow: () => getSettings().learning.autoProposeGrowthWindow,
   deps: {
     getCurrentChampion: async (scope) => (await listTranslationSkills({ ...scope, status: "champion", limit: 1 }))[0] || null,
-    countAcceptedTrajectories: async (scope) => {
-      const trajectories = await listLearningTrajectories({ ...scope, limit: 500 });
-      return trajectories.filter((item) => item.status === "completed" && item.humanDecision?.accepted === true && String(item.finalTranslation || "").trim()).length;
-    },
+    countAcceptedTrajectories: (_scope, trajectories) => trajectories.filter(isCompletedHumanFinal).length,
     listActiveCandidates: async (scope) => {
       const skills = await listTranslationSkills({ ...scope, limit: 20 });
       return skills.filter((item) => ["challenger", "draft"].includes(item.status));
     },
-    listTrajectories: async (scope) => listLearningTrajectories({ ...scope, limit: 500 }),
+    listTrajectories: listLearningSampleIndex,
     selectTrajectories: (trajectories) => selectProposalTrajectories(trajectories),
-    propose: ({ scope, champion, trajectories }) => proposeChallengerSkill({ scope, champion, trajectories, promptVersion: TRANSLATION_PROMPT_VERSION }),
+    propose: ({ scope, champion, trajectories }) => proposeChallengerSkill({ scope, champion, trajectories, loadSelected: loadLearningSampleDetails, promptVersion: TRANSLATION_PROMPT_VERSION }),
     recordMetadata: async (championId, existingMetadata, autoPropose) => {
       try {
         await updateTranslationSkill(championId, { metadata: { ...(existingMetadata || {}), autoPropose } });
@@ -9343,7 +9446,7 @@ const learningAutomation = createLearningAutomation({ deps: {
     const champion = await ensureChampionTranslationSkill(scope);
     const [skills, trajectories] = await Promise.all([
       listTranslationSkills({ ...scope, limit: 500 }),
-      listLearningTrajectories({ ...scope, limit: 500 })
+      listLearningSampleIndex(scope)
     ]);
     return { champion, candidates: skills.filter((item) => ["challenger", "draft"].includes(item.status)), trajectories,
       jobs: evaluationJobs.list().filter((job) => sameEvaluationScope(job.scope, scope)) };
@@ -9353,6 +9456,12 @@ const learningAutomation = createLearningAutomation({ deps: {
     if (current?.status === "champion") await updateTranslationSkill(current.id, { metadata: { ...current.metadata, learningAutomation: state } });
   },
   propose: (scope) => autoProposer.maybePropose(scope),
+  revise: async (scope, champion, candidate, job, round) => {
+    const training = await Promise.all((candidate.evidenceIds || []).map((id) => getLearningTrajectory(id)));
+    const trajectories = training.filter((item) => item && item.project === scope.project && item.locale === scope.locale);
+    const report = { ...job.result.report, structure: await evaluationJobs.structureFeedback(job.jobId) };
+    return proposeChallengerSkill({ scope, champion, trajectories, revision: { candidate, report, holdout: evaluationJobs.holdoutCases(job.jobId), jobId: job.jobId, round }, promptVersion: TRANSLATION_PROMPT_VERSION });
+  },
   evaluate: async (candidate) => (await startSkillEvaluation(candidate.id)).value,
   resume: (id) => evaluationJobs.resume(id),
   gate: async (scope, candidate) => {

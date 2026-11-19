@@ -5,7 +5,7 @@ const actionable = new Set(["protected_token", "fact_url_missing", "fact_placeho
 export function proofreadingHints(issues) {
   const exactTokens = new Set(issues.filter(issue => ["fact_url_missing", "fact_placeholder_missing"].includes(issue.type))
     .map(issue => issue.fact?.value).filter(Boolean));
-  const hints = new Set(issues.filter(issue => actionable.has(issue.type) && issue.severity !== "info"
+  const hints = new Set(issues.filter(issue => (actionable.has(issue.type) || issue.type?.startsWith("line_layout_") || issue.type === "inline_tag_sequence") && issue.severity !== "info"
     && !(issue.type === "protected_token" && exactTokens.has(issue.token))).map(issue => issue.message));
   const drift = issues.find(issue => issue.type === "number_drift" && issue.severity !== "info");
   if (drift?.missingValues?.length && !issues.some(issue => issue.fact && ["number", "percentage", "money", "discount", "date"].includes(issue.fact.type))) {

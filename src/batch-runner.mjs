@@ -21,6 +21,7 @@ function compactResult(result) {
   return {
     translation: clip(result.translation, 10_000),
     ...(result.stages ? { stages: result.stages, draft: clip(result.draft, 10_000) } : {}),
+    ...(result.contextPack?.lineLayout ? { lineLayout: result.contextPack.lineLayout } : {}),
     ...(result.referenceUsage ? { referenceUsage: result.referenceUsage } : {}),
     qaScore: Number.isFinite(result.qaScore) ? result.qaScore : null,
     matches: (result.matches || []).slice(0, 20),

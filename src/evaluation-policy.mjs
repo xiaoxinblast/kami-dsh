@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
  * benchmarks. Production translation keeps its creative temperatures; only the
  * promotion benchmark is controlled here.
  */
-export const EVALUATION_POLICY_VERSION = "kami-evaluation-v2";
+export const EVALUATION_POLICY_VERSION = "kami-evaluation-v3";
 
 const EXPRESSIVE_CONTENT_TYPES = new Set(["dialogue", "marketing", "social"]);
 

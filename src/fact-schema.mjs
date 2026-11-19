@@ -214,8 +214,11 @@ function collectQuantities(text, blockedRanges = []) {
 
 function parseLengthLimit(entry) {
   const combined = `${entry.label} ${entry.value}`.trim();
-  if (/无(?:字数|字符|字元|长度)?限制|無(?:字數|字符|字元|長度)?限制|no\s+limit/iu.test(combined)) return null;
-  const match = combined.match(/(?:最多|至多|不超过|不超過|限|控制在|maximum|max(?:imum)?|within)?\s*(\d+)\s*(字|字符|字元|文字|词|詞|words?|characters?|chars?|bytes?|バイト|글자|자|단어|คำ)(?:以内|以內|内|內|以下|上限)?/iu);
+  // A per-line budget belongs to layout QA. Keep an independently stated total.
+  const perLine = /每(?:一)?行|单行|單行|一行(?:あたり|当たり)|1行|per\s+line|each\s+line|characters?\/line/iu;
+  const totalClauses = combined.split(/[,，;；。\n]/u).filter(clause => !perLine.test(clause)).join(" ");
+  if (/无(?:字数|字符|字元|长度)?限制|無(?:字數|字符|字元|長度)?限制|no\s+limit/iu.test(totalClauses)) return null;
+  const match = totalClauses.match(/(?:最多|至多|不超过|不超過|限|控制在|maximum|max(?:imum)?|within)?\s*(\d+)\s*(字|字符|字元|文字|词|詞|words?|characters?|chars?|bytes?|バイト|글자|자|단어|คำ)(?:以内|以內|内|內|以下|上限)?/iu);
   if (!match) return null;
   const hasConstraintCue = entry.role === "constraint" || /字数|字數|字符|字元|长度|長度|限制|limit|max|within|以内|以內|上限/iu.test(combined);
   if (!hasConstraintCue) return null;

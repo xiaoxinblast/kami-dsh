@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkbench } from "../dsh/workbench.mjs";
 import { workspaceFs } from "./helpers/workspace-fs.mjs";
-import { saveBatchRun, saveLearningTrajectory, saveTranslationSkill } from "../src/store.mjs";
+import { saveBatchRun, saveLearningTrajectory, saveTranslationSkill, saveSkillEvaluation, updateTranslationSkill } from "../src/store.mjs";
 import { createDefaultTranslationSkill } from "../src/learning-engine.mjs";
 import { createModelAdapter } from "../dsh/model-adapter.mjs";
 
@@ -17,6 +17,7 @@ test("DSH pages share responsive themes; context retries, reports and settings p
   await mkdir(cwd);
   const modelRequests = [], mutations = [];
   let holdContext = false, releaseContext;
+  let learningHold, learningStarted, learningReads = 0;
   const contextGate = new Promise((resolve) => { releaseContext = resolve; });
   const modelAdapter = createModelAdapter({ llm: { async prepareCall(config) {
     return { config: { ...config, maxTokens: config.maxTokens ?? 32000 }, async *stream(request) {
@@ -35,7 +36,7 @@ test("DSH pages share responsive themes; context retries, reports and settings p
   await saveBatchRun({ ...run, runState: "completed", segments: [segment], runnerOptions: { ...run.runnerOptions, termSurvey: { generatedAt: new Date().toISOString(), terms: [{ source: "星の剣", suggestedTarget: "星刃", initialTarget: "星之剑", reason: "翻译期标记", tm: { status: "matched", role: "master", reason: "采用主 TM 译法", evidence: [{ libraryName: "项目主记忆库", role: "master", source: "星の剣を装備します。", translation: "装备星刃。", target: "星刃", sourceFile: "過去作/战斗界面台词.mqxliff" }] } }, { source: "装備", suggestedTarget: "装备", initialTarget: "装备", reason: "翻译期标记", tm: { status: "not_found", reason: "主 TM 和参考 TM 无匹配，待人工终稿确认", evidence: [] } }] } }, qualityReport: { report: { generatedAt: new Date().toISOString(), coverage: { modelQa: 1 }, facts: { issueCount: 1 }, humanReview: { suggested: 1 } }, findings: [{ detail: "同一名称需要核对", suggestion: "核对术语证据", ids: [segment.id] }] } });
   await saveLearningTrajectory({ locale: "zh-CN", contentType: "general", domain: "general", project: state.project.id, batchId: run.batchId, segmentId: segment.id, source: segment.source, initialTranslation: "装备星之剑。", finalTranslation: "装备星刃。", status: "completed", humanDecision: { accepted: true, machineTranslation: "装备星之剑。", finalTranslation: "装备星刃。" }, assetRefs: { sourceFile: "reviewed.mqxliff" } });
   const learningScope = { locale: "zh-CN", project: state.project.id, contentType: "general", domain: "general" };
-  await saveTranslationSkill({ ...learningScope, ...createDefaultTranslationSkill({ scope: learningScope }), metadata: { learningAutomation: { status: "waiting", message: "还需 17 条未参与本候选学习的人工终稿，补齐后自动评测", missingSamples: 17 } } });
+  const champion = await saveTranslationSkill({ ...learningScope, ...createDefaultTranslationSkill({ scope: learningScope }), metadata: { learningAutomation: { status: "waiting", message: "还需 17 条未参与本候选学习的人工终稿，补齐后自动评测", missingSamples: 17 } } });
   let failQa = false, failSettings = false, failModelSave = false, failModelRead = false, failModelSelect = false, failContextSubmit = true;
   const catalog = { groups: [{ id: "dsh-test", name: "测试提供商", models: [{ id: "selected-model", name: "推理模型", reasoning: { efforts: [{ id: "high" }, { id: "max" }], defaultEffort: "high" } }, { id: "plain-model", name: "普通模型" }] }, { id: "another-provider", name: "另一个提供商", models: [{ id: "another-model", reasoning: { efforts: [{ id: "low" }, { id: "high" }], defaultEffort: "low" } }] }] };
   const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>
@@ -76,6 +77,12 @@ test("DSH pages share responsive themes; context retries, reports and settings p
         if (failModelSave && operation.path === "/api/settings" && operation.method === "POST") throw new Error("模拟模型设置保存失败");
         if (failModelRead && operation.action === "model") throw new Error("模拟模型信息读取失败");
         if (failContextSubmit && operation.method === "POST" && operation.path?.endsWith("/context-brief")) throw new Error("模拟语境重试提交失败");
+        const readingLearning = operation.path?.startsWith("/api/learning?");
+        if (readingLearning) {
+          learningReads++;
+          learningStarted?.resolve();
+          await learningHold?.promise;
+        }
         const value = await workbench.perform(operation, context);
         res.setHeader("content-type", "application/json"); return res.end(JSON.stringify({ ok: true, value }));
       }
@@ -133,7 +140,12 @@ test("DSH pages share responsive themes; context retries, reports and settings p
       if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `term-memory-${width}.png`) });
     }
     await page.setViewportSize({ width: 960, height: 1000 });
+    await page.clock.install();
+    learningHold = Promise.withResolvers();
     await page.getByRole("button", { name: "学习", exact: true }).click();
+    const loading = page.locator(".learning-view").getByText("准备中…", { exact: true });
+    await loading.waitFor();
+    learningHold.resolve();
     const automatic = page.getByRole("region", { name: "自动学习状态", exact: true });
     await automatic.getByText("等待样本", { exact: true }).waitFor();
     assert.match(await automatic.innerText(), /还需 17 条/);
@@ -143,6 +155,29 @@ test("DSH pages share responsive themes; context retries, reports and settings p
       if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `learning-automation-${width}.png`) });
     }
     await page.setViewportSize({ width: 960, height: 1000 });
+    const blockedReason = "已自动修订 2 版，最新候选仍未通过：硬错误增加。可手动继续修订。";
+    const candidate = await saveTranslationSkill({ ...learningScope, parentId: champion.id, status: "challenger", version: 4, name: "候选 v4", strategy: {} });
+    await saveSkillEvaluation({ ...learningScope, championSkillId: champion.id, challengerSkillId: candidate.id, decision: "reject", sampleCount: 120, report: { conclusion: blockedReason } });
+    await updateTranslationSkill(champion.id, { metadata: { learningAutomation: { candidateId: candidate.id, jobId: "fixture-rejected", revisionRound: 2, canContinue: true, status: "blocked", message: blockedReason } } });
+    await page.clock.fastForward(5001);
+    await automatic.getByText(blockedReason, { exact: true }).waitFor();
+    learningHold = Promise.withResolvers();
+    learningStarted = Promise.withResolvers();
+    await page.clock.fastForward(5001);
+    await learningStarted.promise;
+    const inFlight = learningReads;
+    for (const width of [960, 330]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.equal(await loading.count(), 0, "轮询期间保留已显示的结论");
+      assert.equal(await automatic.getByRole("button", { name: "继续修订一版" }).isEnabled(), true);
+      assert.equal(await automatic.getByText(blockedReason, { exact: true }).isVisible(), true);
+      assert.equal(await page.locator("main").evaluate(el => el.scrollWidth > el.clientWidth), false);
+      if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `learning-refresh-${width}.png`) });
+    }
+    await page.clock.fastForward(5001);
+    assert.equal(learningReads, inFlight, "上次刷新未结束时，不重启正在读取的请求");
+    learningHold.resolve();
+    await page.setViewportSize({width:960,height:1000});
     await page.getByText("学习轨迹与修改记录", { exact: true }).click();
     await page.getByRole("searchbox", { name: "搜索学习证据", exact: true }).fill("reviewed.mqxliff");
     await page.getByText("装备星之剑。", { exact: true }).waitFor();
@@ -402,6 +437,7 @@ test("DSH pages share responsive themes; context retries, reports and settings p
     await page.getByRole("tab", { name: "质量参数", exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally {
+    learningHold?.resolve();
     releaseContext();
     await browser?.close();
     await new Promise((resolve) => server.close(resolve));

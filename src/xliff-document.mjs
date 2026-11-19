@@ -417,7 +417,7 @@ export function prepareXliffDocument(buffer, filename) {
       id,
       index: segments.length + 1,
       source: unit.sourceText,
-      locator: { type: "xliff-unit", unitIndex: unit.index, unitId: unit.id },
+      locator: { type: "xliff-unit", unitIndex: unit.index, unitId: unit.id, ...(unit.sourceText.includes("<tag ") ? { lineBreakMarkers: lineBreakMarkers(unit) } : {}) },
       // 条目身份：memoQ 写在 x-mmq-context 里的稳定 ID，用于提示词消歧与写入 TM 时按 ID 匹配。
       entryKey: unit.memoQContext || "",
       context: {
@@ -436,8 +436,17 @@ export function prepareXliffDocument(buffer, filename) {
   };
 }
 
+function lineBreakMarkers(unit) {
+  const ids = new Set();
+  for (const [id, raw] of unit.sourceTagMap) {
+    const markup = decodeXml(raw);
+    if (/<mq:ch\s+val=(["'])(?:\r\n|\r|\n)\1\s*\/>/iu.test(markup) || /<br\s*\/?>/iu.test(markup)) ids.add(id);
+  }
+  return (unit.sourceText.match(MARKER_RE) || []).filter((token) => ids.has(markerId(token)));
+}
+
 /** Read existing bilingual XLIFF/MQXLIFF pairs for manual TM import. */
-export function extractXliffPairs(buffer, filename, { includeEmptyTargets = false, verifyLibrary = false } = {}) {
+export function extractXliffPairs(buffer, filename, { includeEmptyTargets = false, includeLineBreakMarkers = false, verifyLibrary = false } = {}) {
   const extension = String(filename || "").toLowerCase().endsWith(".mqxliff") ? "mqxliff" : "xliff";
   const parsed = parseXliffXml(decodeXmlBuffer(buffer), extension);
   if (verifyLibrary) {
@@ -465,6 +474,7 @@ export function extractXliffPairs(buffer, filename, { includeEmptyTargets = fals
       entryKey: unit.memoQContext || "",
       source: unit.sourceText,
       target: unit.targetText,
+      ...(includeLineBreakMarkers ? { unitIndex: unit.index, lineBreakMarkers: lineBreakMarkers(unit) } : {}),
       ...(verifyLibrary ? { file: unit.file, rowNumber: unit.index } : {}),
       previousSource: parsed.units[unit.index - 2]?.sourceText || "",
       nextSource: parsed.units[unit.index]?.sourceText || "",

@@ -54,11 +54,11 @@ export function createAutoProposer({ deps, threshold = AUTO_PROPOSE_THRESHOLD, g
   async function runCheck(scope) {
     const champion = await deps.getCurrentChampion(scope);
     if (!champion) return { proposed: false, reason: "作用域尚无生效版本，跳过" };
-    const [activeCandidates, acceptedCount, trajectories] = await Promise.all([
+    const [activeCandidates, trajectories] = await Promise.all([
       deps.listActiveCandidates(scope),
-      deps.countAcceptedTrajectories(scope),
       deps.listTrajectories(scope)
     ]);
+    const acceptedCount = await deps.countAcceptedTrajectories(scope, trajectories);
     const selected = deps.selectTrajectories(trajectories);
     const fingerprint = createHash("sha256").update(JSON.stringify(selected.map((item) => [item.id, item.source, item.humanDecision?.finalTranslation || item.finalTranslation]))).digest("hex");
     if (champion.metadata?.autoPropose?.lastError && champion.metadata.autoPropose.lastAttemptFingerprint === fingerprint) {

@@ -85,6 +85,7 @@ import {
   saveDirectusStyleProfile,
   saveDirectusLearningTrajectory,
   listDirectusLearningTrajectories,
+  listDirectusLearningSampleIndex,
   countDirectusLearningTrajectoriesByScope,
   countDirectusLearningTrajectoriesByFile,
   getDirectusLearningTrajectory,
@@ -1582,7 +1583,9 @@ async function saveJsonLearningTrajectory(input) {
 
 async function listJsonLearningTrajectories(filters = {}) {
   const items = await readJson(learningPath("trajectories.json"), []);
+  const ids = filters.ids && new Set(filters.ids);
   return items.filter((item) => matchesLearningScope(item, filters)
+    && (!ids || ids.has(item.id))
     && (!filters.batchId || item.batchId === filters.batchId)
     && (!filters.status || item.status === filters.status))
     .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
@@ -2588,6 +2591,31 @@ export async function findQaCase(id) {
 
 export async function saveLearningTrajectory(input) {
   return usesDirectus() ? saveDirectusLearningTrajectory(input) : saveJsonLearningTrajectory(input);
+}
+
+/** 选样先查全项目的轻量字段，确定训练或留出 ID 后才载入完整轨迹。 */
+export async function listLearningSampleIndex(scope) {
+  if (usesDirectus()) return listDirectusLearningSampleIndex(scope);
+  const items = await readJson(learningPath("trajectories.json"), []);
+  return items.filter(item => matchesLearningScope(item, scope)).sort((a, b) =>
+    String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))
+    || String(b.createdAt || "").localeCompare(String(a.createdAt || "")) || String(a.id).localeCompare(String(b.id)));
+}
+
+export async function loadLearningSampleDetails(rows) {
+  if (!rows.length) return [];
+  const { locale, project } = rows[0];
+  const details = await listLearningTrajectories({ locale, project, ids: rows.map(item => item.id), limit: rows.length });
+  const byId = new Map(details.map(item => [item.id, item]));
+  return rows.map(row => {
+    const item = byId.get(row.id);
+    if (!item || item.updatedAt !== row.updatedAt || item.source !== row.source
+      || item.humanDecision?.accepted !== true || item.status !== row.status
+      || (item.humanDecision?.finalTranslation || item.finalTranslation) !== (row.humanDecision?.finalTranslation || row.finalTranslation)) {
+      throw new Error("人工终稿在选样期间发生变化，请重新运行此次学习");
+    }
+    return item;
+  });
 }
 
 export async function listLearningTrajectories(filters) {

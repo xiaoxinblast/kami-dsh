@@ -106,13 +106,13 @@ async function checkedTarget(root, path, context) {
   return { name, target, actual };
 }
 
-async function referenceSource(root, path, context) {
+export async function referenceSource(root, path, context) {
   const entry = await checkedTarget(root, path, context), info = await context.fs.stat(entry.target, context.signal);
   if (info?.type !== "file") throw new Error(`不是普通文件：${entry.name}`);
   return { path: entry.name, filename: basename(entry.name), size: info.size, version: info.version };
 }
 
-async function readSource(root, path, context, maxBytes, metadataOnly = false, cache) {
+export async function readSource(root, path, context, maxBytes, metadataOnly = false, cache) {
   const entry = await checkedTarget(root, path, context);
   const info = await context.fs.stat(entry.target, context.signal);
   if (info?.type !== "file") throw new Error(`不是普通文件：${entry.name}`);
@@ -132,7 +132,7 @@ async function readSource(root, path, context, maxBytes, metadataOnly = false, c
   } else bytes = Buffer.from(await context.fs.readBytes(entry.target, context.signal, maxBytes ?? info.size));
   const after = await context.fs.stat(entry.target, context.signal);
   if ((maxBytes !== undefined && bytes?.length > maxBytes) || after?.version !== info.version || await realpath(context.fs.processPath(entry.target)) !== entry.actual) throw new Error(`读取期间文件发生变化，请重试：${entry.name}`);
-  const source = { path: entry.name, filename: basename(entry.name), hash: digest || hash(bytes), ...(metadataOnly ? {} : { bytes, version: info.version }), size: info.size };
+  const source = { path: entry.name, filename: basename(entry.name), hash: digest || hash(bytes), ...(info.version !== undefined ? { version: info.version } : {}), ...(metadataOnly ? {} : { bytes }), size: info.size };
   if (metadataOnly && info.version !== undefined) cache?.set(entry.actual, { version: info.version, source });
   return source;
 }
