@@ -1222,10 +1222,11 @@ async function deleteJsonBatchRun(batchId) {
   }
 }
 
-async function listJsonBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
+async function listJsonBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200, ids } = {}) {
   let files = [];
   try { files = await readdir(join(ROOT, "batches")); } catch (error) { if (error.code !== "ENOENT") throw error; }
-  const runs = (await Promise.all(files.filter((file) => file.endsWith(".json")).map((file) => readJson(join(ROOT, "batches", file), null)))).filter(Boolean);
+  const selectedFiles = ids && new Set(ids.map(id => id + ".json"));
+  const runs = (await Promise.all(files.filter((file) => file.endsWith(".json") && (!selectedFiles || selectedFiles.has(file))).map((file) => readJson(join(ROOT, "batches", file), null)))).filter(Boolean);
   return runs.map((run) => {
     const selected = (run.segments || []).filter((segment) => segment.selected !== false);
     const completedSegments = selected.filter((segment) => segment.status === "done" && segment.translation).length;
@@ -1537,7 +1538,7 @@ function assertImmutableLearningIdentity(existing, input, fields) {
   }
 }
 
-async function saveJsonLearningTrajectory(input) {
+async function saveJsonLearningTrajectory(input, reviewedProject) {
   const path = learningPath("trajectories.json");
   return withJsonFileLock(path, async () => {
     const items = await readJson(path, []);
@@ -1546,6 +1547,7 @@ async function saveJsonLearningTrajectory(input) {
     if (existing) assertImmutableLearningIdentity(existing, input, ["locale", "contentType", "domain", "project", "batchId", "segmentId", "source"]);
     const now = new Date().toISOString();
     const scope = cleanScope(input, existing || {});
+    if (reviewedProject && existing?.project === "default") scope.project = reviewedProject;
     const status = assertChoice(input.status ?? existing?.status ?? "running", LEARNING_TRAJECTORY_STATUSES, "learning trajectory status");
     const item = {
       id: existing?.id || input.id || randomUUID(),
@@ -2594,10 +2596,10 @@ export async function saveLearningTrajectory(input) {
 }
 
 /** 选样先查全项目的轻量字段，确定训练或留出 ID 后才载入完整轨迹。 */
-export async function listLearningSampleIndex(scope) {
-  if (usesDirectus()) return listDirectusLearningSampleIndex(scope);
+export async function listLearningSampleIndex(scope, options) {
+  if (usesDirectus()) return listDirectusLearningSampleIndex(scope, options);
   const items = await readJson(learningPath("trajectories.json"), []);
-  return items.filter(item => matchesLearningScope(item, scope)).sort((a, b) =>
+  return items.filter(item => matchesLearningScope(item, scope) && (!scope.batchId || item.batchId === scope.batchId)).sort((a, b) =>
     String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))
     || String(b.createdAt || "").localeCompare(String(a.createdAt || "")) || String(a.id).localeCompare(String(b.id)));
 }
@@ -2622,6 +2624,17 @@ export async function listLearningTrajectories(filters) {
   return usesDirectus() ? listDirectusLearningTrajectories(filters) : listJsonLearningTrajectories(filters);
 }
 
+/** 保留索引顺序，仅为当前页或待关联的原文取完整轨迹。 */
+export async function learningDetailsById(scope, ids) {
+  const byId = new Map();
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const rows = await listLearningTrajectories({ ...scope, ids: chunk, limit: chunk.length });
+    for (const row of rows) byId.set(row.id, row);
+  }
+  return ids.map(id => byId.get(id)).filter(Boolean);
+}
+
 export async function countLearningTrajectoriesByScope(filters) {
   return usesDirectus() ? countDirectusLearningTrajectoriesByScope(filters) : countJsonLearningTrajectoriesByScope(filters);
 }
@@ -2635,7 +2648,16 @@ export async function getLearningTrajectory(id) {
   return usesDirectus() ? getDirectusLearningTrajectory(id) : getJsonLearningTrajectory(id);
 }
 
-export async function updateLearningTrajectory(id, patch) {
+export async function updateLearningTrajectory(id, patch, reviewedProject) {
+  if (reviewedProject && reviewedProject !== "default") {
+    const record = await getLearningTrajectory(id);
+    const batch = record?.batchId && await getBatchRun(record.batchId);
+    if (batch?.projectId !== reviewedProject || !["default", reviewedProject].includes(record.project)) {
+      throw new Error("旧轨迹的原批次与终稿项目不匹配");
+    }
+    if (usesDirectus()) return updateDirectusLearningTrajectory(id, patch, reviewedProject);
+    return saveJsonLearningTrajectory({ ...patch, id: String(id), _mustExist: true }, reviewedProject);
+  }
   return usesDirectus() ? updateDirectusLearningTrajectory(id, patch) : updateJsonLearningTrajectory(id, patch);
 }
 

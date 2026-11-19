@@ -19,7 +19,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
   }
   segments[7].result = { stages: { translation: { status: "completed" }, draftQa: { status: "completed", hintCount: 1 }, proofreading: { status: "completed" }, localQa: { status: "optional" } }, aiQa: { status: "proofread_only", used: true } };
   run.workflow = buildBatchWorkflow(run);
-  let fail = false, held = false, release;
+  let fail = false, held = false, release, attentionOverride;
   const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>
     :root{--dsw-alias-label-primary:#25312b;--dsw-alias-label-secondary:#58665e;--dsw-alias-label-tertiary:#7b877f;--dsw-alias-bg-layer-1:#f6f8f5;--dsw-alias-bg-layer-2:#fff;--dsw-alias-bg-layer-3:#eaf0e9;--dsw-alias-border-l2:#d9e0d8;--dsw-alias-interactive-bg-hover:#edf2eb;--dsw-alias-brand-primary:#174d40;--dsw-alias-button-primary-fill:#174d40;--dsw-alias-label-primary-foreground:#fff;--dsw-alias-state-error-primary:#b33e38}
     html,body,#root{margin:0;height:100%;font:13px/1.5 "Microsoft YaHei",sans-serif}
@@ -48,7 +48,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
       if (operation.action === "export") throw new Error("client api: kamiUi/invoke failed: Failed to fetch");
       if (operation.action === "workspace") value = { isKamiSession: true, workspace: "D:/retry", config: { projectId: "p" }, project: { id: "p", name: "重试验收" } };
       else if (operation.path === "/api/projects") value = { projects: [{ id: "p", name: "重试验收" }] };
-      else if (operation.path?.startsWith("/api/batch/files")) value = { files: [{ ...run, attention: batchAttention(run) }] };
+      else if (operation.path?.startsWith("/api/batch/files")) value = { files: [{ ...run, attention: attentionOverride || batchAttention(run) }] };
       else if (operation.path?.startsWith("/api/tasks")) value = [];
       else if (operation.method === "POST" && /\/retry-(translation|qa|proofreading)$/.test(operation.path)) {
         operations.push(operation);
@@ -178,6 +178,36 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     run.workflow.termSurvey = { status: "needs_attention", message: "术语查库完成 2 / 3 条" };
     run.consistencyRetryCount = 1;
     run.termSurvey = { generatedAt: new Date().toISOString(), terms: [{ source: "敵", suggestedTarget: "敌人", initialTarget: "敌方", tm: { status: "matched", role: "master", reason: "主 TM 已确认译法" } }, { source: "町", suggestedTarget: "小镇" }, { source: "民", suggestedTarget: "百姓", initialTarget: "市民", tm: { status: "failed", reason: "对齐超时" } }], warning: "1 条查询超时，1 处修订未完成", coverage: { failedTerms: 1, checkedTerms: 2, markedTerms: 3 }, repair: { verifiedMemoryOnly: true, skipped: [{ source: "敵", reason: "模型 QA 超时", segmentId: segments[6].id }] } };
+    for (const [verb, stageName, count, reason, label] of [
+      ["consistency-check", "一致性校对", 1, run.qualityReport.warning, "仅重试一致性失败项"],
+      ["term-survey", "术语普查", 2, run.termSurvey.warning, "仅重试术语失败项"]
+    ]) {
+      attentionOverride = { verb, count, unit: "项", reason, label, failedOnly: true };
+      await page.reload();
+      await banner.getByText(`${count} 项待处理 · ${reason}`, { exact: true }).waitFor();
+      const overviewNode = page.getByRole("button", { name: `查看${stageName}详情`, exact: true });
+      await overviewNode.getByText(`${count} 项待处理`, { exact: true }).waitFor();
+      await overviewNode.getByText(reason, { exact: true }).waitFor();
+      for (const width of [330, 960]) {
+        await page.setViewportSize({ width, height: 1050 });
+        assert.equal(await page.locator(".kami").evaluate(el => el.scrollWidth > el.clientWidth), false);
+        if (process.env.KAMI_UI_SCREENSHOTS) {
+          await banner.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `followup-${verb}-banner-${width}.png`) });
+          await overviewNode.locator("xpath=../..").screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `followup-${verb}-overview-${width}.png`) });
+        }
+      }
+      const start = operations.length;
+      await Promise.all([page.waitForResponse(res => res.url().endsWith("/invoke") && res.request().postData()?.includes(verb)), banner.getByRole("button", { name: label, exact: true }).click()]);
+      assert.deepEqual(operations.slice(start).map(op => [op.path, op.body.failedOnly]), [[`/api/batch/run/retry-batch/${verb}`, true]]);
+      await overviewNode.click();
+      await page.getByRole("button", { name: `${label} (${count})`, exact: true }).waitFor();
+    }
+    attentionOverride = { verb: "term-survey", count: 0, unit: "项", reason: "术语普查中断，尚无失败项明细", label: "重新运行术语普查", failedOnly: false };
+    await page.reload();
+    await banner.getByText(attentionOverride.reason, { exact: true }).waitFor();
+    await Promise.all([page.waitForResponse(res => res.url().endsWith("/invoke") && res.request().postData()?.includes("term-survey")), banner.getByRole("button", {name: attentionOverride.label}).click()]);
+    assert.equal(operations.at(-1).body.failedOnly, false);
+    attentionOverride = null;
     await page.reload();
     const panel = name => page.locator('[aria-label="当前任务分区"]').getByRole("button", { name, exact: true });
     await panel("工作区导出").click();

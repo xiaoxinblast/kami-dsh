@@ -70,7 +70,7 @@ export function createModelAdapter(ctx, llm) {
         if (signal.aborted) throw new Error(`${label}${options.signal?.aborted ? "已取消" : `超过 ${Math.round((options.timeoutMs || 120_000) / 1000)} 秒，调用超时`}（${prepared?.config.model || config.model}，输出上限 ${prepared?.config.maxTokens ?? "提供商默认"}）`, { cause: error });
         const transportFailed = error?.code === "TRANSPORT" || (!error?.code && /(?:^|：)DeepSeek Messages transport failed$/u.test(error?.message));
         if (!transportFailed) throw error;
-        if (transportRetries === retryDelays.length) throw Object.assign(new Error(`${label}传输失败，已自动重试 ${transportRetries} 次：${error.message}`, { cause: error }), { code: "TRANSPORT" });
+        if (transportRetries === retryDelays.length) throw Object.assign(new Error(`${label}传输失败，已自动重试 ${transportRetries} 次：${error.message}`, { cause: error }), { code: "TRANSPORT", transportRetriesExhausted: true });
         await delay(retryDelays[transportRetries++], undefined, { signal: options.signal });
         continue;
       } finally {

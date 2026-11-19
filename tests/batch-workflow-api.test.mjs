@@ -83,7 +83,7 @@ test(`一致性修复后的复核结果必须传递到报告和后台任务：${
       return { checkedChunks: 1, remaining: [], failures: mode === "partial" ? [failure] : [] };
     },
     annotateConsistencyFindings: (findings) => findings, buildQualityReport: () => ({ coverage: { percent: 100 } }),
-    consistencyCheckTasks: new Map(), createBackgroundTask: async () => ({ id: "task" }), attachBatchWorkflowTask: async () => {},
+    consistencyCheckTasks: new Map(), createBackgroundTask: async () => ({ id: "task" }), attachBatchWorkflowTask: async () => {}, saveFollowupAttention: async () => {},
     updateBackgroundTaskProgress: async (_id, value) => { task = value; }
   });
   vm.runInContext(block("async function runConsistencyCheck(", "/**\n * 翻译期术语普查"), context);

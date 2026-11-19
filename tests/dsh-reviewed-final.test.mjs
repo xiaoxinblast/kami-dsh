@@ -9,6 +9,50 @@ import { getBatchRun, saveAsset, saveBatchRun, saveLearningTrajectory } from "..
 
 const xml = (targets = ["", "", "保存。"]) => `<?xml version="1.0" encoding="UTF-8"?><xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:mq="MQXliff" version="1.2"><file original="story"><body>${["星屑結晶を使います。", "帰還します。", "保存します。"].map((source, index) => `<trans-unit id="${index + 1}"><source>${source}</source><target>${targets[index]}</target><context-group><context context-type="x-mmq-context">STORY_${index + 1}</context></context-group></trans-unit>`).join("")}</body></file></xliff>`;
 
+test("相同原文缺少身份时保留歧义，修正终稿后只接回本批轨迹及属于本项目的旧记录", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kami-ambiguous-final-")), cwd = join(directory, "workspace");
+  await mkdir(cwd);
+  const { fs, close } = await workspaceFs();
+  const wb = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async () => ({ content: "{}" }) });
+  const context = { cwd, fs, human: true };
+  const document = rows => `<xliff version="1.2"><file original="same"><body>${rows.map(([id,source,target]) => `<trans-unit id="${id}"><source>${source}</source><target>${target}</target></trans-unit>`).join("")}</body></file></xliff>`;
+  const source = [["one", "了解。", ""], ["two", "了解。", ""], ["end", "終了。", ""]];
+  try {
+    const state = await wb.workspace({ action: "bind", name: "歧义与修正" }, context), projectId = state.project.id;
+    await writeFile(join(cwd, "old.mqxliff"), document(source));
+    const imported = await wb.importFile({ path: "old.mqxliff" }, context);
+    const run = await getBatchRun(imported.batchId);
+    const segments = run.segments.map((s,i) => ({ ...s, status: "done", translation: "机器稿" + i }));
+    await saveBatchRun({ ...run, runState: "completed", segments });
+    for (const [i, seg] of segments.entries()) await saveLearningTrajectory({ project: i === 0 ? "default" : projectId, locale: "zh-CN", source: seg.source,
+      initialTranslation: seg.translation, finalTranslation: seg.translation, batchId: run.batchId, segmentId: seg.id, assetRefs: { entryId: seg.locator.unitId }, status: "completed" });
+    const foreign = await saveLearningTrajectory({ project: "default", locale: "zh-CN", batchId: "foreign-batch", source: "終了。",
+      initialTranslation: "其他项目机器稿", finalTranslation: "其他项目机器稿", status: "completed" });
+    const op = { action: "review-final", projectId, batchId: run.batchId, path: "final.mqxliff", libraryId: state.libraries.find(l=>l.role==="master").id };
+    await writeFile(join(cwd, op.path), document([["lost", "了解。", "无法唯一定位"], ["end", "終了。", "结束。"], ["new", "別物。", "其他。"]]));
+    const partial = await wb.perform(op, context);
+    assert.deepEqual([partial.memoriesWritten, partial.trajectoriesLinked, partial.rejected.ambiguous.length, partial.rejected.unmatched.length], [1,1,1,1]);
+    assert.match(partial.rejected.ambiguous[0].reason, /出现 2 次/);
+    assert.equal((await getBatchRun(run.batchId)).runnerOptions.reviewFinal.complete, false, "待用户修正的终稿不能显示全部关联成功");
+    assert.equal(partial.total, 3);
+    const same = await wb.perform(op, context);
+    assert.equal(same.alreadyLinked, true);
+    assert.deepEqual(same.rejected, partial.rejected);
+    assert.equal((await getBatchRun(run.batchId)).runnerOptions.reviewFinal.version, 1);
+    await writeFile(join(cwd, op.path), document([["lost", "了解。", "无法唯一定位"]]));
+    await assert.rejects(wb.perform(op, context), /了解。.*出现 2 次/);
+    await writeFile(join(cwd, op.path), document([["two", "了解。", "明白。"], ["one", "了解。", "知道了。"], ["end", "終了。", "结束。"]]));
+    const complete = await wb.perform(op, context);
+    assert.deepEqual([complete.memoriesWritten,complete.trajectoriesLinked,complete.trajectoryAlreadyAccepted], [3,2,1]);
+    assert.equal((await getBatchRun(run.batchId)).runnerOptions.reviewFinal.complete, true);
+    assert.deepEqual((await getBatchRun(run.batchId)).segments.map(s=>s.translation), ["知道了。","明白。","结束。"]);
+    const accepted = await wb.invoke({ path: "/api/learning/evidence?" + new URLSearchParams({ locale: "zh-CN", project: projectId, batchId: run.batchId, kind: "accepted" }) }, context);
+    assert.equal(accepted.total, 3, "原批归属已确认的旧轨迹也能用于该项目学习");
+    const legacy = await wb.store.request("/items/learning_trajectories/"+foreign.id);
+    assert.equal(legacy.human_decision?.accepted, undefined);
+  } finally { await wb.close(); await close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人工修改后的术语，重复关联幂等", async () => {
   const directory = await mkdtemp(join(tmpdir(), "kami-reviewed-final-")), cwd = join(directory, "workspace");
   await mkdir(cwd);
@@ -28,7 +72,8 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
       return { content: JSON.stringify({ matches: [{ source: "星屑結晶", found: true, target: "星屑晶石", confidence: 0.99 }, { source: "帰還", found: true, target: "返回", confidence: 0.99 }] }) };
     }
     if (options.requestLabel === "AIQA") return { content: '{"issues":[]}' };
-    return { content: JSON.stringify(messages).includes("星屑結晶") ? "使用星尘结晶。" : "返航。" };
+    const current = messages.map(message => message.content).join("\n").split("当前原文：\n").at(-1);
+    return { content: current.startsWith("星屑結晶を使います。") ? "使用星尘结晶。" : "返航。" };
   } });
   const context = { cwd, fs, human: true };
   try {
@@ -45,6 +90,10 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
     await workbench.invoke({ path: "/api/batch/run", method: "POST", body: { batchId: prepared.batchId, projectId, segments, runState: "completed", runnerOptions: { termSurvey: { terms: [{ source: "星屑結晶", suggestedTarget: "星尘结晶" }, { source: "帰還", suggestedTarget: "返航" }] } } } }, context);
     const exported = await workbench.perform({ action: "export", batchId: prepared.batchId, projectId, mode: "writeback", outputPath: "outputs/ai.mqxliff" }, context);
     assert.match(await readFile(exported.path, "utf8"), /<target>使用星尘结晶。<\/target>/u);
+    const distractor = { project: projectId, target_locale: "zh-CN", batch_id: "other-batch", status: "completed",
+      initial_translation: "其他批次机器稿", final_translation: "其他批次机器稿", date_updated: "2099-01-01" };
+    await workbench.store.request("/items/learning_trajectories", { method: "POST", body: Array.from({ length: 1005 }, (_, i) =>
+      ({ ...distractor, id: "later-" + i, source: i === 0 ? "帰還します。" : "他の記録" + i })) });
     const final = xml(["使用星屑晶石。", "返回。", "保存。"]);
     await writeFile(join(cwd, "reviewed.mqxliff"), final);
     const operation = { action: "review-final", batchId: prepared.batchId, projectId, path: "reviewed.mqxliff", libraryId: master.id };
@@ -72,7 +121,7 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
     const terms = await workbench.invoke({ path: `/api/library-entries?projectId=${projectId}&kind=term` }, context);
     assert.ok(terms.items.some((item) => item.source === "星屑結晶" && item.target === "星屑晶石"));
     assert.ok(terms.items.some((item) => item.source === "帰還" && item.target === "返航"));
-    const trajectories = await workbench.store.request("/items/learning_trajectories?limit=-1");
+    const trajectories = await workbench.store.request("/items/learning_trajectories?" + new URLSearchParams({ limit: "-1", "filter[batch_id][_eq]": prepared.batchId }));
     assert.ok(trajectories.every((item) => item.human_decision.accepted === true));
     const first = trajectories.find((item) => item.source.includes("星屑結晶"));
     assert.equal(first.human_decision.machineTranslation, "使用星尘结晶。");
@@ -108,7 +157,7 @@ test("关联人工 MQXLIFF 终稿同步完整 TM、原批次学习差异及人�
     assert.equal(evidence.total, 1, "machine wording remains searchable after human edits");
     assert.equal(evidence.items[0].humanDecision.machineTranslation, "使用星尘结晶。");
     assert.equal(evidence.items[0].finalTranslation, "请使用星屑晶石。");
-    const foreignBatch = await workbench.invoke({ path: `/api/learning/evidence?${new URLSearchParams({ ...scope, batchId: "other-batch" })}` }, context);
+    const foreignBatch = await workbench.invoke({ path: `/api/learning/evidence?${new URLSearchParams({ ...scope, batchId: "other-batch", kind: "accepted" })}` }, context);
     assert.equal(foreignBatch.total, 0);
     const { skill } = await workbench.invoke({ path: "/api/learning/skills/generate", method: "POST", body: scope }, context);
     assert.equal(skill.parentId, overview.champion.id);

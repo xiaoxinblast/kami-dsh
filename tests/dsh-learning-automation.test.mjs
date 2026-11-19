@@ -23,7 +23,7 @@ test("终稿关联自动产生候选，质量回退后定向修订、独立复�
   await mkdir(cwd);
   const { fs, close } = await workspaceFs(); let proposals = 0;
   const trainingIds = new Set();
-  const wb = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (_messages, options) => {
+  const open = () => createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (_messages, options) => {
     if (options.requestLabel === "翻译技能复盘") {
       proposals += 1;
       const { trajectories, evaluationFeedback } = JSON.parse(_messages.at(-1).content);
@@ -43,6 +43,7 @@ test("终稿关联自动产生候选，质量回退后定向修订、独立复�
     const messages = JSON.stringify(_messages);
     return { content: messages.includes("保持动词简洁") ? "返回。" : messages.includes("调整语序") ? "前往陌生的城市。" : "返航。" };
   } });
+  let wb = await open();
   const context = { cwd, fs, human: true, modelRoute: { provider: "fixture", model: "fixture-model" } };
   try {
     const state = await wb.workspace({ action: "bind", name: "自动学习验收" }, context), projectId = state.project.id;
@@ -61,6 +62,8 @@ test("终稿关联自动产生候选，质量回退后定向修订、独立复�
     assert.equal(proposals, 1);
     const again = await wb.perform(operation, context);
     assert.equal(again.alreadyLinked, true);
+    await wb.close();
+    wb = await open(); // 同一个 DSH 进程重新加载插件后，继续已有候选的评测。
     await writeFile(join(cwd, "final.mqxliff"), xml(30));
     await wb.perform(operation, context);
     for (const [round, count] of [[1, 50], [2, 70]]) {

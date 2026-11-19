@@ -22,6 +22,8 @@ test("local resources use original files and agent observations without upload l
   const context = { cwd, fs: observedFs, human: true, signal: new AbortController().signal };
   try {
     await workbench.workspace({ action: "bind", name: "local files" }, context);
+    await assert.rejects(workbench.importFile({ path: "缺少的原文.mqxliff" }, context),
+      error => ["ENOENT", "FS_NOT_FOUND"].includes(error.code) && /缺少的原文\.mqxliff.*相对路径.*重试/u.test(error.message));
     const large = await open(join(cwd, "原始资料.bin"), "w");
     try { await large.truncate(33 * 1024 * 1024); } finally { await large.close(); }
     fullResourceReads = 0;
@@ -63,7 +65,8 @@ test("local resources use original files and agent observations without upload l
     await writeFile(join(cwd, "风格.pdf"), "changed original");
     const current = await workbench.importFile({ path: "source.txt", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "stale" }] }, context);
     assert.equal((await workbench.store.request(`/items/batch_runs/${current.batchId}`)).runner_options.workspaceSnapshot.guide, null);
-    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", compiledPath: "unread.json" }, context), /ENOENT|FS_NOT_FOUND/);
+    await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", compiledPath: "unread.json" }, context),
+      error => ["ENOENT", "FS_NOT_FOUND"].includes(error.code) && error.message.includes("unread.json"));
     await assert.rejects(workbench.importFile({ path: guide.path, purpose: "style-guide", resourceContext: [{ path: guide.path, hash: "a".repeat(64), text: "stale" }] }, context), /版本发生变化/);
     assert.equal(await readFile(join(cwd, "风格.pdf"), "utf8"), "changed original");
   } finally {

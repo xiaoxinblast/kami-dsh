@@ -38,6 +38,13 @@ window.__ModuleLoader__.load({
       return skill.name?.startsWith(`${skill.locale} · `) && skill.name.endsWith(projectId)
         ? `${projectName} · v${skill.version || 1}` : skill.name || `v${skill.version || 1}`;
     }
+    function excludedReviewRows(report) {
+      return (report?.rejected?.unmatched?.length || 0) + (report?.rejected?.ambiguous?.length || 0);
+    }
+    function finalReviewStatus(current) {
+      if (excludedReviewRows(current?.report)) return "部分终稿待修正";
+      return current?.complete ? "已关联人工终稿" : "待 memoQ 审校";
+    }
     function editingLocked(run) {
       return !run || ["running", "queued"].includes(run.runState) || run.workflow?.writeBusy === true || run.workflow?.qaRetryBusy === true
         || ["aiQa", "qualityReport", "termSurvey"].some((stage) => ["in_progress", "waiting"].includes(run.workflow?.[stage]?.status));
@@ -303,12 +310,17 @@ window.__ModuleLoader__.load({
         await this.loadRun(token, id);
       }
       save() { return this.perform("save", async (token) => { await this.saveDrafts(token); return "译文已保存，可导出到 memoQ 审校。"; }); }
-      retry(verb, segmentIds) {
+      retry(verb, segmentIds, failedOnly) {
         const id = this.view.selectedId;
         return this.perform(`${verb}:${id}`, async (token) => {
           if (this.dirty(id)) throw new Error("请先保存当前译文修改，再重试");
           if (editingLocked(token.view.run) || token.view.run.contextBriefPending) throw new Error("当前任务仍在执行，请结束后重试");
-          const result = await this.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", this.body(segmentIds === undefined ? {} : { segmentIds }, token), token);
+          const args = segmentIds === undefined ? {} : { segmentIds };
+          if (typeof failedOnly === "boolean") {
+            args.failedOnly = failedOnly;
+            token.view.operations[`${verb}:${id}`].failedOnly = failedOnly;
+          }
+          const result = await this.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", this.body(args, token), token);
           delete token.view.exports[id]; delete token.view.sections[`qa:${id}`];
           await this.loadRun(token, id);
           return result.message || (result.count === 0 ? "没有需要重试的句段" : "重试已提交，可在任务概览查看进度。");
@@ -322,6 +334,7 @@ window.__ModuleLoader__.load({
           token.view.sections[`final:${id}`] = result;
           delete token.view.sections[`qa:${id}`];
           await this.loadRun(token, id); await this.refresh();
+          if (excludedReviewRows(result)) return "部分终稿待修正";
           return result.alreadyLinked ? "当前终稿版本已关联" : result.failures?.length ? "终稿关联有未完成项目，请查看报告" : "已关联人工终稿，TM 与学习证据已更新";
         });
       }
@@ -364,7 +377,7 @@ window.__ModuleLoader__.load({
         }, true);
       }
     }
-    return { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, chooseBatch, batchLabel, skillLabel, skillStrategyText, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady };
+    return { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, chooseBatch, batchLabel, skillLabel, skillStrategyText, excludedReviewRows, finalReviewStatus, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady };
   }
 });
 
@@ -393,8 +406,8 @@ window.__ModuleLoader__.load({
       "文件": "File", "关闭": "Close", "将保存当前译文为人工批准的 TM，并写入学习证据。": "Save this translation as human-approved TM and learning evidence.", "处理": "Process", "总分": "Score"
     };
     const zh = Object.fromEntries(Object.keys(words).map((key) => [key, key]));
-    const { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, batchLabel, skillLabel, skillStrategyText, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady } = require("kami-dsh/client.workbench-state.js");
-    Object.assign(words, { "任务等待手动处理": "Action needed", "待处理任务": "Tasks needing action", "段待处理": "segments need attention", "重试校对": "Retry proofreading", "查看待处理任务": "Open task", "重试失败译段": "Retry failed segments" });
+    const { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, batchLabel, skillLabel, skillStrategyText, excludedReviewRows, finalReviewStatus, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady } = require("kami-dsh/client.workbench-state.js");
+    Object.assign(words, { "任务等待手动处理": "Action needed", "待处理任务": "Tasks needing action", "段待处理": "segments need attention", "项待处理": "items need attention", "重试校对": "Retry proofreading", "查看待处理任务": "Open task", "重试失败译段": "Retry failed segments", "重新运行一致性检查": "Rerun consistency review", "重新运行术语普查": "Rerun term survey" });
     Object.assign(words, {
       "设置分类": "Settings categories", "常规与备份": "General and backup", "QA 规则": "QA rules", "质量参数": "Quality parameters", "本地 QA 规则": "Local QA rules", "当前项目": "Current project", "始终启用": "Always enabled", "阻断": "Blocking", "警告": "Warning", "提示": "Info", "保存参数": "Save parameters", "保存 QA 规则": "Save QA rules", "已保存 QA 规则": "QA rules saved", "的严重度": " severity",
       "管理本地参数与当前项目的 QA 规则。": "Manage local parameters and QA rules for the current project.", "配置工作区输出目录，或备份本地数据库。": "Set the workspace output directory or back up the local database.", "保存后用于当前项目的后续 QA 检查；文件和标签结构规则始终启用。": "Saved rules apply to subsequent QA checks in this project. File and tag structure checks are always enabled.", "参数修改会一并保存；切换标签页保留未保存内容。": "Parameter edits are saved together. Switching tabs keeps unsaved changes.", "只保存当前项目的 QA 规则。": "Save QA rules for this project only.", "保存当前本地数据库的完整副本。": "Save a complete copy of the local database.",
@@ -441,6 +454,8 @@ window.__ModuleLoader__.load({
       "请先保存或放弃当前译文草稿，再关联人工终稿": "Save or discard translation drafts before linking the final.", "当前终稿版本已关联": "This final version is already linked", "终稿关联有未完成项目，请查看报告": "Some updates are incomplete. Check the report.", "已关联人工终稿，TM 与学习证据已更新": "Final linked. TM and learning evidence updated.",
       "TM 条目": "TM entries", "学习轨迹": "Learning samples", "术语更新": "Term updates", "待核对术语": "Terms to check", "对齐原批次": "Matched segments", "修改": "Changed", "条已审校轨迹": "reviewed learning samples",
       "已记录的人工终稿可在学习中心生成项目风格候选。": "Use the linked final evidence to generate project style candidates in Learning.", "未采用的终稿条目": "Excluded final entries",
+      "部分终稿待修正": "Some final entries need correction", "请核对未采用条目的原文和条目 ID，保存修正后的终稿，再点“关联人工终稿”。": "Check the source and entry IDs of the excluded entries, save the corrected file, then link it again.",
+      "每个样本 {n} 轮": "{n} rounds per sample",
       "已有译法冲突或证据不足的条目集中保留，核对后再更新术语库。": "Conflicting terms and uncertain evidence are collected here for checking before updating the term base.",
       "人工终稿使用 MQXLIFF / XLIFF": "Use MQXLIFF / XLIFF for reviewed finals", "从 memoQ 导出双语原文件建批，可用条目身份准确接回人工终稿。": "Create the batch from a bilingual memoQ export so segment identities can align the reviewed final."
     });
@@ -653,11 +668,15 @@ window.__ModuleLoader__.load({
           else if (status === "completed" && completed[index] < total) status = "partial";
         }
         const needsAttention = status === "needs_attention" || key === "proofreading" && selected.some(proofreadRetryable);
+        const followup = needsAttention && (key === "qualityReport" || key === "termSurvey");
+        const warning = followup && (key === "qualityReport" ? run.qualityReport?.warning : run.termSurvey?.warning);
+        const failures = followup && (key === "qualityReport" ? run.consistencyRetryCount : surveyFailureCount(run.termSurvey));
         return h("button", { type: "button", className: "flow-node", key, "data-status": needsAttention ? "needs_attention" : status,
           onClick: ["translation", "draftQa", "proofreading"].includes(key) ? review : () => reports(key), "aria-label": t(`查看${label}详情`), title: stage.message || t(hint) },
           h("span", { className: "flow-node-top" }, h("span", { className: "flow-number", "aria-hidden": true }, status === "completed" ? "✓" : needsAttention ? "!" : String(index + 2).padStart(2, "0")),
             h("span", { className: "flow-status" }, needsAttention ? stateText("needs_attention", t) : status === "legacy" ? t("旧版记录") : status === "partial" ? t("部分完成") : stateText(status, t))),
-          h("strong", null, t(label)), h("span", { className: "flow-hint" }, t(hint)),
+          h("strong", null, t(label)), h("span", { className: "flow-hint" }, followup ? warning || stage.message || t(hint) : t(hint)),
+          failures > 0 && h("span", { className: "flow-count" }, `${failures} ${t("项待处理")}`),
           index < 3 && h("span", { className: "flow-count" }, h("b", null, completed[index]), ` / ${total} ${t("段")}`),
           mixed && key === "draftQa" && h("span", { className: "flow-legacy" }, t("初稿 QA"), " ", draftCompleted, " · ", t("旧版校对后 QA"), " ", oldCompleted),
           index > 0 && index < 3 && legacy > 0 && h("span", { className: "flow-legacy" }, `${legacy} ${t("段旧版译文未记录此阶段")}`));
@@ -687,7 +706,7 @@ window.__ModuleLoader__.load({
       });
       return h("section", { className: "card" }, h("div", { className: "task-status" }, h("span", { className: "muted" }, t("当前任务")), h("span", { className: "badge" }, stateText(briefBusy ? "in_progress" : briefFailed ? "needs_attention" : run.workflow?.overall?.status || run.runState || "ready", t))),
         h("h2", { className: "task-title" }, run.filename || id), h("progress", { max: Math.max(1, selected.length), value: done, "aria-label": t("翻译进度") }),
-        done > 0 && ["mqxliff", "xliff"].includes(run.format) && h("p", { className: "muted" }, t(run.runnerOptions?.reviewFinal?.complete ? "已关联人工终稿" : "待 memoQ 审校")),
+        done > 0 && ["mqxliff", "xliff"].includes(run.format) && h("p", { className: "muted" }, t(finalReviewStatus(run.runnerOptions?.reviewFinal))),
         h("div", { className: "metrics" }, h("span", null, h("strong", null, `${done}/${selected.length}`), t("段")), h("span", null, h("strong", null, problems), t("问题")), failed > 0 && h("span", { className: "error" }, h("strong", null, failed), t("失败"))),
         h(WorkflowGraph, { run, t, review, reports },
           h("section", { className: "flow-group flow-context", "aria-label": t("语境分析"), "data-status": briefBusy ? "in_progress" : briefFailed ? "needs_attention" : brief?.status === "ready" ? "completed" : "not_started" },
@@ -727,6 +746,9 @@ window.__ModuleLoader__.load({
           h("ul", { className: "issues" }, ...(segment.issues || []).map((issue, issueIndex) => h("li", { key: issueIndex }, h("p", null, issue.message || issue.description || ""), issue.suggestion && h("p", null, issue.suggestion)))), review && h(Button, { small: true, onClick: () => review(segment.id) }, t("查看译段")))),
         h("ul", { className: "issues" }, ...(report.alignmentIssues || []).map((issue, index) => h("li", { key: index }, issue.message || ""))), !issues.length && h("p", { className: "muted" }, t("暂无已记录问题")));
     }
+    function surveyFailureCount(survey) {
+      return (survey?.coverage?.failedTerms || 0) + (survey?.repair?.skipped?.length || 0);
+    }
     function TaskReports({ model, run, t, initial = "aiQa", review }) {
       const [tab, setTab] = useState(initial), [offset, setOffset] = useState(0), id = run.batchId, key = `qa:${id}`;
       const load = (token) => model.invoke(model.path(`/api/qa/batch/${encodeURIComponent(id)}`, {}, token), "GET", undefined, token);
@@ -741,7 +763,7 @@ window.__ModuleLoader__.load({
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/consistency-check`, "POST", scopeArgs(model, token, { failedOnly }), token);
         await model.loadRun(token, id);
       });
-      const surveyFailures = (survey?.coverage?.failedTerms || 0) + (survey?.repair?.skipped?.length || 0);
+      const surveyFailures = surveyFailureCount(survey);
       const surveyAgain = (failedOnly = false) => model.perform(surveyKey, async (token) => {
         token.view.operations[surveyKey].failedOnly = failedOnly;
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/term-survey`, "POST", scopeArgs(model, token, { failedOnly }), token);
@@ -862,7 +884,8 @@ window.__ModuleLoader__.load({
       const report = model.view.sections[key] || current?.report, terms = (report?.termSurvey?.review?.terms || []).filter((item) => item.action === "pending_review");
       const link = () => model.linkReviewedFinal({ path: path.trim(), libraryId });
       if (!["mqxliff", "xliff"].includes(run.format)) return h(Empty, { title: "人工终稿使用 MQXLIFF / XLIFF", description: "从 memoQ 导出双语原文件建批，可用条目身份准确接回人工终稿。", t });
-      return h("div", { className: "stack final-review" }, h("details", { className: "card stack", open: !current?.complete || undefined }, h("summary", { className: "section-heading" }, t(current?.complete ? "更换或重新关联终稿" : "关联人工终稿"), h("span", { className: "badge" }, t(current?.complete ? "已关联人工终稿" : "待 memoQ 审校"))),
+      const excluded = excludedReviewRows(report);
+      return h("div", { className: "stack final-review" }, h("details", { className: "card stack", open: !current?.complete || excluded > 0 || undefined }, h("summary", { className: "section-heading" }, t(current?.complete && !excluded ? "更换或重新关联终稿" : "关联人工终稿"), h("span", { className: "badge" }, t(finalReviewStatus(current)))),
         h("p", { className: "muted" }, t("在 memoQ 完成人工审校后，关联本地双语终稿。整份终稿用于 TM，本批对应译段用于学习差异和术语更新。")),
         h("label", null, t("人工终稿相对路径"), h("input", { value: path, placeholder: "reviewed/story.mqxliff", onChange: (event) => setPath(event.target.value) })),
         h("label", null, t("终稿记忆库"), h("select", { value: libraryId, onChange: (event) => setLibraryId(event.target.value) }, ...libraries.map((library) => h("option", { key: library.id, value: library.id }, library.name)))),
@@ -875,7 +898,7 @@ window.__ModuleLoader__.load({
           h("p", { className: "muted" }, t("已记录的人工终稿可在学习中心生成项目风格候选。")),
           report.termSurvey?.warning && h("p", { className: "error", role: "alert" }, report.termSurvey.warning),
           ...(report.failures || []).map((item, index) => h("p", { className: "error", key: index, role: "alert" }, item.reason)),
-          ((report.rejected?.unmatched?.length || 0) + (report.rejected?.ambiguous?.length || 0) > 0) && h("details", null, h("summary", null, t("未采用的终稿条目")), ...(report.rejected.unmatched || []).concat(report.rejected.ambiguous || []).slice(0, 20).map((item, index) => h("p", { key: index }, item.source, " · ", item.reason))),
+          excluded > 0 && h("div", { className: "notice", role: "alert" }, h("p", null, t("请核对未采用条目的原文和条目 ID，保存修正后的终稿，再点“关联人工终稿”。")), h("details", null, h("summary", null, t("未采用的终稿条目"), " · ", excluded), ...(report.rejected.unmatched || []).concat(report.rejected.ambiguous || []).slice(0, 20).map((item, index) => h("p", { key: index }, item.source, " · ", item.reason)))),
           current?.hash && h("details", null, h("summary", null, t("文件版本")), h("p", null, h("code", null, current.path)), h("code", null, current.hash), h("p", { className: "muted" }, timeText(current.at)))),
         terms.length > 0 && h("section", { className: "card stack" }, h("h3", null, t("待核对术语")), h("p", { className: "muted" }, t("已有译法冲突或证据不足的条目集中保留，核对后再更新术语库。")), ...terms.slice(offset, offset + 20).map((item, index) => h("article", { className: "resource-row", key: index }, h("strong", null, `${item.source} → ${item.target}`), h("p", { className: "muted" }, item.reason))), h(Pager, { offset, total: terms.length, onChange: setOffset, t })), h(LearningEvidence, { model, t, batchId: id }));
     }
@@ -1065,6 +1088,7 @@ window.__ModuleLoader__.load({
       const gateKey = `learning-gate:${candidateId}`, loadGate = (token) => model.invoke(model.path("/api/quality/gate", { ...scope, ...(candidateId ? { skillId: candidateId } : {}) }, token), "GET", undefined, token);
       const gate = useSection(model, gateKey, loadGate, [candidateId]);
       const evaluation = (data.evaluations || []).find((item) => item.challengerSkillId === candidateId);
+      const benchmark = evaluation?.report?.benchmark;
       const automation = data.automation, automaticJob = (data.evaluationJobs || []).find((item) => item.jobId === automation?.jobId);
       const automationLabels = { waiting: "等待样本", proposing: "准备候选", revising: "正在修订候选", evaluating: "自动评测中", gating: "自动门禁中", blocked: "需要处理", ready: "等待确认启用" };
       const automaticStep = automation?.candidateId === candidateId ? automation.status : "";
@@ -1103,7 +1127,7 @@ window.__ModuleLoader__.load({
         ["evaluation", "gate", "activate"].includes(step) && h("div", { className: "candidate-picker" }, h("label", null, t("受测候选"), h("select", { value: candidateId, onChange: (event) => setSelected(event.target.value) }, !candidates.length && h("option", { value: "" }, t("先生成候选")), ...candidates.map((item) => h("option", { key: item.id, value: item.id }, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)))))),
         step === "evaluation" && h("section", { className: "card stack" }, h("h3", null, t("生效版本与候选评测")), h("p", { className: "muted" }, t("使用未参与候选学习的人工终稿做配对评测。")),
           h(Button, { disabled: !candidateId, busy: model.view.operations[evaluationKey]?.pending, onClick: () => operation(evaluationKey, `/api/learning/skills/${encodeURIComponent(candidateId)}/evaluate`) }, t("开始评测")), h(Feedback, { model, name: evaluationKey, t }),
-          evaluation ? h(React.Fragment, null, h("span", { className: "badge" }, t(statuses[evaluation.decision] || evaluation.decision)), h("p", null, evaluation.report?.conclusion || evaluation.result?.conclusion || ""), h("p", { className: "muted" }, `${evaluation.sampleCount || 0} ${t("个配对样本")}`),
+          evaluation ? h(React.Fragment, null, h("span", { className: "badge" }, t(statuses[evaluation.decision] || evaluation.decision)), h("p", null, evaluation.report?.conclusion || evaluation.result?.conclusion || ""), h("p", { className: "muted" }, `${benchmark?.completedPairs ?? evaluation.sampleCount ?? 0} ${t("个配对样本")}`, benchmark?.repetitions > 1 && ` · ${t("每个样本 {n} 轮").replace("{n}", benchmark.repetitions)}`),
             h("table", { className: "metric-table" }, h("thead", null, h("tr", null, h("th", null, t("指标")), h("th", null, t("生效版本")), h("th", null, t("候选")))), h("tbody", null, ...[["qaScore", "QA 分数"], ["hardErrorCount", "硬错误"], ["mandatoryTermAccuracy", "术语准确率"]].map(([key, label]) => h("tr", { key }, h("td", null, t(label)), h("td", null, Number.isFinite(evaluation.championMetrics?.[key]) ? evaluation.championMetrics[key] : "—"), h("td", null, Number.isFinite(evaluation.challengerMetrics?.[key]) ? evaluation.challengerMetrics[key] : "—")))))) : h(Empty, { title: "尚未评测", t }), h(Button, { quiet: true, onClick: () => setStep("gate") }, t("查看门禁"))),
         step === "gate" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("固定 Gold Set 与失败回归")), h("span", { className: "badge" }, t(statuses[gate?.status] || "尚未运行"))), h(Feedback, { model, name: `section:${gateKey}`, hidePending: Object.hasOwn(model.view.sections, gateKey), retry: () => model.loadSection(gateKey, loadGate), t }),
           h("div", { className: "gate-metrics" }, h("div", null, h("strong", null, gate?.assets?.goldSampleCount || 0), h("span", null, t("启用 Gold 样本"))), h("div", null, h("strong", null, gate?.assets?.regressionCaseCount || 0), h("span", null, t("启用回归案例")))),
@@ -1226,20 +1250,20 @@ window.__ModuleLoader__.load({
       const files = model.view.files.filter((file) => file.attention);
       if (!files.length) return null;
       const file = files.find((item) => item.batchId === choice) || files.find((item) => item.batchId === model.view.selectedId) || files[0];
-      const { verb, label, count, reason } = file.attention;
+      const { verb, label, count, unit, reason, failedOnly } = file.attention;
       const current = file.batchId === model.view.selectedId && model.view.run?.batchId === file.batchId;
       const operation = `${verb}:${file.batchId}`;
       const handle = async () => {
         openTasks();
         if (!current) { await model.select(file.batchId); return; }
-        await model.retry(verb);
+        await model.retry(verb, undefined, failedOnly);
         await model.refresh();
       };
       return h("section", { className: "attention-banner", "aria-label": t("任务等待手动处理") },
         h("div", { className: "attention-copy", role: "status" }, h("strong", null, t("任务等待手动处理")),
           files.length === 1 ? h("div", { className: "attention-file" }, file.filename) : h("select", { "aria-label": t("待处理任务"), value: file.batchId, onChange: (event) => setChoice(event.target.value) }, ...files.map((f) => h("option", { key: f.batchId, value: f.batchId }, f.filename))),
-          h("p", { title: reason }, count > 0 && `${count} ${t("段待处理")} · `, reason)),
-        h(Button, { primary: true, small: true, disabled: current && (editingLocked(model.view.run) || model.view.run.contextBriefPending || model.dirty()), busy: model.view.operations[operation]?.pending, onClick: handle }, t(current ? label : "查看待处理任务")),
+          h("p", { title: reason }, count > 0 && `${count} ${t(unit === "项" ? "项待处理" : "段待处理")} · `, reason)),
+        h(Button, { primary: true, small: true, disabled: current && (editingLocked(model.view.run) || model.view.run.contextBriefPending || model.dirty() || verb === "term-survey" && model.view.run.segments.some(segment => segment.accepted)), busy: model.view.operations[operation]?.pending, onClick: handle }, t(current ? label : "查看待处理任务")),
         current && model.view.operations[operation]?.error && h(Feedback, { model, name: operation, t }));
     }
     function WorkspaceBody({ model, t, scrollRef }) {

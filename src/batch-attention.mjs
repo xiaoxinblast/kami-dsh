@@ -28,10 +28,24 @@ export function batchAttention(run) {
 
 // Workers call this once per stopped attempt, after saving the terminal state.
 // Polling and reopening a workbench only read batchAttention().
-export function notifyBatchAttention(run, notify) {
-  const attention = batchAttention(run);
+export function notifyBatchAttention(run, notify, attention = batchAttention(run)) {
   if (attention && notify) {
     Promise.resolve().then(() => notify({ batchId: run.batchId, filename: run.filename, ...attention }))
       .catch((error) => console.warn(`[Kami] Windows 通知未送达：${error.message}`));
   }
+}
+
+// 文件列表只有批次摘要。按执行时间忽略上次翻译留下的提示，优先处理前置阶段。
+export function pendingFollowupAttention(run) {
+  const options = run.runnerOptions || {};
+  if (options.cancelled || !["completed", "needs_attention"].includes(run.runState)) return null;
+  for (const stage of ["qualityReport", "termSurvey"]) {
+    const entry = options.followupAttention?.[stage];
+    if (!entry || entry.taskId !== options.workflowTasks?.[stage] || entry.at < (options.translationCompletedAt || "")) continue;
+    if (stage === "termSurvey" && options.reviewFinal?.at) continue;
+    if (stage === "qualityReport" && /^\d+ 段一致性修订后的 QA 未完成，可批量重试$/u.test(entry.action.reason)
+      && options.qaCompletedAt >= entry.at && !options.batchSummary?.qaIncomplete) continue;
+    return entry.action;
+  }
+  return null;
 }

@@ -100,10 +100,15 @@ export async function workspaceRoot(context) {
 
 async function checkedTarget(root, path, context) {
   const name = relativePath(path);
-  const target = await context.fs.resolve(name, { cwd: root, signal: context.signal });
-  const actual = await realpath(context.fs.processPath(target));
-  if (!inside(root, actual)) throw new Error(`文件链接指向工作区外：${name}`);
-  return { name, target, actual };
+  try {
+    const target = await context.fs.resolve(name, { cwd: root, signal: context.signal });
+    const actual = await realpath(context.fs.processPath(target));
+    if (!inside(root, actual)) throw new Error(`文件链接指向工作区外：${name}`);
+    return { name, target, actual };
+  } catch (error) {
+    if (!["ENOENT", "FS_NOT_FOUND"].includes(error.code)) throw error;
+    throw Object.assign(new Error(`在当前工作区找不到文件“${name}”。请确认文件已保存到工作区，核对相对路径后重试。`, { cause: error }), { code: error.code });
+  }
 }
 
 export async function referenceSource(root, path, context) {
@@ -539,7 +544,9 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
     const { bytes, ...file } = source;
     const previous = run.runnerOptions?.reviewFinal;
     let report;
-    if (previous?.hash === file.hash && previous.path === file.path && previous.libraryId === library.id && previous.complete) {
+    const excluded = previous?.report?.rejected;
+    const needsEditedFile = (excluded?.unmatched?.length || excluded?.ambiguous?.length) && !previous.report.failures?.length;
+    if (previous?.hash === file.hash && previous.path === file.path && previous.libraryId === library.id && !previous.stale && (previous.complete || needsEditedFile)) {
       report = { ...previous.report, alreadyLinked: true };
     } else {
       const original = await readBatchOriginal({ dataRoot: dataDirectory, relativePath: run.runnerOptions?.originalFile });
@@ -550,7 +557,10 @@ export function createWorkspaceFiles({ dataDirectory, invoke, review }) {
       const validated = matchReviewPairsToSegments(originals, pairs);
       const validPairs = validated.matches.map((match) => pairs[match.pairIndex]);
       const completed = run.segments.filter((segment) => segment.status === "done" && segment.translation?.trim());
-      if (!matchReviewPairsToSegments(completed, validPairs).matches.length) throw new Error("人工终稿未匹配本批已完成译段，请检查原文与原批次");
+      if (!matchReviewPairsToSegments(completed, validPairs).matches.length) {
+        const first = validated.ambiguous[0] || validated.unmatched[0];
+        throw new Error("人工终稿未匹配本批已完成译段，请检查原文与原批次" + (first ? `。${first.source} · ${first.reason}` : ""));
+      }
       report = await review({ run, pairs: validPairs, memoryPairs: validPairs, projectId: state.config.projectId, filename: file.path, libraryId: library.id,
         reviewFile: { ...file, libraryId: library.id }, rejected: { unmatched: validated.unmatched, ambiguous: validated.ambiguous } }, { ...context, workspaceSnapshot: run.runnerOptions.workspaceSnapshot });
     }

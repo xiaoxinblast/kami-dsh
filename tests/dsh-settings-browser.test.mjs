@@ -157,7 +157,7 @@ test("DSH pages share responsive themes; context retries, reports and settings p
     await page.setViewportSize({ width: 960, height: 1000 });
     const blockedReason = "已自动修订 2 版，最新候选仍未通过：硬错误增加。可手动继续修订。";
     const candidate = await saveTranslationSkill({ ...learningScope, parentId: champion.id, status: "challenger", version: 4, name: "候选 v4", strategy: {} });
-    await saveSkillEvaluation({ ...learningScope, championSkillId: champion.id, challengerSkillId: candidate.id, decision: "reject", sampleCount: 120, report: { conclusion: blockedReason } });
+    await saveSkillEvaluation({ ...learningScope, championSkillId: champion.id, challengerSkillId: candidate.id, decision: "reject", sampleCount: 120, report: { conclusion: blockedReason, benchmark: { completedPairs: 60, completedDraws: 120, repetitions: 2 } } });
     await updateTranslationSkill(champion.id, { metadata: { learningAutomation: { candidateId: candidate.id, jobId: "fixture-rejected", revisionRound: 2, canContinue: true, status: "blocked", message: blockedReason } } });
     await page.clock.fastForward(5001);
     await automatic.getByText(blockedReason, { exact: true }).waitFor();
@@ -406,6 +406,7 @@ test("DSH pages share responsive themes; context retries, reports and settings p
         for (const [name, slug] of [["生效版本", "champion"], ["候选", "candidate"], ["评测", "evaluation"], ["门禁", "gate"], ["启用", "activation"]]) {
           await page.locator(".learning-steps").getByRole("button").filter({ has: page.getByText(name, { exact: true }) }).click();
           if (slug === "activation") assert.equal(await page.getByRole("button", { name: "确认启用候选", exact: true }).isDisabled(), true);
+          if (slug === "evaluation") await page.getByText("60 个配对样本 · 每个样本 2 轮", { exact: true }).waitFor();
           await capture(`learning-${slug}`, width, theme);
         }
         await page.getByText("学习轨迹与修改记录", { exact: true }).click();

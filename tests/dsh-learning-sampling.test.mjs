@@ -32,11 +32,20 @@ test("新机器稿超过一千条后仍从全部人工终稿生成策略、排�
     const human = { ...base, initial_translation: "初译", human_decision: { accepted: true, finalTranslation: "终稿" },
       qa_after: { score: 96 }, date_updated: "2025-01-01" };
     await runtimeOptions().store.request("/items/learning_trajectories", { method: "POST", body: [
-      ...Array.from({ length: 25 }, (_, n) => ({ ...human, id: "human-" + n, source: "例文" + n })),
+      ...Array.from({ length: 25 }, (_, n) => ({ ...human, id: "human-" + n, source: "例文" + n, batch_id: "original-batch",
+        asset_refs: { sourceFile: "old-reviewed.mqxliff" }, human_decision: { ...human.human_decision, machineTranslation: "旧版机器稿" } })),
       { ...human, id: "dup", source: "例文０" },
       { ...human, id: "foreign", project: "foreign", source: "其他项目" },
       ...Array.from({ length: 1020 }, (_, n) => ({ ...base, id: "machine-" + n, source: "未审" + n, date_updated: "2026-01-01" }))
     ] });
+    const evidence = query => wb.invoke({ path: "/api/learning/evidence?" + new URLSearchParams({ ...scope, batchId: "original-batch", ...query }) }, context);
+    const older = await evidence({ kind: "accepted", file: "old-reviewed.mqxliff", search: "旧版机器稿" });
+    const last = await evidence({ offset: 20 });
+    assert.deepEqual([older.total, older.items.length, older.hasMore, last.items.length, last.hasMore], [25, 20, true, 5, false]);
+    assert.equal(new Set([...older.items, ...last.items].map(row => row.id)).size, 25);
+    assert.equal(older.items[0].qaAfter.score, 96, "当前页显示完整轨迹归因证据");
+    assert.equal((await evidence({ batchId: "", search: "其他项目" })).total, 0);
+    assert.equal((await evidence({ skillId: "unknown-skill" })).total, 0);
     const post = path => wb.invoke({ path, method: "POST", body: scope }, context);
     const { skill } = await post("/api/learning/skills/generate");
     assert.equal(skill.evidenceIds.length, 10);

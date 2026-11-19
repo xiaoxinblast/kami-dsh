@@ -58,7 +58,8 @@ export function buildBatchWorkflow(run, { qualityTask = null, termTask = null, q
     const warning = task.payload?.warning || "";
     const status = task.status === "in_progress" ? task.progress?.phase === "queued" ? "waiting" : "in_progress"
       : ["failed", "needs_attention", "abandoned"].includes(task.status) || warning ? "needs_attention" : "completed";
-    return { status, message: [task.progress?.message, warning].filter(Boolean).join(" · "), percent: task.progress?.percent || 0 };
+    const message = task.progress?.message || "";
+    return { status, message: warning && !message.includes(warning) ? [message, warning].filter(Boolean).join(" · ") : message, percent: task.progress?.percent || 0 };
   };
   const followup = (task, saved, enabled, label) => {
     const latestTask = task && (task.status === "in_progress" || !changedAt || (!task.updatedAt && !task.createdAt)
@@ -94,10 +95,13 @@ export function buildBatchWorkflow(run, { qualityTask = null, termTask = null, q
     message: `${running ? "正在翻译" : paused ? "已暂停 / 中断" : ended ? "本轮翻译已结束" : "等待翻译"}：${summary.completed} / ${summary.total} 段${summary.failed ? ` · ${summary.failed} 段失败` : ""}${ended && summary.pending ? ` · ${summary.pending} 段未执行` : ""}${run.runnerOptions?.translationError ? ` · 执行异常：${run.runnerOptions.translationError}` : ""}`
   };
   const reportPending = batchQualityReportPending(run, { qualityReport });
+  const followupFailure = [qualityReport, termSurvey].find(stage => stage.status === "needs_attention");
   // 质量报告（含 AI 终审）没跑完之前，这一批不算完成：任务中心/翻译页都显示"正在生成质量报告"，导出也挡着。
   const overall = reportPending
     ? { status: "in_progress", message: `翻译已结束，正在生成质量报告：${qualityReport.message || "处理中"}` }
-    : summary.proofreadIncomplete || summary.qaIncomplete ? { status: "needs_attention", message: `${summary.proofreadIncomplete || 0} 段待校对 · ${summary.qaIncomplete || 0} 段待 QA` } : { status: translation.status, message: translation.message };
+    : summary.proofreadIncomplete || summary.qaIncomplete ? { status: "needs_attention", message: `${summary.proofreadIncomplete || 0} 段待校对 · ${summary.qaIncomplete || 0} 段待 QA` }
+    : translation.status === "completed" && followupFailure ? { status: "needs_attention", message: followupFailure.message }
+    : { status: translation.status, message: translation.message };
   return {
     batchId: run.batchId || "",
     summary,

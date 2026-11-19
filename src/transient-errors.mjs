@@ -24,7 +24,12 @@ function errorText(error) {
   return parts.filter(Boolean).join(" | ");
 }
 
+export function transportRetriesExhausted(error) {
+  return error?.transportRetriesExhausted === true || /传输失败，已自动重试 \d+ 次：/u.test(error?.message || "");
+}
+
 export function isTransientConnectionError(error) {
+  if (transportRetriesExhausted(error)) return false;
   const text = errorText(error);
   if (!text) return false;
   if (DATABASE_PATTERNS.some((pattern) => pattern.test(text))) return false;

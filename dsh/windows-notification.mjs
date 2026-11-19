@@ -22,10 +22,10 @@ $toast.Group = 'kami-batches'
 $notifier.Show($toast)
 `;
 
-export async function sendWindowsAttention({ batchId, filename, count, label }) {
+export async function sendWindowsAttention({ batchId, filename, count, unit = "段", label, reason }) {
   if (process.platform !== "win32") return;
   const tag = createHash("sha256").update(batchId).digest("hex").slice(0, 16);
-  const payload = { tag, title: "Kami 翻译任务需要处理", body: `${filename}\n${count ? `${count} 段待处理。` : ""}请回到工作台点击“${label}”。` };
+  const payload = { tag, title: "Kami 翻译任务需要处理", body: `${filename}\n${count ? `${count} ${unit}待处理。` : ""}${reason ? reason + "\n" : ""}请回到工作台点击“${label}”。` };
   await new Promise((resolve, reject) => {
     const child = spawn(join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
     let errorText = "";

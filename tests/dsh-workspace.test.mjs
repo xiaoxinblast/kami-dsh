@@ -52,7 +52,8 @@ test("workspace files are explicit, contained, snapshotted, restartable and neve
     });
     await t.test("rejects traversal and external links while resource association accepts original files", async () => {
       for (const path of ["../outside.txt", "rules/../../outside.txt", join(directory, "outside.txt")]) await assert.rejects(workbench.importFile({ path }, context), /路径|ENOENT/);
-      await assert.rejects(workbench.importFile({ path: "missing.txt" }, context), /ENOENT|FS_NOT_FOUND/);
+      await assert.rejects(workbench.importFile({ path: "missing.txt" }, context), error =>
+        ["ENOENT", "FS_NOT_FOUND"].includes(error.code) && /missing\.txt.*相对路径后重试/u.test(error.message));
       await assert.rejects(workbench.importFile({ path: "rules" }, context), /普通文件/);
       await writeFile(join(first, "invalid.exe"), "no");
       assert.equal((await workbench.importFile({ path: "invalid.exe", purpose: "style-guide", register: false }, context)).readMode, "agent");

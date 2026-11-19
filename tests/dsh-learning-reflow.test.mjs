@@ -8,11 +8,12 @@ import { runtimeOptions } from "../src/runtime-context.mjs";
 
 test("学习入口将同类换行规则冻结给两侧；人工合行可学习，历史轨迹也能读取项目排版限制", async () => {
   const root = await mkdtemp(join(tmpdir(), "kami-learning-reflow-"));
-  const calls = [], inputs = [];
+  const calls = [], inputs = [], proposals = [];
   const wb = await createWorkbench({ dataDirectory: root, modelAdapter: async (messages, { requestLabel }) => {
     calls.push(requestLabel);
     if (requestLabel === "翻译技能复盘") {
-      const items = JSON.parse(messages.at(-1).content).trajectories;
+      const { trajectories: items, evaluationFeedback } = JSON.parse(messages.at(-1).content);
+      proposals.push(evaluationFeedback);
       assert.ok(items.every(row => !row.layoutReview), "合并了普通换行的人工译文仍是有效范例");
       return { content: JSON.stringify({ name: "候选", reason: "人工终稿", strategyPatch: { prompting: { additionalRules: ["保留句末语气"] } }, evidenceIds: items.map(i => i.id) }) };
     }
@@ -55,7 +56,9 @@ test("学习入口将同类换行规则冻结给两侧；人工合行可学习�
     }
     assert.equal(calls.filter(c => c === "翻译").length, 40);
     assert.equal(calls.filter(c => c === "AIQA").length, 40);
-    assert.equal(calls.length, 81);
+    assert.equal(proposals.filter(feedback => !feedback).length, 1);
+    assert.ok(proposals.filter(Boolean).every(feedback => feedback.failedGates.some(gate => gate.id === "material_gain")));
+    assert.equal(calls.length, 80 + proposals.length, "自动复盘与句段翻译重试分开计数");
     assert.ok(inputs.every(text => text.includes("每行最多 8 字") && !text.includes("留出答案不得透传")));
     assert.ok(inputs.some(text => text.includes("已核对表格")));
     assert.ok(inputs.some(text => text.includes("行宽")));

@@ -55,6 +55,7 @@ test("翻译标记查主参考 TM、整份统一、待定及人工终稿入库�
     }
     assert.ok(calls.includes("小批改后 QA"), surveyed.termSurvey?.warning);
     assert.deepEqual(surveyed.segments.map((item) => item.translation), ["使用星晶。", "获得星晶。", "使用月钥。", "使用未知护符。", "使用双子石。"]);
+    assert.equal((await getBatchRun(batchId)).runnerOptions.termSurvey.version, 2);
     assert.deepEqual(surveyed.termSurvey.terms.map((item) => item.tm.status), ["matched", "matched", "not_found", "conflict"]);
     assert.equal(surveyed.termSurvey.terms[0].tm.evidence[0].libraryId, master.id);
     assert.equal(surveyed.termSurvey.terms[0].tm.evidence[0].sourceFile, "master.csv");

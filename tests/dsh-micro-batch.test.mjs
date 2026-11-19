@@ -8,6 +8,43 @@ import { saveBatchRun, getBatchRun } from "../src/store.mjs";
 import { saveSettings, invalidateSettingsCache } from "../src/settings-store.mjs";
 import { measureStage } from "../src/performance.mjs";
 
+test("小批传输预算耗尽就提示重试该阶段，保留校对之前的初稿", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kami-group-transport-")), calls = [];
+  let failing = "";
+  const wb = await createWorkbench({ dataDirectory: directory, modelAdapter: async (_messages, options) => {
+    calls.push(options.requestLabel);
+    if (options.requestLabel === failing) throw Error(failing + "传输失败，已自动重试 3 次：DeepSeek Messages transport failed");
+    if (options.requestLabel === "小批翻译") return { content: '{"translations":[{"id":"a","translation":"保存。"},{"id":"b","translation":"读取。"}]}' };
+    return { content: "意外的逐段重试" };
+  } });
+  const context = { human: true, modelRoute: { provider: "test", model: "offline" } };
+  try {
+    const { project } = await wb.invoke({ method: "POST", path: "/api/projects", body: { name: "传输预算" } }, context);
+    for (failing of ["小批翻译", "小批校对"]) {
+      calls.length = 0;
+      const run = await saveBatchRun({ projectId: project.id, filename: "case.txt", locale: "zh-CN", contentType: "ui", domain: "game", runState: "ready",
+        segments: [{ id: "a", source: "保存", status: "pending" }, { id: "b", source: "読込", status: "pending" }] });
+      const path = "/api/batch/run/" + run.batchId;
+      await wb.invoke({ method: "POST", path: path + "/start", body: { projectId: project.id } }, context);
+      let detail;
+      for (let i = 0; i < 250; i++) {
+        detail = await wb.invoke({ path }, context);
+        if (!detail.workflow.writeBusy) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      assert.equal(detail.runState, "needs_attention");
+      if (failing === "小批翻译") {
+        assert.deepEqual(calls, ["小批翻译"]);
+        assert.ok(detail.segments.every(s => s.status === "error" && s.error.includes("已自动重试 3 次")));
+      } else {
+        assert.deepEqual(calls, ["小批翻译", "小批校对"]);
+        assert.deepEqual(detail.segments.map(s => s.translation), ["保存。", "读取。"]);
+        assert.ok(detail.segments.every(s => s.result.stages.proofreading.error.includes("已自动重试 3 次")));
+      }
+    }
+  } finally { await wb.close(); invalidateSettingsCache(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("工作台设置决定初译和校对分组，保留对应初稿，只重试校对遗漏的一段", { timeout: 20000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "kami-group-settings-")), calls = [];
   const workbench = await createWorkbench({ dataDirectory: directory, modelAdapter: async (messages, options) => {

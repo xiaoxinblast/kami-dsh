@@ -1,7 +1,7 @@
 import { splitBatchSubBatches, splitTranslationGroups } from "./batch-document.mjs";
 import { contextBriefSlice, purposeForIndex } from "./context-brief.mjs";
 import { createCheckpointWriter } from "./checkpoint-writer.mjs";
-import { isTransientConnectionError, retryTransient } from "./transient-errors.mjs";
+import { retryTransient, transportRetriesExhausted } from "./transient-errors.mjs";
 import { buildPatternKey, PATTERN_HISTORY_LIMIT, patternClauses, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
@@ -281,6 +281,13 @@ export async function runServerBatch(batchId, {
                 if (generated[0].groupPerformance) previousPerformance = includePriorModelCalls(generated[0].groupPerformance, previousPerformance);
               }
             } catch (error) {
+              if (transportRetriesExhausted(error)) {
+                for (const item of group.slice(1)) {
+                  item.status = "error";
+                  item.error = error.message;
+                }
+                throw error;
+              }
               previousPerformance = includePriorModelCalls(error.performance, previousPerformance);
               console.warn(`[Kami] 小批翻译失败，退回逐段流程：${error.message}`);
             }

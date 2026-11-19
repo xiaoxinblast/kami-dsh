@@ -2177,8 +2177,9 @@ function summarizeBatchRun(item) {
   };
 }
 
-export async function listDirectusBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
+export async function listDirectusBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200, ids } = {}) {
   const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,run_state,task_status,runner_options,context_brief,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
+  if (ids) params.set("filter[id][_in]", ids.join(","));
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[filename][_icontains]", String(search).slice(0, 120));
@@ -2649,10 +2650,11 @@ export async function saveDirectusLearningTrajectory(input) {
   return mapLearningTrajectory(saved);
 }
 
-export async function listDirectusLearningSampleIndex(scope) {
-  const fields = "id,project,target_locale,content_type,domain,status,source,final_translation,human_decision,batch_id,date_created,date_updated";
+export async function listDirectusLearningSampleIndex(scope, { evidence = false } = {}) {
+  const fields = "id,project,target_locale,content_type,domain,status,source,final_translation,human_decision,batch_id,date_created,date_updated" + (evidence ? ",initial_translation,asset_refs" : "");
   const local = Boolean(runtimeOptions().store);
   const params = addLearningScopeFilters(new URLSearchParams({ fields, sort: "-date_updated,-date_created,id", limit: local ? "-1" : "500" }), scope);
+  if (scope.batchId) params.set("filter[batch_id][_eq]", scope.batchId);
   const rows = [];
   do {
     params.set("offset", String(rows.length));
@@ -2662,7 +2664,8 @@ export async function listDirectusLearningSampleIndex(scope) {
       id: item.id, locale: item.target_locale, project: item.project || "default",
       contentType: item.content_type || "general", domain: item.domain || "general", status: item.status || "running",
       source: item.source || "", finalTranslation: item.final_translation || "", humanDecision: directusJson(item.human_decision),
-      batchId: item.batch_id, createdAt: item.date_created, updatedAt: item.date_updated || item.date_created
+      batchId: item.batch_id, createdAt: item.date_created, updatedAt: item.date_updated || item.date_created,
+      ...(evidence ? { initialTranslation: item.initial_translation || "", assetRefs: directusJson(item.asset_refs, []) } : {})
     });
   } while (!local);
   return rows;
@@ -2781,11 +2784,12 @@ export async function countDirectusLearningTrajectoriesByFile({ locale, project 
   return [...counts.values()];
 }
 
-export async function updateDirectusLearningTrajectory(id, patch) {
+export async function updateDirectusLearningTrajectory(id, patch, reviewedProject) {
   const existing = await getDirectusLearningTrajectory(id);
   if (!existing) return null;
   assertDirectusImmutable(existing, patch, ["locale", "contentType", "domain", "project", "batchId", "segmentId", "source"]);
   const body = learningTrajectoryPatch(patch);
+  if (reviewedProject && existing.project === "default") body.project = reviewedProject;
   if (!Object.keys(body).length) return existing;
   const saved = await request(`/items/learning_trajectories/${encodeURIComponent(String(id))}`, { method: "PATCH", body });
   return mapLearningTrajectory(saved);

@@ -45,7 +45,7 @@ import { deletePreviewCache, readPreviewCandidates, readPreviewPage, writePrevie
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
-import { countMemories, deleteBatchRun, deleteStyleProfile, deleteTranslationSkill, deleteUserProfile, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
+import { countMemories, deleteBatchRun, deleteStyleProfile, deleteTranslationSkill, deleteUserProfile, learningDetailsById, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { describeReferenceWithModel } from "./src/provider.mjs";
 import { normalizeProviderProtocol } from "./src/provider-store.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
@@ -90,9 +90,10 @@ import { WorkbenchSessionMonitor, shutdownDockerDesktop } from "./src/workbench-
 import { BACKGROUND_TASK_STALE_MS, interruptedTaskPatch, selectStaleRunningTasks } from "./src/background-task-sweep.mjs";
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 import { runServerBatch, retryServerBatchQa, batchNeighborContext } from "./src/batch-runner.mjs";
+import { transportRetriesExhausted } from "./src/transient-errors.mjs";
 import { runSegmentWorkflow, proofreadingHints } from "./src/segment-workflow.mjs";
 import { batchQaRetryStage, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows } from "./public/batch-status.js";
-import { batchAttention, notifyBatchAttention } from "./src/batch-attention.mjs";
+import { batchAttention, notifyBatchAttention, pendingFollowupAttention } from "./src/batch-attention.mjs";
 import { translationRetryReason } from "./src/translation-output.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public", import.meta.url));
@@ -2261,13 +2262,20 @@ async function previewBilingualAssets(body = {}) {
   };
 }
 
-async function trajectoriesForExternalReview(locale, projectId) {
+async function trajectoriesForExternalReview(locale, projectId, candidates, batchId = "") {
   if (!projectId) return [];
-  const scoped = await listLearningTrajectories({ locale, project: projectId, limit: 1_000 });
+  const sources = new Set(candidates.filter(item => item?.source && item.target).map(item => normalizeSource(item.source)));
+  if (!sources.size) return [];
+  const matching = async (project) => {
+    const scope = { locale, project, batchId };
+    const index = await listLearningSampleIndex(scope);
+    return learningDetailsById(scope, index.filter(row => sources.has(normalizeSource(row.source))).map(row => row.id));
+  };
+  const scoped = await matching(projectId);
   if (projectId === "default") return scoped;
   // 旧版本把真实项目的轨迹错误写在 default 作用域。只在它关联的批次明确属于
   // 当前项目时兼容接回，不能仅凭相同原文把其他项目的历史轨迹捞进来。
-  const legacy = await listLearningTrajectories({ locale, project: "default", limit: 1_000 });
+  const legacy = await matching("default");
   const runs = new Map();
   await Promise.all([...new Set(legacy.map((trajectory) => trajectory.batchId).filter(Boolean))].map(async (batchId) => {
     try { runs.set(batchId, await getBatchRun(batchId)); }
@@ -2377,7 +2385,7 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
   const trajectoryMatch = projectId
     ? linkExternalReviewTrajectories(
       body.candidates.map((candidate) => candidate?.assetType === "memory" && candidate?.selected !== false ? candidate : null),
-      await trajectoriesForExternalReview("zh-CN", projectId)
+      await trajectoriesForExternalReview("zh-CN", projectId, body.candidates.filter(row => row?.assetType === "memory" && row.selected !== false))
     )
     : { links: [], unmatched: [], ambiguous: [], alreadyAccepted: [] };
   const trajectoryByCandidate = new Map(trajectoryMatch.links.map((link) => [link.candidateIndex, link]));
@@ -2501,9 +2509,9 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null, op
               sourceRow: entry.sourceRow,
               matchMethod: entry.trajectoryMethod
             });
-            await updateLearningTrajectory(entry.linkedTrajectory.id, patch);
+            await updateLearningTrajectory(entry.linkedTrajectory.id, patch, entry.linkedTrajectory.project === "default" ? projectId : undefined);
             trajectoryLinks.push({ candidateIndex: entry.candidateIndex, trajectoryId: entry.linkedTrajectory.id, source: entry.input.source, method: entry.trajectoryMethod });
-            triggerAutoProposal({ locale: entry.linkedTrajectory.locale, contentType: entry.linkedTrajectory.contentType, domain: entry.linkedTrajectory.domain, project: entry.linkedTrajectory.project });
+            triggerAutoProposal({ locale: entry.linkedTrajectory.locale, contentType: entry.linkedTrajectory.contentType, domain: entry.linkedTrajectory.domain, project: projectId });
           } catch (error) {
             trajectoryLinkFailures.push({ candidateIndex: entry.candidateIndex, trajectoryId: entry.linkedTrajectory.id, source: entry.input.source, reason: error.message });
           }
@@ -2779,7 +2787,7 @@ async function translateBatchDrafts(requests) {
   const options = { referenceSession: { toolRunner }, routePlan: prepared[0].routing };
   const collectRefs = () => refs.push(...(toolRunner?.refs?.() || []).map(item => ({ ...item, scope: "group", groupId })));
   return withRuntimeCall({ performanceTrace: performance }, async () => {
-    let drafts, reviewed;
+    let drafts, reviewed, proofreadingError;
     try {
       drafts = await measureStage("translation", () => translateMicroBatchWithModel(entries, options), { groupId });
       collectRefs();
@@ -2789,9 +2797,10 @@ async function translateBatchDrafts(requests) {
       collectRefs();
     } catch (error) {
       if (!drafts) { error.performance = performance; throw error; }
-      performance.events.push({ stage: "groupProofreadingFallback", status: "fallback", groupId, error: error.message });
+      if (transportRetriesExhausted(error)) proofreadingError = error.message;
+      performance.events.push({ stage: proofreadingError ? "proofreading" : "groupProofreadingFallback", status: proofreadingError ? "failed" : "fallback", groupId, error: error.message });
     } finally { await toolRunner?.dispose?.(); }
-    return drafts.map((draft, i) => ({ ...draft, projectId: requests[0].projectId, batchId: requests[0].batchId, initial: draft.translation, proofread: reviewed?.find(item => item.id === draft.id)?.translation, reflection: "", groupId, groupSize: entries.length, referenceUsage: { refs, events }, ...(i === 0 ? { groupPerformance: performance } : {}) }));
+    return drafts.map((draft, i) => ({ ...draft, projectId: requests[0].projectId, batchId: requests[0].batchId, initial: draft.translation, proofread: reviewed?.find(item => item.id === draft.id)?.translation, proofreadingError, reflection: "", groupId, groupSize: entries.length, referenceUsage: { refs, events }, ...(i === 0 ? { groupPerformance: performance } : {}) }));
   });
 }
 
@@ -3322,7 +3331,7 @@ async function applyBatchReview({ run, pairs, projectId, filename, libraryId = "
       sheet: pair.sheet || "", sourceRow: pair.sourceRow || null,
       previousSource: pair.previousSource || "", nextSource: pair.nextSource || ""
     })),
-    (await trajectoriesForExternalReview(run.locale, projectId)).filter((trajectory) => trajectory.batchId === run.batchId)
+    await trajectoriesForExternalReview(run.locale, projectId, applied.map(({ pair }) => pair), run.batchId)
   );
   const linkByIndex = new Map(trajectoryMatch.links.map((link) => [link.candidateIndex, link]));
   // 已采纳过的轨迹也要能定位：终稿这次若有变化，学习语料必须跟着更新，不能只更新 TM。
@@ -3365,7 +3374,7 @@ async function applyBatchReview({ run, pairs, projectId, filename, libraryId = "
         await updateLearningTrajectory(link.trajectory.id, externalReviewTrajectoryPatch({
           trajectory: link.trajectory, target: pair.target, sourceFile: filename,
           sourceRow: pair.sourceRow || null, matchMethod: link.method
-        }));
+        }), link.trajectory.project === "default" && projectId !== "default" ? projectId : undefined);
         trajectoriesLinked += 1;
       } catch (error) {
         failures.push({ source: pair.source, reason: `接回学习轨迹失败：${error.message}` });
@@ -3377,15 +3386,17 @@ async function applyBatchReview({ run, pairs, projectId, filename, libraryId = "
     // 这条终稿上一轮已经采纳过：内容一样就不动（也不重复记事件），
     // 只有真的改了才更新轨迹终稿，否则学习语料会一直停留在旧版本。
     const previousFinal = String(accepted.trajectory.finalTranslation || "").trim();
-    if (previousFinal === String(pair.target || "").trim()) {
-      acceptedUnchanged += 1;
-      continue;
-    }
     try {
+      const reviewedProject = accepted.trajectory.project === "default" && projectId !== "default" ? projectId : undefined;
+      if (previousFinal === String(pair.target || "").trim()) {
+        if (reviewedProject) await updateLearningTrajectory(accepted.trajectory.id, {}, reviewedProject);
+        acceptedUnchanged += 1;
+        continue;
+      }
       await updateLearningTrajectory(accepted.trajectory.id, externalReviewTrajectoryPatch({
         trajectory: accepted.trajectory, target: pair.target, sourceFile: filename,
         sourceRow: pair.sourceRow || null, matchMethod: accepted.method
-      }));
+      }), reviewedProject);
       trajectoriesUpdated += 1;
     } catch (error) {
       failures.push({ source: pair.source, reason: `更新已采纳学习轨迹失败：${error.message}` });
@@ -3431,8 +3442,9 @@ async function applyBatchReview({ run, pairs, projectId, filename, libraryId = "
     console.error("审校回填后处理术语普查失败", error);
     termSurvey = { error: error.message };
   }
+  const excludedCount = (rejected?.unmatched?.length || 0) + (rejected?.ambiguous?.length || 0);
   const report = {
-    batchId: run.batchId, filename, total: pairs.length,
+    batchId: run.batchId, filename, total: pairs.length + excludedCount,
     matched: matched.matches.length,
     changed: matched.matches.filter((match) => match.changed).length,
     unchanged: matched.unchanged.length,
@@ -3463,7 +3475,7 @@ async function applyBatchReview({ run, pairs, projectId, filename, libraryId = "
   if (reviewFile) {
     const latest = await getBatchRun(run.batchId) || run;
     await saveBatchRun({ ...latest, runnerOptions: { ...latest.runnerOptions, reviewFinal: { ...reviewFile, at: appliedAt,
-      version: (latest.runnerOptions?.reviewFinal?.version || 0) + 1, complete: !failures.length, report } } });
+      version: (latest.runnerOptions?.reviewFinal?.version || 0) + 1, complete: !failures.length && !excludedCount, report } } });
   }
   if (trajectoriesLinked || trajectoriesUpdated) triggerAutoProposal(regressionScope);
   return report;
@@ -4349,7 +4361,7 @@ function startConsistencyCheck(batchId, failedOnly = false) {
       locale: run.locale,
       projectId: run.projectId,
       progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length },
-      payload: { batchId }
+      payload: { batchId, failedOnly }
     });
     try {
       await attachBatchWorkflowTask(batchId, "qualityReport", task.id);
@@ -4371,12 +4383,14 @@ function startConsistencyCheck(batchId, failedOnly = false) {
         },
         payload: { batchId, findings: outcome.findings.length, repaired: repairedCount, report: outcome.report, warning: outcome.failures[0] || "" }
       });
+      await saveFollowupAttention(run, "qualityReport", task.id, outcome.failures[0]);
       return { batchId, taskId: task.id, ...outcome };
     } catch (error) {
       await updateBackgroundTaskProgress(task.id, {
         status: "failed",
         progress: { phase: "failed", message: error.message, percent: 100 }
       }).catch(() => {});
+      await saveFollowupAttention(run, "qualityReport", task.id, error.message, true);
       return { batchId, taskId: task.id, failed: error.message };
     }
   })().finally(() => consistencyCheckTasks.delete(batchId));
@@ -4599,31 +4613,34 @@ function startTermSurvey(batchId, failedOnly = false) {
       locale: run.locale,
       projectId: run.projectId,
       progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length },
-      payload: { batchId }
+      payload: { batchId, failedOnly }
     });
     try {
       await attachBatchWorkflowTask(batchId, "termSurvey", task.id);
       const evidenceCache = { batchId, guides: new Map(), snippets: new Map() };
       const outcome = await withRuntimeCall({ evidenceCache, followupOnly: true }, () => runTermSurvey(batchId, { taskId: task.id, failedOnly }));
+      const total = outcome.terms.length, checked = outcome.coverage?.checkedTerms ?? total;
       await updateBackgroundTaskProgress(task.id, {
         status: outcome.failures.length ? "needs_attention" : "completed",
         progress: {
           phase: "completed",
-          message: outcome.terms.length
-            ? `已核对标记术语 ${outcome.terms.length} 条：TM 命中 ${outcome.terms.filter((term) => term.tm?.status === "matched").length} 条，其余待人工终稿确认`
+          message: total
+            ? `标记术语已核对 ${checked} / ${total} 条，TM 命中 ${outcome.terms.filter((term) => term.tm?.status === "matched").length} 条${checked < total ? `，${total - checked} 条查询失败` : ""}`
             : "没有翻译期标记术语可供普查",
           percent: 100,
-          completed: outcome.terms.length,
-          total: outcome.terms.length
+          completed: checked,
+          total
         },
         payload: { batchId, candidateCount: outcome.terms.length, warning: outcome.failures[0] || "" }
       });
+      await saveFollowupAttention(run, "termSurvey", task.id, outcome.failures[0]);
       return { batchId, taskId: task.id, ...outcome };
     } catch (error) {
       await updateBackgroundTaskProgress(task.id, {
         status: "failed",
         progress: { phase: "failed", message: `术语普查失败：${error.message}`, percent: 100 }
       }).catch(() => {});
+      await saveFollowupAttention(run, "termSurvey", task.id, error.message, true);
       return { batchId, taskId: task.id, failed: error.message };
     }
   })().finally(() => termSurveyTasks.delete(batchId));
@@ -4640,6 +4657,24 @@ async function attachBatchWorkflowTask(batchId, stage, taskId) {
   batchWorkflowWrites.set(batchId, write);
   try { await write; }
   finally { if (batchWorkflowWrites.get(batchId) === write) batchWorkflowWrites.delete(batchId); }
+}
+
+async function saveFollowupAttention(initial, stage, taskId, reason, wholeStage = false) {
+  if (!reason && !initial.runnerOptions?.followupAttention?.[stage]) return;
+  const run = await getBatchRun(initial.batchId);
+  if (!run || run.runnerOptions?.workflowTasks?.[stage] !== taskId) return;
+  const entries = { ...run.runnerOptions.followupAttention };
+  const survey = run.runnerOptions.termSurvey;
+  const consistency = stage === "qualityReport";
+  const count = wholeStage ? 0 : consistency ? consistencyRetryWork(run).count
+    : (survey?.terms || []).filter(term => term.tm?.status === "failed").length + (survey?.repair?.skipped?.length || 0);
+  const failedOnly = count > 0 && (consistency || survey?.repair?.verifiedMemoryOnly === true);
+  const label = consistency ? (failedOnly ? "仅重试一致性失败项" : "重新运行一致性检查") : (failedOnly ? "仅重试术语失败项" : "重新运行术语普查");
+  const action = reason ? { verb: consistency ? "consistency-check" : "term-survey", label, count, unit: "项", reason: String(reason).slice(0, 220), failedOnly } : null;
+  if (action) entries[stage] = { taskId, at: new Date().toISOString(), action };
+  else delete entries[stage];
+  await saveBatchRun({ ...run, runnerOptions: { ...run.runnerOptions, followupAttention: entries } });
+  if (action) notifyBatchAttention(run, runtimeOptions().notifyAttention, action);
 }
 
 async function loadBatchWorkflow(run, knownTasks = new Map()) {
@@ -6341,24 +6376,28 @@ async function apiHandler(req, res, url) {
     const kind = String(url.searchParams.get("kind") || "");
     const file = String(url.searchParams.get("file") || "");
     const search = String(url.searchParams.get("search") || "").trim().toLowerCase();
-    const [trajectories, skill, batchRuns] = await Promise.all([
-      listLearningTrajectories({ ...queriedScope, limit: 1_000 }),
-      skillId ? getTranslationSkill(skillId) : null,
-      listBatchRuns({ projectId: requestedScope.project, limit: 500 }).catch(() => [])
+    const batchId = String(url.searchParams.get("batchId") || "");
+    const [trajectories, skill] = await Promise.all([
+      listLearningSampleIndex({ ...queriedScope, batchId }, { evidence: true }),
+      skillId ? getTranslationSkill(skillId) : null
     ]);
-    const batchFiles = Object.fromEntries(batchRuns.map((run) => [String(run.batchId), String(run.filename || "")]).filter(([, name]) => name));
-    const fileOf = (item) => String(item.assetRefs?.sourceFile || item.humanDecision?.sourceFile || batchFiles[String(item.batchId || "")] || "");
+    const batchFiles = new Map();
+    const fileOf = (item) => String(item.assetRefs?.sourceFile || item.assetRefs?.source_file || item.humanDecision?.sourceFile || batchFiles.get(item.batchId) || "");
     let rows = trajectories;
-    if (skill) {
-      const evidenceIds = new Set((skill.evidenceIds || []).map(String));
+    if (skillId) {
+      const evidenceIds = new Set(skill?.project === requestedScope.project && skill.locale === locale ? (skill.evidenceIds || []).map(String) : []);
       rows = rows.filter((item) => evidenceIds.has(String(item.id)));
     }
     if (kind === "accepted") rows = rows.filter((item) => item.humanDecision?.accepted === true);
     else if (kind === "review") rows = rows.filter((item) => item.status === "review");
     else if (kind === "completed") rows = rows.filter((item) => item.status === "completed");
+    const needFiles = file || search ? rows : rows.slice(offset, offset + limit);
+    const batchIds = [...new Set(needFiles.filter(item => item.batchId && !fileOf(item)).map(item => item.batchId))];
+    for (let i = 0; i < batchIds.length; i += 100) {
+      const batchRuns = await listBatchRuns({ projectId: requestedScope.project, ids: batchIds.slice(i, i + 100), limit: 100 });
+      for (const run of batchRuns) batchFiles.set(run.batchId, run.filename);
+    }
     if (file) rows = rows.filter((item) => fileOf(item) === file);
-    const batchId = String(url.searchParams.get("batchId") || "");
-    if (batchId) rows = rows.filter((item) => item.batchId === batchId);
     if (search) {
       rows = rows.filter((item) => String(item.source || "").toLowerCase().includes(search)
         || String(item.finalTranslation || "").toLowerCase().includes(search)
@@ -6366,7 +6405,7 @@ async function apiHandler(req, res, url) {
         || fileOf(item).toLowerCase().includes(search));
     }
     const total = rows.length;
-    const page = rows.slice(offset, offset + limit);
+    const page = await learningDetailsById(queriedScope, rows.slice(offset, offset + limit).map(row => row.id));
     return json(res, 200, {
       scope: requestedScope,
       total,
@@ -7249,7 +7288,8 @@ async function apiHandler(req, res, url) {
         locale: run.locale,
         projectId: run.projectId || "",
         runState: run.runState,
-        attention: batchWorkers.has(run.batchId) || batchQaWorkers.has(run.batchId) || contextAnalysisTasks.has(run.batchId) ? null : batchAttention(run),
+        attention: batchWorkers.has(run.batchId) || batchQaWorkers.has(run.batchId) || contextAnalysisTasks.has(run.batchId)
+          || consistencyCheckTasks.has(run.batchId) || termSurveyTasks.has(run.batchId) ? null : batchAttention(run) || pendingFollowupAttention(run),
         status: run.status,
         totalSegments: run.totalSegments,
         completedSegments: run.completedSegments,
@@ -9113,7 +9153,10 @@ async function evaluateQaBatch(batchId, projectId = "") {
           routePlan: { ...routing, route: "direct", candidateCount: 1, reflect: false },
           reflect: false, singlePass: true, toolRunner: referenceToolRunner, referenceSession
         })),
-        proofread: (translation, hints) => measureStage("proofreading", () => draft?.proofread || proofreadTranslationWithModel({ contextPack, translation, hints, referenceSession, model: routing.model, modelRole: routing.modelRole })),
+        proofread: (translation, hints) => measureStage("proofreading", () => {
+          if (draft?.proofreadingError) throw new Error(draft.proofreadingError);
+          return draft?.proofread || proofreadTranslationWithModel({ contextPack, translation, hints, referenceSession, model: routing.model, modelRole: routing.modelRole });
+        }),
         check: (translation, phase) => measureStage(phase, () => deterministicIssues(translation, phase))
       });
       if (["all", "proofreading"].includes(stage) && workflow.stages.proofreading?.status === "completed" && (lineLayout || hasSourceBreak(workflow.translation))) {
@@ -9344,12 +9387,13 @@ async function disposeEmbeddedWorkbench() {
     referenceIngestQueue, evaluationJobs.stop(), styleEvaluationJobs.stop()
   ]);
   await matcherPool.close();
+  learningAutomation = null;
 }
 
-const evaluationJobs = createEvaluationJobRunner({
+const createSkillEvaluationJobs = () => createEvaluationJobRunner({
   benchmark: benchmarkTranslationSkill,
   createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION, resolveLayouts: learningLineLayouts }),
-  jobsDirectory: join(DATA_ROOT, "learning", "jobs"),
+  jobsDirectory: join(runtimeOptions().dataDirectory || DATA_ROOT, "learning", "jobs"),
   concurrency: 5,
   automaticRetryLimit: 1,
   onCompleted: (job) => { triggerAutoProposal(job.scope); },
@@ -9367,7 +9411,6 @@ const evaluationJobs = createEvaluationJobRunner({
     buildUiReport: learningEvaluationUiReport
   }
 });
-await evaluationJobs.initialize();
 
 /** 同一项目的风格规范列表（含草稿与停用版本），供风格评测解析变体。 */
 async function styleProfilesInScope(scope) {
@@ -9390,10 +9433,10 @@ async function resolveStyleVariant(id, scope) {
 }
 
 // 风格草稿评测：唯一变量是风格规范本身，技能、留出集与检索隔离两边完全一致。
-const styleEvaluationJobs = createEvaluationJobRunner({
+const createStyleEvaluationJobs = () => createEvaluationJobRunner({
   benchmark: benchmarkStyleVariant,
   createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION, resolveLayouts: learningLineLayouts }),
-  jobsDirectory: join(DATA_ROOT, "learning", "jobs"),
+  jobsDirectory: join(runtimeOptions().dataDirectory || DATA_ROOT, "learning", "jobs"),
   concurrency: 5,
   kind: "style-evaluation",
   guardrails: STYLE_PROMOTION_GUARDRAILS,
@@ -9427,7 +9470,6 @@ const styleEvaluationJobs = createEvaluationJobRunner({
     buildUiReport: learningEvaluationUiReport
   }
 });
-await styleEvaluationJobs.initialize();
 
 /**
  * 候选被拒绝 / 删除、生效版本被换掉以后，指向它的评测任务永远续跑不了。
@@ -9474,7 +9516,7 @@ const autoProposer = createAutoProposer({
   }
 });
 
-const learningAutomation = createLearningAutomation({ deps: {
+const createProjectLearningAutomation = () => createLearningAutomation({ deps: {
   load: async (scope) => {
     const champion = await ensureChampionTranslationSkill(scope);
     const [skills, trajectories] = await Promise.all([
@@ -9515,11 +9557,26 @@ const learningAutomation = createLearningAutomation({ deps: {
   }
 } });
 
-// 所有依赖初始化完毕后才恢复后台工作；恢复使用检查点保存的模型选择。
-await evaluationJobs.recover();
-for (const skill of await listTranslationSkills({ status: "champion", limit: 500 })) {
-  if (skill.metadata?.learningAutomation?.scope) triggerAutoProposal(skill.metadata.learningAutomation.scope);
+let evaluationJobs, styleEvaluationJobs, learningAutomation;
+async function startLearningServices() {
+  if (learningAutomation) return;
+  evaluationJobs = createSkillEvaluationJobs();
+  styleEvaluationJobs = createStyleEvaluationJobs();
+  learningAutomation = createProjectLearningAutomation();
+  try {
+    await evaluationJobs.initialize();
+    await styleEvaluationJobs.initialize();
+    await evaluationJobs.recover();
+    for (const skill of await listTranslationSkills({ status: "champion", limit: 500 })) {
+      if (skill.metadata?.learningAutomation?.scope) triggerAutoProposal(skill.metadata.learningAutomation.scope);
+    }
+  } catch (error) {
+    await Promise.allSettled([learningAutomation.stop(), evaluationJobs.stop(), styleEvaluationJobs.stop()]);
+    learningAutomation = null;
+    throw error;
+  }
 }
+if (!runtimeOptions().embedded) await startLearningServices();
 
 // 规则冲突扫描：风格规则、技能附加规则与译者画像都会往同一份提示词里写文字，
 // 三者互不知情。蒸馏沉淀之后与定时各扫一遍，结论进任务中心等人工处置——
@@ -9725,6 +9782,12 @@ async function recoverInterruptedBatchWorkers() {
     interruptedBatches.add(run.batchId);
     notifyBatchAttention(run, runtimeOptions().notifyAttention);
   }
+  for (const task of tasks.filter(item => ["consistency_check", "term_survey"].includes(item.type) && item.status === "in_progress")) {
+    const consistency = task.type === "consistency_check";
+    const reason = `DSH 重启后，本轮${consistency ? "一致性检查" : "术语普查"}已中断。`;
+    await saveBackgroundTask({ ...task, status: "needs_attention", progress: { ...task.progress, phase: "interrupted", message: reason } });
+    if (task.payload?.batchId) await saveFollowupAttention({ batchId: task.payload.batchId }, consistency ? "qualityReport" : "termSurvey", task.id, reason, !task.payload.failedOnly);
+  }
 }
 
 /**
@@ -9851,4 +9914,4 @@ if (!runtimeOptions().embedded) server.listen(PORT, HOST, () => {
   }
 });
 
-export { apiHandler, disposeEmbeddedWorkbench, getBatchRun as getBatchRunForWorkspace, importBatchReview };
+export { apiHandler, disposeEmbeddedWorkbench, startLearningServices, getBatchRun as getBatchRunForWorkspace, importBatchReview };

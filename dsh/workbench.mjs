@@ -24,7 +24,10 @@ export async function createWorkbench({ dataDirectory, modelAdapter, notifyAtten
   const store = new SqliteStore(join(dataDirectory, "kami.sqlite"));
   configureRuntime({ embedded: true, dataDirectory, store, modelAdapter, notifyAttention, dispatch: (operation) => invoke(operation, { ...runtimeOptions(), human: true }) });
   let application;
-  try { application = await import("../server.mjs"); }
+  try {
+    application = await import("../server.mjs");
+    await application.startLearningServices();
+  }
   catch (error) { store.close(); throw error; }
   let closed = false;
   const files = createWorkspaceFiles({ dataDirectory, invoke, review: (args, context) => withRuntimeCall(context, () => application.importBatchReview(args)) });
