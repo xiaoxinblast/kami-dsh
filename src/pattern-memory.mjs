@@ -10,7 +10,9 @@ import { normalizeSource, similarity } from "./text.mjs";
 
 export const PATTERN_SIMILARITY_THRESHOLD = 0.86;
 export const PATTERN_MAX_REFERENCES = 3;
+export const PATTERN_HISTORY_LIMIT = 400;
 const MAX_PATTERN_LENGTH = 400;
+const words = new Intl.Segmenter("ja", { granularity: "word" });
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -63,6 +65,71 @@ export function patternSimilarity(left, right) {
   return similarity(a, b);
 }
 
+// 分词仅用于匹配。忽略编辑器的内联标记，保留模型输入中的原文和标记。
+export function patternClauses(source) {
+  const text = buildPatternKey(String(source ?? "").replace(/<[^<>]+>|\uFFFC/gu, ""));
+  return (text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー々]+/gu) || [])
+    .filter(part => part.length >= 4)
+    .map(part => Array.from(words.segment(part), item => item.segment));
+}
+
+function sharedEnding(left, right) {
+  let n = 0;
+  while (n < Math.min(left.length, right.length) && left.at(-1 - n) === right.at(-1 - n)) n++;
+  if (n < 2) return "";
+  const phrase = left.slice(-n).join("");
+  return phrase.length >= 4 && /\p{Script=Han}/u.test(phrase) && /\p{Script=Hiragana}/u.test(phrase) ? phrase : "";
+}
+
+// 两处有实词的分句末尾按同一顺序出现，才把部分重合判为句式证据。
+// earlier[j] 仅含此前左右两边都已走过的分句，同一个长片段不能重复计数。
+function sharedFixedPhrases(left, right) {
+  let earlier = Array(right.length + 1).fill("");
+  let best = [], length = 0;
+  for (const clause of left) {
+    const next = [...earlier];
+    for (let j = 0; j < right.length; j++) {
+      const phrase = sharedEnding(clause, right[j]);
+      const first = earlier[j];
+      if (phrase && first && first !== phrase && first.length + phrase.length > length) {
+        best = [first, phrase];
+        length = first.length + phrase.length;
+      }
+      if (next[j].length > next[j + 1].length) next[j + 1] = next[j];
+      if (phrase.length > next[j + 1].length) next[j + 1] = phrase;
+    }
+    earlier = next;
+  }
+  return length >= 10 ? best : [];
+}
+
+function patternMatches(source, terms, candidates, limit, threshold) {
+  const key = buildPatternKey(source, { terms });
+  if (!/[\p{L}]/u.test(key.replace(/⟦[^⟧]*⟧/gu, ""))) return [];
+  const keyed = candidates.map(item => ({ item, key: item.patternKey || buildPatternKey(item.source, { terms }) }));
+  const exact = keyed.filter(candidate => candidate.key === key);
+  if (exact.length) return exact.slice(-limit).map(({ item }) => ({ item, score: 1 }));
+  const clauses = patternClauses(source);
+  return keyed.filter(candidate => candidate.key).map(({ item, key: other }) => {
+    const score = similarity(key, other);
+    const fixedPhrases = sharedFixedPhrases(clauses, item.clauses || patternClauses(item.source));
+    return { item, score, fixedPhrases };
+  }).filter(match => match.score >= threshold || match.fixedPhrases.length)
+    .sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+// 一组译稿同时生成时没有历史译文。每条只关联一个在同一请求里的最相近条目。
+export function groupPatternLinks(entries) {
+  const previous = [], links = [];
+  const terms = entries.flatMap(({ contextPack: pack }) => [...(pack.requiredTerms || []), ...(pack.preferredTerms || []), ...(pack.workingTerms || [])]);
+  for (const { id, contextPack: { source } } of entries) {
+    const [match] = patternMatches(source, terms, previous, 1, PATTERN_SIMILARITY_THRESHOLD);
+    if (match) links.push({ ids: [match.item.id, id], fixedPhrases: match.fixedPhrases || [] });
+    previous.push({ id, source, patternKey: buildPatternKey(source, { terms }), clauses: patternClauses(source) });
+  }
+  return links;
+}
+
 /**
  * 从当前文件已翻段落里选同句式参考。
  *
@@ -70,24 +137,16 @@ export function patternSimilarity(left, right) {
  * 返回 source→target 及人工采纳状态；句式相似不代表译文已确认，变量仍需按当前原文翻译。
  */
 export function selectPatternReferences({ source, terms = [], previous = [], limit = PATTERN_MAX_REFERENCES, threshold = PATTERN_SIMILARITY_THRESHOLD } = {}) {
-  const key = buildPatternKey(source, { terms });
-  if (!key) return [];
   const candidates = (Array.isArray(previous) ? previous : [])
     .filter((item) => String(item?.target || "").trim())
-    .slice(-400);
-  const exact = candidates.filter((item) => (item.patternKey ? item.patternKey === key : buildPatternKey(item.source, { terms }) === key));
-  const selected = exact.length
-    ? exact
-    : candidates
-      .map((item) => ({ item, score: patternSimilarity(source, item.source) }))
-      .filter((entry) => entry.score >= threshold)
-      .sort((left, right) => right.score - left.score)
-      .map((entry) => entry.item);
-  return selected.slice(-Math.max(0, Number(limit) || PATTERN_MAX_REFERENCES)).map((item) => ({
+    .slice(-PATTERN_HISTORY_LIMIT);
+  if (!candidates.length || limit <= 0) return [];
+  return patternMatches(source, terms, candidates, limit, threshold).map(({ item, score, fixedPhrases }) => ({
     segmentId: String(item.segmentId || item.id || ""),
     source: String(item.source || "").trim(),
     target: String(item.target || "").trim(),
     accepted: item.accepted === true,
-    similarity: item.patternKey === key ? 1 : Number(patternSimilarity(source, item.source).toFixed(3))
+    ...(fixedPhrases?.length ? { fixedPhrases } : {}),
+    similarity: Number(score.toFixed(3))
   }));
 }

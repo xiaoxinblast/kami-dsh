@@ -8970,7 +8970,9 @@ async function evaluateQaBatch(batchId, projectId = "") {
       retrievalPurpose: projectId ? MEMORY_PURPOSES.WORKING_CONSISTENCY : undefined,
       catMinFuzzy: projectSettings?.tm?.catMinFuzzy || 60,
       llmMinRelevance: projectSettings?.tm?.llmMinRelevance || 60,
-      ...delivery
+      ...delivery,
+      // 候选已由所属库隔离。批次只传 projectId 时，同时兼容旧译例的 default 作用域。
+      project: projectId && !body.project ? [projectId, delivery.project] : delivery.project
     });
     // 透明化：这一次到底吃到了哪一档作用域（规范按链位、记忆按档位计数）。
     const scopeUsage = {

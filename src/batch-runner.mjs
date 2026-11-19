@@ -2,7 +2,7 @@ import { splitBatchSubBatches, splitTranslationGroups } from "./batch-document.m
 import { contextBriefSlice, purposeForIndex } from "./context-brief.mjs";
 import { createCheckpointWriter } from "./checkpoint-writer.mjs";
 import { isTransientConnectionError, retryTransient } from "./transient-errors.mjs";
-import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
+import { buildPatternKey, PATTERN_HISTORY_LIMIT, patternClauses, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
 import { runFollowupGroups } from "./followup-batch.mjs";
@@ -129,7 +129,8 @@ export async function runServerBatch(batchId, {
   // 续跑时把已完成的段落先放进句式历史，后面的段落仍能拿到同框架参考。
   const patternHistory = (Array.isArray(run.segments) ? run.segments : [])
     .filter((segment) => segment.status === "done" && String(segment.translation || "").trim())
-    .map((segment) => ({ segmentId: segment.id, source: segment.source, target: segment.translation, accepted: segment.accepted === true }));
+    .slice(-(PATTERN_HISTORY_LIMIT + 1))
+    .map((segment) => ({ segmentId: segment.id, source: segment.source, clauses: patternClauses(segment.source), target: segment.translation, accepted: segment.accepted === true }));
   const batchSettings = project.settings?.batch || {};
   const tmSettings = project.settings?.tm || {};
   const retryIds = segmentIds ? new Set(segmentIds.map(String)) : null;
@@ -318,7 +319,8 @@ export async function runServerBatch(batchId, {
             console.warn(`[Kami] 第 ${position + 1} 段工作术语学习失败，已跳过：${error.message}`);
           }
         }
-        patternHistory.push({ segmentId: segment.id, source: segment.source, target: segment.translation, accepted: false });
+        patternHistory.push({ segmentId: segment.id, source: segment.source, clauses: patternClauses(segment.source), target: segment.translation, accepted: false });
+        if (patternHistory.length > PATTERN_HISTORY_LIMIT + 1) patternHistory.shift();
       } catch (error) {
         segment.status = "error";
         segment.error = String(error?.message || error);

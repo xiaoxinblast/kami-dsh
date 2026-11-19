@@ -59,7 +59,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
     register: defaultRegister,
     // 文件级语境分析的切片：本段用途、所属区间、跨条目一致性与格式注意点。
     documentBrief: documentBrief || null,
-    translationReferences: Array.isArray(translationReferences) ? translationReferences.slice(0, 5).map((item) => ({
+    translationReferences: Array.isArray(translationReferences) ? translationReferences.map((item) => ({
       source: item.source,
       target: item.target,
       similarity: Number(item.similarity) || 0,
@@ -171,6 +171,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
       source: String(item?.source || ""),
       target: String(item?.target || ""),
       accepted: item?.accepted === true,
+      ...(Array.isArray(item?.fixedPhrases) ? { fixedPhrases: item.fixedPhrases.filter(s => typeof s === "string").slice(0, 2) } : {}),
       similarity: Number(item?.similarity) || 0
     })).filter((item) => item.source && item.target) : [],
     batchGroupEntries: Array.isArray(batchGroupEntries) ? batchGroupEntries.slice(0, 50).map((item) => ({

@@ -14,6 +14,7 @@ import { normalizeSource, parseModelJsonObject } from "./text.mjs";
 import { followupMessages, parseFollowupResults } from "./followup-batch.mjs";
 import { translationOutputIssue } from "./translation-output.mjs";
 import { parseMicroBatchTranslations } from "./micro-batch.mjs";
+import { groupPatternLinks } from "./pattern-memory.mjs";
 import { measureStage, tokenCounts } from "./performance.mjs";
 import { jaZhGuidance, VERIFICATION_GUIDANCE } from "./ja-zh-guidance.mjs";
 
@@ -391,14 +392,17 @@ function formatSegmentReferences(references, label) {
   ].filter(Boolean).join("\n");
 }
 
+const patternGuidance = "逐条核对共用句式。语义和用途一致时统一固定表达及分句之间的关系，人物、动机、动作和结果按各自原文翻译。";
+
 function segmentReferenceText(pack) {
   const patterns = pack.patternReferences || [], previous = pack.batchReferences || [];
   // Rank belongs to the retrieval method. Other supplied attributes can
   // distinguish speakers, locations or provenance even for identical text.
-  const identity = item => JSON.stringify(Object.entries(item).filter(([key]) => key !== "similarity").sort(([a], [b]) => a.localeCompare(b)));
+  const identity = item => JSON.stringify(Object.entries(item).filter(([key]) => key !== "similarity" && key !== "fixedPhrases").sort(([a], [b]) => a.localeCompare(b)));
   const same = (a, b) => a.segmentId && a.segmentId === b.segmentId && identity(a) === identity(b);
   const shared = patterns.filter(item => previous.some(other => same(item, other)));
   return [
+    patterns.length ? patternGuidance : "",
     formatSegmentReferences(shared, "本批前文兼同句式参考"),
     formatSegmentReferences(patterns.filter(item => !shared.includes(item)), "同句式参考"),
     formatSegmentReferences(previous.filter(item => !shared.some(other => same(item, other))), "本批参考译文")
@@ -2654,7 +2658,9 @@ async function chooseTranslationCandidate(contextPack, candidates, config, onUsa
  */
 export async function translateMicroBatchWithModel(entries, { routePlan, toolRunner = null, referenceSession = { toolRunner }, part = "translate" } = {}) {
   const proof = part === "proofread";
+  const links = groupPatternLinks(entries);
   const task = [proof ? "逐条核对初稿、原文和规则提示，修正误译、漏译、指代、用词、标记及换行。逐条检查事实确定性、情绪强度、角色口吻、日式语序、搭配和自然度，保留已自然准确的表达；韵文兼顾韵律。" : "翻译这一组连续句段，同一语境下保持人名和术语一致，逐条区分说话人与对象。",
+    ...(links.length ? [patternGuidance, `组内同句式 ${JSON.stringify(links)}`] : []),
     '逐 ID 对照当前原文。只有本句实际说出称呼才译出呼语；相邻句、称呼表、角色备注均不能给本句新增人名、称呼或主语。推测事实与评价人物性格须按本句句法和语境区分。按条目 ID 输出严格 JSON：{"translations":[{"id":"原样的条目ID","translation":"该条的完整译文"}]}。每个输入 ID 恰好出现一次。'].join("\n");
   const messages = await segmentMessages(entries[0].contextPack, referenceSession.toolRunner, part, task, entries, referenceSession);
   const config = configForRole(routePlan?.modelRole, routePlan?.model);
