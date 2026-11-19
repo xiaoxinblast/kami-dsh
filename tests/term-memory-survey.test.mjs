@@ -1,4 +1,6 @@
 import test from "node:test";
+import { indexSurveyMemories } from "../src/survey-memory-index.mjs";
+import { runFollowupGroups } from "../src/followup-batch.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
@@ -53,29 +55,23 @@ test("不完整对齐及多处冲突不能用参考库掩盖主库歧义", async
   assert.equal(result.status, "conflict");
 });
 
-test("TM 检索翻页到末尾，并遵守关联文件的库角色、启停和项目范围", async () => {
-  const source = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
-  const start = source.indexOf("async function termSurveyMemoryEntries("), end = source.indexOf("async function repairSurveyTerms(", start);
-  const offsets = [], libraries = [{ id: "m", role: "master" }, { id: "r", role: "reference" }, { id: "off", role: "reference", enabled: false }, { id: "w", role: "working" }];
-  const query = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-    textContainsTerm, taskResources: () => ({ projectId: "p", memories: [{ source: term.source, target: "主库文件译法", libraryId: "workspace:file", linkedLibraryId: "m", libraryRole: "reference" }, { source: term.source, target: "停用", linkedLibraryId: "off" }] }),
-    getMemories: async (_locale, options) => {
-      assert.equal(options.projectId, "p"); offsets.push(options.offset);
-      return options.offset === 0 ? Array.from({ length: 200 }, (_, i) => ({ id: String(i), libraryId: "w", source: term.source, target: "机器" })) : [{ id: "last", libraryId: "r", source: term.source, target: "最后一页" }];
-    }
-  });
-  const found = await query({ locale: "zh-CN", projectId: "p" }, term.source, libraries);
-  assert.deepEqual(offsets, [0, 200]);
-  assert.equal(found.length, 2);
-  assert.equal(found[1].libraryRole, "master");
-  assert.equal(found[1].libraryId, "m");
+test("TM 检索按项目载入一次，索引遵守角色、启停和归一化", async () => {
+  const code = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  const start = code.indexOf("async function termSurveyMemoryEntries("), end = code.indexOf("async function repairSurveyTerms(", start);
+  let reads = 0;
+  const libs = [{id:"m",role:"master"}, {id:"r",role:"reference"}, {id:"off",role:"reference",enabled:false}, {id:"w",role:"working"}];
+  const query = vm.runInNewContext(`(${code.slice(start,end).trim()})`, { indexSurveyMemories, taskResources: () => ({ projectId:"p", memories:[{source:"Ａ 結晶",target:"甲",linkedLibraryId:"m"},{source:"結晶",target:"停用",linkedLibraryId:"off"}] }),
+    getSurveyMemoryRows: async (_locale, project, ids) => { reads++; assert.equal(project,"p"); assert.deepEqual([...ids],["m","r"]); return [{source:"結晶",target:"水晶",libraryId:"r"}]; } });
+  const found = await query({ locale:"zh-CN", projectId:"p" }, ["a", "結晶", "缺"], libs);
+  assert.equal(reads,1); assert.equal(found.get("a")[0].libraryRole,"master");
+  assert.deepEqual([...found.get("結晶")].map(row => row.target), ["水晶","甲"]); assert.equal(found.get("缺").length,0);
 });
 
 test("统一文件译法保护人工终稿、标记和数字，失败仍保留原译文", async () => {
   const source = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
   const start = source.indexOf("async function repairSurveyTerms("), end = source.indexOf("/** 起一个术语普查后台任务", start);
   const repair = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-    textContainsTerm, normalizeSource, digitSequence, extractProtectedTokens, applyDeterministicReplacement,
+    runFollowupGroups, textContainsTerm, normalizeSource, digitSequence, extractProtectedTokens, applyDeterministicReplacement,
     surveyTermApplies, verifiedSurveyMemory,
     matchTerms: () => [], consistencySegmentIssues: () => [], syncConsistencyRepairRecords: async () => {},
     translateBatchSegment: async body => ({ translation: body.translation, aiQa: { used: true, status: "passed", score: 100, fallbackReason: "" } }),
@@ -98,7 +94,7 @@ async function surveyRepairHarness(overrides = {}) {
   const source = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
   const start = source.indexOf("async function repairSurveyTerms("), end = source.indexOf("/** 起一个术语普查后台任务", start);
   return vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-    textContainsTerm, normalizeSource, digitSequence, extractProtectedTokens, applyDeterministicReplacement,
+    runFollowupGroups, textContainsTerm, normalizeSource, digitSequence, extractProtectedTokens, applyDeterministicReplacement,
     surveyTermApplies, verifiedSurveyMemory,
     matchTerms: () => [], consistencySegmentIssues: () => [], syncConsistencyRepairRecords: async () => {},
     translateBatchSegment: async body => ({ translation: body.translation, aiQa: { used: true, status: "passed", score: 100, fallbackReason: "" } }),
@@ -107,6 +103,25 @@ async function surveyRepairHarness(overrides = {}) {
 }
 
 const verifiedTm = (source, target) => ({ status: "matched", role: "master", target, evidence: [{ source, translation: target, target, role: "master", libraryId: "master" }] });
+
+test("同段两个已核实的词合成一次修订与 QA，并分别记录结果", async () => {
+  let fixes = 0, checks = 0;
+  const repair = await surveyRepairHarness({
+    reviseSegmentForConsistency: async ({ requirements }) => {
+      fixes++;
+      assert.deepEqual(Array.from(requirements, r => r.target), ["星晶", "月钥"]);
+      return "星晶与月钥。";
+    },
+    translateBatchSegment: async body => {
+      checks++;
+      assert.equal(body.translation, "星晶与月钥。");
+      return {translation:body.translation, aiQa:{used:true,status:"passed"}};
+    }
+  });
+  const terms = [["星屑結晶","星晶"], ["月の鍵","月钥"]].map(([source,target]) => ({source,tm:verifiedTm(source,target)}));
+  const out = await repair({segments:[{id:"s1",source:"星屑結晶と月の鍵。",translation:"这两样东西。"}]}, terms, {});
+  assert.deepEqual([fixes,checks,out.repair.changed.length,out.repair.skipped.length], [1,1,2,0]);
+});
 
 test("未经 TM 核实的工作术语不能强改助词或跨语境词义", async () => {
   let calls = 0;

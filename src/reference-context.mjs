@@ -135,6 +135,26 @@ export function buildReferenceToolRunner({ index, projectId = "", settings = {},
   if (!projectId && !allowWeb) return null;
   const snapshot = taskResources(projectId), runtime = runtimeOptions();
   const styleGuides = snapshot?.styleGuideMode === "agent-native" ? snapshot.resources.filter((item) => item.purpose === "style-guide" && item.reader !== "compiled") : [];
+  if (runtime.followupOnly) {
+    if (!styleGuides.length) return null;
+    if (typeof runtime.referenceTools !== "function") throw new Error("需要在原工作区读取批次风格指南");
+    const runner = runtime.referenceTools({ workspace: snapshot.workspace, references: [], styleGuides, allowWeb: false, onActivity, evidenceCache: runtime.evidenceCache });
+    return { guideOnly: true, tools: [], dispose: runner.dispose, async prepareEvidence(pack, entries) {
+      try {
+        const ready = await runner.prepareEvidence?.(pack, entries);
+        const guides = [];
+        for (const file of styleGuides) {
+          const loaded = ready?.guides?.find(guide => guide.path === file.path);
+          if (loaded) guides.push(loaded);
+          else {
+            if (!runner.readStyleGuide) throw new Error(`无法完整读取风格指南：${file.path}`);
+            guides.push({ path: file.path, content: await runner.readStyleGuide(file.path) });
+          }
+        }
+        return { guides, allGuides: true, snippets: [] };
+      } finally { await runner.dispose?.(); }
+    } };
+  }
   const web = allowWeb && runtime.embedded && typeof runtime.referenceTools === "function" && Boolean(snapshot?.workspace || runtime.workspaceRoot);
   const native = web || styleGuides.length || snapshot?.referenceMode === "agent-native" || runtime.embedded && snapshot?.resources?.some((item) => item.purpose === "reference");
   const enabled = native ? settings.enabled !== false : budget.enabled;

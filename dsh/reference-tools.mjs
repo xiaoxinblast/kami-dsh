@@ -64,6 +64,44 @@ export function createWorkspaceReferenceTools(ctx, agent, { workspace, reference
       return dispatch(name, args);
     } });
   return {
+    async readStyleGuide(path) {
+      if (!styleGuides.some(file => file.path === path)) throw new Error("未关联的风格指南");
+      const current = await workspaceRoot({ cwd: ctx.workingDirectory.get(agent.session), fs: ctx.fs, signal });
+      if (current !== workspace) throw new Error("原文件所属工作区已切换，请回到原工作区后重试");
+      const filePath = await workspaceTarget(path);
+      const lines = [];
+      let offset = 1;
+      const image = /\.(png|jpe?g|gif|webp)$/iu.test(path);
+      while (true) {
+        signal?.throwIfAborted();
+        const name = image ? "read_image" : "read";
+        if (!names.has(name)) throw new Error(`无法读取风格指南 ${path}：当前会话缺少 ${name}`);
+        const result = await dispatch(name, { file_path: filePath, ...(image ? {} : { offset }) });
+        if (result.isError) throw new Error(`无法完整读取风格指南 ${path}：${result.error?.message || result.content?.find(b => b.type === "text")?.text || "原件读取失败"}`);
+        const value = result.value;
+        if (image) {
+          const block = result.content?.find(b => b.type === "image_url" || b.type === "image");
+          if (block?.type === "image_url") return block;
+          if (block?.attachment) {
+            const stored = await ctx.attachments.readImage(block.attachment, signal);
+            return { type: "image_url", image_url: { url: `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString("base64")}` } };
+          }
+          const mime = block?.mediaType || block?.mimeType;
+          if (mime && block?.data) return { type: "image_url", image_url: { url: `data:${mime};base64,${block.data}` } };
+        } else if (Array.isArray(value?.lines) && Number.isInteger(value.totalLines)) {
+          if (value.offset !== offset || value.lines.some((line, i) => line.number !== offset + i || /\.\.\. \(line truncated to \d+ chars\)$/u.test(line.text))) break;
+          lines.push(...value.lines.map(line => line.text));
+          offset += value.lines.length;
+          if (offset > value.totalLines) return lines.join("\n");
+          if (!value.lines.length) break;
+          continue;
+        } else if (value?.truncated !== true && result.content?.length === 1 && result.content[0].type === "text" && result.content[0].text.trim()) {
+          return result.content[0].text;
+        }
+        break;
+      }
+      throw new Error(`无法完整读取风格指南：${path}`);
+    },
     prepareEvidence: evidence && (async (pack, entries) => {
       used.length = 0;
       const ready = await evidence.prepare(pack, entries);

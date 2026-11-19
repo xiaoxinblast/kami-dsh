@@ -1,5 +1,6 @@
 import { batchAttention, notifyBatchAttention } from "../src/batch-attention.mjs";
 import test from "node:test";
+import { consistencyRetryWork, remainingConsistencySkips, retryableConsistencyRepair } from "../src/consistency-retry.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -11,6 +12,7 @@ import { surveyPairs } from "../src/term-survey.mjs";
 import { markedSurveyTerms, restoreUnverifiedSurveyRepairs } from "../src/term-memory-survey.mjs";
 import { normalizeSource } from "../src/text.mjs";
 import { settleReadSections } from "../src/read-sections.mjs";
+import { consistencyResultCache } from "../src/consistency-result-cache.mjs";
 import { runtimeOptions, withRuntimeCall } from "../src/runtime-context.mjs";
 import { measureStage } from "../src/performance.mjs";
 import { translationRetryReason } from "../src/translation-output.mjs";
@@ -58,7 +60,7 @@ test(`一致性修复后的复核结果必须传递到报告和后台任务：${
     { id: "human", source: "第四句", translation: "人工终稿", status: "done", accepted: true, result: { ...prior } }
   ] };
   const context = vm.createContext({
-    getBatchRun: async () => saved || run, saveBatchRun: async (value) => { saved = value; },
+    consistencyResultCache, getSettings: () => ({}), retryableConsistencyRepair, remainingConsistencySkips, getBatchRun: async () => saved || run, saveBatchRun: async (value) => { saved = value; },
     taskProgressReporter: () => () => {}, getProviderConfig: () => ({}), getProjectAssets: async () => ({ assets: {} }),
     mergeWorkingAssets: assets => ({ ...assets, terms: [working] }),
     buildPatternKey: (_source, { terms }) => { assert.equal(terms.some(term => term.working), false, "工作术语不能变成一致性修订的强制骨架"); return "pattern"; },
@@ -127,8 +129,8 @@ test("术语普查部分查询失败时保留标记，不计入成功覆盖", as
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = value; },
     surveyPairs, markedSurveyTerms, restoreUnverifiedSurveyRepairs, normalizeSource, runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 2,
     getResourceLibraries: async () => [], resolveTermMemoryWithModel: async () => [],
-    termSurveyMemoryEntries: async (_run, source) => { if (source === "乙") throw new Error("503"); return []; },
-    resolveTermMemory: async () => ({ status: "not_found", target: "", evidence: [] }),
+    termSurveyMemoryEntries: async () => new Map(),
+    resolveTermMemory: async ({ term }) => { if (term.source === "乙") throw new Error("503"); return { status: "not_found", target: "", evidence: [] }; },
     repairSurveyTerms: async (run) => ({ segments: run.segments, repair: { changed: [], skipped: [] } }),
     getProjectAssets: async () => ({ assets: { terms: [] } }), getProviderConfig: () => ({ model: "test" }), taskProgressReporter: () => () => {},
   });
@@ -149,7 +151,7 @@ test("批次详情不会把同原文另一句段的失败 QA 覆盖到已成功�
     getProjectAssets: async () => ({ assets: { terms: [] } }),
     getQaRuns: async () => [{ source: "same source", finalTranslation: qaTranslation, score: null, status: "review", fallbackReason: "terminated" }],
     assertActiveLocale: () => {}, json: (_res, _status, body) => { result = body; },
-    loadBatchWorkflow: async (run) => buildBatchWorkflow(run), buildTermSurveyView: () => null, CONTEXT_BRIEF_MIN_SEGMENTS: 20, contextAnalysisTasks: new Map()
+    consistencyRetryWork, loadBatchWorkflow: async (run) => buildBatchWorkflow(run), buildTermSurveyView: () => null, CONTEXT_BRIEF_MIN_SEGMENTS: 20, contextAnalysisTasks: new Map()
   });
   await handler({ method: "GET" }, {}, new URL("http://localhost/api/batch/run/batch-test?projectId=project-test"));
   assert.equal(result.segments[0].result.aiQa.fallbackReason, "");
@@ -201,7 +203,7 @@ test(`QA 重试沿用译文、合并重复请求并保留已有收尾结果${rev
   const json = (res, status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); return true; };
   const context = vm.createContext({
     batchAttention, notifyBatchAttention, translateBatchDrafts: async () => [],
-    withRuntimeCall, measureStage, translationRetryReason, contextAnalysisTasks: new Map(),
+    consistencyResultCache, withRuntimeCall, measureStage, translationRetryReason, contextAnalysisTasks: new Map(),
     batchWorkers: new Map(), batchQaWorkers: new Map(), batchQaStarts: new Map(), batchTranslationStarts: new Map(), batchWorkflowWrites: new Map(), reviewFinalLocks: new Set(), consistencyCheckTasks: new Map(), termSurveyTasks: new Map(),
     getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = structuredClone(value); run.runnerOptions.batchSummary = summarizeBatchSegments(run.segments); },
     getBackgroundTask: async (id) => tasks.get(id),

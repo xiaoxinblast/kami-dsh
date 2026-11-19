@@ -13,6 +13,12 @@ test("翻译标记查主参考 TM、整份统一、待定及人工终稿入库�
   const { fs, close } = await workspaceFs(), calls = [];
   const wb = await createWorkbench({ dataDirectory: join(directory, "data"), modelAdapter: async (messages, options) => {
     calls.push(options.requestLabel);
+    if (options.requestLabel === "小批改后 QA") {
+      assert.equal(options.tools?.length || 0, 0);
+      const text = messages.at(-1).content;
+      const items = JSON.parse(text.slice(text.lastIndexOf("\n[{") + 1));
+      return { content: JSON.stringify({ results: items.map(item => ({ id: item.id, issues: [] })) }) };
+    }
     if (options.requestLabel === "术语 TM 对齐") return { content: JSON.stringify({ matches: JSON.parse(messages.at(-1).content).map((item) => ({ id: item.id, target: "星晶", confidence: 0.99 })) }) };
     if (options.requestLabel === "术语对齐") return { content: '{"matches":[{"source":"星屑結晶","found":true,"target":"星光晶","confidence":0.99}]}' };
     if (options.requestLabel === "AIQA") return { content: '{"score":100,"issues":[],"termDecisions":[]}' };
@@ -38,7 +44,7 @@ test("翻译标记查主参考 TM、整份统一、待定及人工终稿入库�
     assert.equal(run.runnerOptions.workspaceSnapshot.memories.length, 2);
     const translations = ["使用星尘结晶。", "获得星尘结晶。", "使用月之钥匙。", "使用未知护符。", "使用双子石。"];
     const marks = [["星屑結晶", "星尘结晶"], ["月の鍵", "月之钥匙"], ["未知護符", "未知护符"], ["双子石", "双子石"]].map(([source, target], i) => ({ id: `mark-${i}`, source, target, status: "active", confidence: 0.9 }));
-    await saveBatchRun({ ...run, runState: "completed", segments: run.segments.map((segment, i) => ({ ...segment, status: "done", translation: translations[i] })), runnerOptions: { ...run.runnerOptions, workingGlossary: { revision: 1, terms: marks, conflicts: [] } } });
+    await saveBatchRun({ ...run, contentType: "ui", runState: "completed", segments: run.segments.map((segment, i) => ({ ...segment, status: "done", translation: translations[i] })), runnerOptions: { ...run.runnerOptions, workingGlossary: { revision: 1, terms: marks, conflicts: [] } } });
     const invokeSurvey = () => wb.invoke({ path: `/api/batch/run/${batchId}/term-survey?projectId=${projectId}`, method: "POST", body: { projectId } }, context);
     await invokeSurvey();
     let surveyed;
@@ -47,13 +53,15 @@ test("翻译标记查主参考 TM、整份统一、待定及人工终稿入库�
       if (surveyed.termSurvey?.generatedAt && !surveyed.workflow.writeBusy) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+    assert.ok(calls.includes("小批改后 QA"), surveyed.termSurvey?.warning);
     assert.deepEqual(surveyed.segments.map((item) => item.translation), ["使用星晶。", "获得星晶。", "使用月钥。", "使用未知护符。", "使用双子石。"]);
     assert.deepEqual(surveyed.termSurvey.terms.map((item) => item.tm.status), ["matched", "matched", "not_found", "conflict"]);
     assert.equal(surveyed.termSurvey.terms[0].tm.evidence[0].libraryId, master.id);
     assert.equal(surveyed.termSurvey.terms[0].tm.evidence[0].sourceFile, "master.csv");
     assert.equal(surveyed.termSurvey.terms[0].initialTarget, "星尘结晶");
     assert.ok(!calls.includes("术语普查"), "不再独立重新猜词");
-    assert.equal(calls.filter(label => label === "AIQA").length, 3, "三处有 TM 证据的修订各自通过模型 QA");
+    assert.equal(calls.filter(label => label === "小批改后 QA").length, 1, "一次请求检查三处术语修订");
+    assert.equal(calls.filter(label => label === "AIQA").length, 0, "成功行不再单独提交");
     const libraryTerms = () => wb.invoke({ path: `/api/library-entries?projectId=${projectId}&kind=term` }, context);
     assert.equal((await libraryTerms()).total, 0, "TM 命中不直接写正式术语库");
     const final = ["使用星光晶。", "获得星光晶。", "使用月钥。", "使用未知护符。", "使用双子石。"];

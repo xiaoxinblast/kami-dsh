@@ -20,9 +20,10 @@ test("核对阶段先查证据：风格指南 + 术语库 + 主参考工作 TM",
   assert.match(server, /function tmEvidenceRank\(entry = \{\}\)/u);
   assert.match(server, /"主 TM 人工条", "参考 TM 人工条", "人工译例", "主 TM 机器条", "工作 TM 机器条", "TM 机器条"/u);
   assert.match(server, /evidence: consistencyChunkEvidence\(\{ style, termEvidence, tmEvidence, pairs: chunkPairs \}\)/u);
-  assert.match(server, /toolRunner: buildReferenceToolRunner\(\{ projectId: run\.projectId \}\)/u, "核对阶段可查参考资料");
+  assert.match(server, /chunkResults, followupOnly: true/u, "一致性检查仅使用已有证据与风格指南");
   assert.match(provider, /evidence = null, toolRunner = null/u);
-  assert.match(provider, /toolRunner\?\.tools\?\.length[\s\S]{0,200}chatWithTools\(messages, configForRole\("main"\)/u);
+  const checker = provider.slice(provider.indexOf("export async function checkBatchConsistencyWithModel"), provider.indexOf("export async function adjudicateConsistencyFindingsWithModel"));
+  assert.doesNotMatch(checker, /chatWithTools\(/u);
   assert.match(consistencyCheck, /export const CONSISTENCY_EVIDENCE_LIMITS/u);
   assert.match(consistencyCheck, /登记术语（项目术语库里命中本片原文的条目，术语写法以它为准）/u);
   assert.match(consistencyCheck, /证据不足时不要自己发明统一译法/u);
@@ -39,11 +40,11 @@ test("自动统一按证据定案：术语库 > 主 TM > 参考 TM > 文件内�
 });
 
 test("修复后同步工作 TM 与学习轨迹，不改人工条", () => {
-  assert.match(server, /async function syncConsistencyRepairRecords\(\{ run, changes, segments \}\)/u);
+  assert.match(server, /async function syncConsistencyRepairRecords\(\{ run, changes, segments, existingOnly = false \}\)/u);
   assert.match(server, /String\(row\.qualityStatus \|\| ""\) !== "human_approved"/u, "只清机器条，不碰人工条");
   assert.match(server, /provenance: "consistency-repair",/u);
   assert.match(server, /type: "consistency_repaired",/u);
-  assert.match(server, /const repaired = await applyConsistencyRepairs\(\{ run, segments, findings: merged, assets, taskId \}\)/u);
+  assert.match(server, /const repaired = await applyConsistencyRepairs\(\{ run, segments, findings: work, assets, taskId, allowed \}\)/u);
 });
 
 test("报告带回每条的处理结果：已统一 / 部分 / 只报告", () => {

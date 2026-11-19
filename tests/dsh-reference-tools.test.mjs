@@ -435,7 +435,7 @@ test("listing a guide or loading its tools cannot stand in for reading it", asyn
   });
 }));
 
-for (const mode of ["translation", "qa", "consistency"]) {
+for (const mode of ["translation", "qa"]) {
 test(`premature ${mode} answers must read the guide before they can complete`, async () => fixture(async ({ cwd, ctx, agent, calls }) => {
   await writeFile(join(cwd, "guide.custom"), "必须使用保存设置；保留句末标点。");
   const toolRunner = createWorkspaceReferenceTools(ctx, agent, { workspace: cwd, styleGuides: [{ path: "guide.custom" }], maxRounds: 3 });
@@ -449,16 +449,54 @@ test(`premature ${mode} answers must read the guide before they can complete`, a
       return { toolCalls: [{ id: "read-guide", function: { name: "read", arguments: '{"file_path":"guide.custom"}' } }] };
     }
     assert.match(JSON.stringify(messages), /必须使用保存设置/);
-    return { content: mode === "translation" ? "保存设置。" : mode === "qa" ? '{"issues":[]}' : '{"findings":[]}' };
+    return { content: mode === "translation" ? "保存设置。" : '{"issues":[]}' };
   } }, async () => {
     if (mode === "translation") assert.equal((await translateWithReflection({ source: "設定を保存します。" }, { reflect: false, toolRunner })).translation, "保存设置。");
-    else if (mode === "qa") assert.deepEqual(await evaluateAutoQaWithModel({ source: "設定を保存します。", translation: "保存设置。", locale: "zh-CN", toolRunner }), []);
-    else assert.deepEqual(await checkBatchConsistencyWithModel({ pairs: [{ id: "s1", source: "設定を保存します。", translation: "保存设置。" }], toolRunner }), { findings: [], dropped: [] });
+    else assert.deepEqual(await evaluateAutoQaWithModel({ source: "設定を保存します。", translation: "保存设置。", locale: "zh-CN", toolRunner }), []);
   });
   assert.equal(attempts, 3); assert.equal(calls.length, 1);
   assert.doesNotThrow(() => toolRunner.assertReady());
 }));
 }
+
+test("consistency reads only the linked guide before one tool-free model request", async () => fixture(async ({ cwd, ctx, agent, calls }) => {
+  await writeFile(join(cwd, "guide.custom"), "保留句末标点。");
+  const resources = [{path:"guide.custom",purpose:"style-guide"}, {path:"supplement.txt",purpose:"reference"}];
+  await withRuntimeCall({ followupOnly: true, workspaceSnapshot: { projectId:"p",workspace:cwd,styleGuideMode:"agent-native",resources },
+    referenceTools: options => createWorkspaceReferenceTools(ctx, agent, options), modelAdapter: async (messages, options) => {
+      assert.equal(options.tools?.length || 0, 0);
+      assert.match(JSON.stringify(messages), /保留句末标点/);
+      return {content:'{"findings":[]}'};
+    } }, async () => {
+    const toolRunner = buildReferenceToolRunner({projectId:"p",allowWeb:true});
+    const out = await checkBatchConsistencyWithModel({pairs:[{id:"1",source:"保存",translation:"保存"}],toolRunner});
+    assert.deepEqual(out, { findings:[], dropped:[] });
+  });
+  assert.deepEqual(calls.map(c => c.name), ["read"]);
+  assert.equal(calls[0].arguments.file_path, join(cwd, "guide.custom"));
+}));
+
+test("native guide fallback checks complete lines, rejects a truncated line and can admit a stored image", async () => fixture(async ({ cwd, ctx, agent }) => {
+  await writeFile(join(cwd, "guide.txt"), "第一页\n第二页");
+  await writeFile(join(cwd, "guide.png"), "image fixture");
+  ctx.tools.schemas = () => ["read","read_image"].map(name => ({name,parameters:{}}));
+  let truncated = false;
+  ctx.tools.execute = async ({name, arguments: args}) => {
+    if (name === "read_image") return {content:[{type:"image",attachment:{id:"test"}}]};
+    const number = args.offset, text = truncated ? "... (line truncated to 2000 chars)" : ["第一页","第二页"][number-1];
+    return {value:{offset:number,totalLines:2,lines:[{number,text}]}};
+  };
+  ctx.attachments = {readImage: async ref => {
+    assert.equal(ref.id,"test");
+    return {ref:{mediaType:"image/png"}, data:Buffer.from("sample")};
+  }};
+  const runner = createWorkspaceReferenceTools(ctx,agent,{workspace:cwd,styleGuides:[{path:"guide.txt"},{path:"guide.png"}]});
+  assert.equal(await runner.readStyleGuide("guide.txt"), "第一页\n第二页");
+  truncated = true;
+  await assert.rejects(runner.readStyleGuide("guide.txt"), /无法完整读取/);
+  await assert.rejects(runner.readStyleGuide("supplement.txt"), /未关联/);
+  assert.equal((await runner.readStyleGuide("guide.png")).image_url.url,"data:image/png;base64,c2FtcGxl");
+}));
 
 test("guide correction stays within the configured round budget and cannot bypass a failed read", async () => fixture(async ({ cwd, ctx, agent, deny, calls }) => {
   deny();

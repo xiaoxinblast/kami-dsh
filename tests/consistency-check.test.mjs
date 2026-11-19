@@ -36,6 +36,7 @@ test("解析一致性发现：引用不存在的条目 id 整条丢弃", () => {
   assert.equal(findings[1].type, "term_drift", "未知类型按最保守的术语漂移处理");
   assert.equal(dropped.length, 1);
   assert.throws(() => parseConsistencyFindings("不是 JSON", { validIds: [] }), /未返回 JSON/u);
+  assert.throws(() => parseConsistencyFindings('{"issues":[]}' ), /缺少 findings 数组/u);
 });
 
 test("合并发现时按类型与说明去重", () => {

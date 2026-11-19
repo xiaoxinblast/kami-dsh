@@ -29,7 +29,7 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     await import('/client.js');
     const require=name=>name==='react'?React:modules.has(name)?modules.get(name):(modules.set(name,factories.get(name)(require)),modules.get(name));
     let Component, props;
-    const remote={$mount:async()=>()=>{},kamiUi:{invoke:async(_session,operation)=>(await fetch('/invoke',{method:'POST',body:JSON.stringify(operation)})).json()},session:{prompt:async()=>({ok:true,value:{}})}};
+    const remote={$mount:async()=>()=>{},kamiUi:{invoke:async(_session,operation)=>(await fetch('/invoke',{method:'POST',body:JSON.stringify(operation)})).json()},session:{prompt:async(payload)=>{window.testPrompt=payload;return {ok:true,value:{}}}}};
     const ctx={remote,effect:callback=>callback(),locale:{register(){}},sidebarRightTabs:{register:()=>()=>{}},inject(_keys,callback){return callback(this)},slots:{inject:(_name,callback)=>callback(),register:(options,component)=>{if(options.name==='sidebar.right.pane.tab'){Component=component;props=options.inject();}}}};
     await require('kami-dsh').apply(ctx);
     ReactDOM.createRoot(document.querySelector('#root')).render(React.createElement(Component,{...props,sessionId:'fixture',useSessions:select=>select({byId:{fixture:{projectionValues:{agentPreset:'kami-translator'}}}}),useTabInfo:()=>({tab:{visible:true}}),t:key=>key}));
@@ -45,7 +45,8 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
       const operation = JSON.parse(Buffer.concat(chunks).toString());
       let value = {};
-      if (operation.action === "workspace") value = { workspace: "D:/retry", config: { projectId: "p" }, project: { id: "p", name: "重试验收" } };
+      if (operation.action === "export") throw new Error("client api: kamiUi/invoke failed: Failed to fetch");
+      if (operation.action === "workspace") value = { isKamiSession: true, workspace: "D:/retry", config: { projectId: "p" }, project: { id: "p", name: "重试验收" } };
       else if (operation.path === "/api/projects") value = { projects: [{ id: "p", name: "重试验收" }] };
       else if (operation.path?.startsWith("/api/batch/files")) value = { files: [{ ...run, attention: batchAttention(run) }] };
       else if (operation.path?.startsWith("/api/tasks")) value = [];
@@ -54,7 +55,8 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
         if (held) await new Promise((resolve) => { release = resolve; });
         if (fail) throw new Error("模拟重试提交失败");
         value = { count: operation.body.segmentIds?.length || 1 };
-      } else if (operation.path?.startsWith("/api/batch/run/")) value = run;
+      } else if (operation.method === "POST" && /\/(?:consistency-check|term-survey|context-brief)$/.test(operation.path)) { operations.push(operation); value = { pending: true }; }
+      else if (operation.path?.startsWith("/api/batch/run/")) value = run;
       res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, value }));
     } catch (error) { res.end(JSON.stringify({ ok: false, error: { message: error.message } })); }
   });
@@ -170,6 +172,54 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
       await page.setViewportSize({ width, height: 1050 });
       if (process.env.KAMI_UI_SCREENSHOTS) await page.locator(".flow-group").filter({ has: completed }).screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, 'completed-mixed-' + width + '.png') });
     }
+    run.exportIssues = [{ segmentId: segments[6].id, index: 1, unitId: "540", reason: "内联标签数量错误（原文 1 个，译文 3 个）" }];
+    run.qualityReport = { report: { generatedAt: "2026-11-19T08:20:00Z", coverage: { modelQa: 2, qaIncomplete: 0 }, facts: { issueCount: 0 }, humanReview: { suggested: 0 } }, findings: [], warning: "1 个一致性分片超时" };
+    run.workflow.qualityReport = { status: "needs_attention", message: "一致性初查完成 2 / 3 片" };
+    run.workflow.termSurvey = { status: "needs_attention", message: "术语查库完成 2 / 3 条" };
+    run.consistencyRetryCount = 1;
+    run.termSurvey = { generatedAt: new Date().toISOString(), terms: [{ source: "敵", suggestedTarget: "敌人", initialTarget: "敌方", tm: { status: "matched", role: "master", reason: "主 TM 已确认译法" } }, { source: "町", suggestedTarget: "小镇" }, { source: "民", suggestedTarget: "百姓", initialTarget: "市民", tm: { status: "failed", reason: "对齐超时" } }], warning: "1 条查询超时，1 处修订未完成", coverage: { failedTerms: 1, checkedTerms: 2, markedTerms: 3 }, repair: { verifiedMemoryOnly: true, skipped: [{ source: "敵", reason: "模型 QA 超时", segmentId: segments[6].id }] } };
+    await page.reload();
+    const panel = name => page.locator('[aria-label="当前任务分区"]').getByRole("button", { name, exact: true });
+    await panel("工作区导出").click();
+    const exportPanel = page.locator(".export-panel");
+    assert.equal(await exportPanel.getByRole("button", { name: "导出文件" }).isDisabled(), true);
+    await exportPanel.getByRole("button", { name: "让 Agent 修复" }).click();
+    await page.waitForFunction(() => window.testPrompt?.content?.length);
+    assert.match(await page.evaluate(() => window.testPrompt.content[0].text), /retry-batch\/export-repair/);
+    async function preview(region, name) {
+      for (const width of [960, 330]) {
+        await page.setViewportSize({ width, height: 1050 });
+        assert.equal(await page.locator(".kami").evaluate(element => element.scrollWidth > element.clientWidth), false);
+        if (process.env.KAMI_UI_SCREENSHOTS) await region.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, name + "-" + width + ".png") });
+      }
+    }
+    await preview(exportPanel, "export-repair");
+    await exportPanel.getByRole("button", { name: "查看译段" }).click();
+    await page.locator(".segment-editor").getByRole("textbox", { name: "译文 1" }).waitFor();
+    await panel("质量与复查").click();
+    for (const [tab, label, count, endpoint] of [["一致性复查", "仅重试一致性失败项", 1, "consistency-check"], ["术语普查", "仅重试术语失败项", 2, "term-survey"]]) {
+      await page.locator('[aria-label="报告类型"]').getByRole("button", { name: tab, exact: true }).click();
+      const retry = page.getByRole("button", { name: label + " (" + count + ")", exact: true });
+      await preview(page.locator("section.card").filter({ has: retry }), endpoint);
+      await Promise.all([page.waitForResponse(res => res.url().endsWith("/invoke") && res.request().postData()?.includes(endpoint)), retry.click()]);
+      assert.equal(operations.at(-1).body.failedOnly, true);
+      assert.equal(operations.at(-1).body.projectId, "p");
+    }
+    run.exportIssues = [];
+    await page.reload();
+    await panel("工作区导出").click();
+    await exportPanel.getByRole("button", { name: "导出文件" }).click();
+    await exportPanel.getByRole("alert").filter({ hasText: "Failed to fetch" }).waitFor();
+    await exportPanel.getByRole("button", { name: "让 Agent 排查导出错误" }).click();
+    await page.waitForFunction(() => window.testPrompt?.content[0]?.text.includes("Failed to fetch"));
+    await preview(exportPanel, "export-error");
+    run.contextBrief = { status: "failed", warning: "1 片分析超时", coverage: { covered: 1, total: 2 }, retryParts: { failed: [1] } };
+    await page.reload();
+    const brief = page.getByRole("region", { name: "语境分析", exact: true });
+    const retryPart = brief.getByRole("button", { name: "仅重试失败分片 (1)", exact: true });
+    await preview(brief, "context-retry");
+    await Promise.all([page.waitForResponse(res => res.url().endsWith("/invoke") && res.request().postData()?.includes("context-brief")), retryPart.click()]);
+    assert.equal(operations.at(-1).body.failedOnly, true);
     assert.deepEqual(errors, []);
   } finally { release?.(); await browser.close(); await new Promise((resolve) => server.close(resolve)); }
 });

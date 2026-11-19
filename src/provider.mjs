@@ -8,6 +8,7 @@ import { parseTermAlign, parseTermSurvey, termAlignMessages, termSurveyMessages 
 import { parseTermMemoryAlignment, termMemoryMessages } from "./term-memory-survey.mjs";
 import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
 import { normalizeSource, parseModelJsonObject } from "./text.mjs";
+import { followupMessages, parseFollowupResults } from "./followup-batch.mjs";
 import { translationOutputIssue } from "./translation-output.mjs";
 import { parseMicroBatchTranslations } from "./micro-batch.mjs";
 import { measureStage, tokenCounts } from "./performance.mjs";
@@ -1022,7 +1023,35 @@ async function segmentMessages(pack, runner, part, task, entries, session) {
 
 /** 同段保留有实际内容的查阅证据及成对的工具消息。 */
 async function chatWithQaReferences(messages, options, session, config = runtimeConfig) {
+  const batch = runtimeOptions().followupBatch;
+  if (batch?.label === options.requestLabel && !session?.messages?.length) {
+    const single = () => sendQaRequest(messages, options, session, config);
+    return batch.submit({ messages, options, session, config }, single, async rows => {
+      const first = rows[0], qa = options.requestLabel === "AIQA";
+      if (rows.some(row => row.messages.length !== 2 || row.messages[0].content !== first.messages[0].content || row.config !== first.config)) return new Map();
+      const grouped = followupMessages(rows, qa);
+      const runner = first.session?.toolRunner;
+      const entries = rows.map(row => ({ id: row.item.segment.id, contextPack: row.session?.contextPack || { source: row.item.segment.source } }));
+      if (runner?.prepareEvidence) {
+        const prepared = await runner.prepareEvidence(entries[0].contextPack, entries);
+        if (prepared?.requiresOriginal) { await runner.dispose?.(); return new Map(); }
+        const guide = originalGuideBlocks(prepared?.guides);
+        if (guide.length) grouped.splice(1, 0, { role: "user", content: guide });
+        if (prepared?.snippets?.length) grouped.splice(-1, 0, { role: "user", content: prepared.snippets.join("\n") });
+      }
+      const response = await sendQaRequest(grouped, { ...first.options, maxTokens: qa ? 1800 * rows.length : 2400, responseFormat: { type: "json_object" }, requestLabel: qa ? "小批改后 QA" : "小批定向修订" }, { toolRunner: runner?.guideOnly ? null : runner }, first.config);
+      return parseFollowupResults(response, rows, qa);
+    });
+  }
+  return sendQaRequest(messages, options, session, config);
+}
+
+async function sendQaRequest(messages, options, session, config) {
   const runner = session?.toolRunner;
+  if (runner?.guideOnly) {
+    const guides = await prepareQaGuides(runner, session.contextPack);
+    return chat([...messages.slice(0, -1), { role: "user", content: guides }, messages.at(-1)], config, options);
+  }
   if (!runner?.tools?.length) return chat(messages, config, options);
   if (session.contextPack && runner.prepareEvidence && !session.guideBlocks) {
     session.guideBlocks = await prepareQaGuides(runner, session.contextPack);
@@ -2252,31 +2281,41 @@ export async function analyzeDocumentContextWithModel({ filename = "", format = 
 
 /**
  * 交付前一致性核对：只报跨条目的漂移，不重复逐条 QA。
- * evidence 是风格指南 / 术语库命中 / 主参考 TM 译例；toolRunner 给模型按需查参考资料的机会。
+ * evidence 包含当前片的术语、TM 与风格。原件指南在发给模型之前载入。
  */
-export async function checkBatchConsistencyWithModel({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, evidence = null, toolRunner = null, onUsage = null } = {}) {
+export async function checkBatchConsistencyWithModel({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, cacheSlot = "", evidence = null, toolRunner = null, onUsage = null } = {}) {
   const messages = consistencyMessages({ filename, locale, purpose, pairs, part, evidence });
   const guides = await prepareQaGuides(toolRunner, { targetLocale: locale, contentType: purpose, neighborContext: { document: filename } });
   if (guides.length) messages.splice(1, 0, { role: "user", content: guides });
   const requestOptions = {
     temperature: 0.1, timeoutMs: 120_000, maxTokens: 2_000, requestLabel: "一致性检查", responseFormat: { type: "json_object" }, onUsage
   };
-  // 参考资料按需查询：与翻译阶段共用同一套工具与预算，查不到就按已有证据判断。
-  const content = toolRunner?.tools?.length
-    ? (await chatWithTools(messages, configForRole("main"), {
-      ...requestOptions,
-      tools: toolRunner.tools,
-      maxRounds: toolRunner.maxRounds ?? 2,
-      executeTool: toolRunner.execute,
-      assertReady: toolRunner.assertReady,
-      disposeTools: toolRunner.dispose,
-      onActivity: toolRunner.onActivity
-    })).content
-    : await chat(messages, configForRole("main"), requestOptions);
+  const runtime = runtimeOptions(), cache = cacheSlot && runtime.chunkResults;
+  let key = null;
+  if (cache && !toolRunner?.tools?.length) {
+    try {
+      const route = runtime.embedded ? await cache.model(runtime.modelRoute, () => runtime.modelAdapter.describe(runtime.modelRoute, runtime.signal)) : getProviderConfig();
+      toolRunner?.assertReady?.();
+      key = cache.key(cacheSlot, pairs, [messages, evidence, pairs, route, runtime.modelRoute, toolRunner?.tools]);
+    } catch { /* 路由无法确认时仍执行本次检查。 */ }
+    if (key && cache.records[cacheSlot]?.key === key && Array.isArray(cache.records[cacheSlot].result?.findings)) {
+      await toolRunner?.dispose?.();
+      return cache.records[cacheSlot].result;
+    }
+  }
+  if (cache) delete cache.records[cacheSlot];
+  // 收尾只根据本片已有证据判断；即使上层传入了其他工具，也不向模型提供。
   toolRunner?.assertReady?.();
+  await toolRunner?.dispose?.();
+  const content = await chat(messages, configForRole("main"), requestOptions);
   const validIds = pairs.map((pair) => String(pair.id));
+  const validated = reply => {
+    const result = parseConsistencyFindings(reply, { validIds });
+    if (key && !result.dropped.length) cache.records[cacheSlot] = { key, result };
+    return result;
+  };
   try {
-    return parseConsistencyFindings(content, { validIds });
+    return validated(content);
   } catch (error) {
     const retry = await chat([
       ...messages,
@@ -2286,7 +2325,7 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
       temperature: 0, timeoutMs: requestOptions.timeoutMs, maxTokens: 2_000, requestLabel: "一致性检查格式重试", responseFormat: { type: "json_object" }, onUsage
     });
     try {
-      return parseConsistencyFindings(retry, { validIds });
+      return validated(retry);
     } catch {
       throw new Error(`一致性检查模型返回格式无效：${error.message}`);
     }

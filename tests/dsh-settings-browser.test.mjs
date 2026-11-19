@@ -91,7 +91,7 @@ test("DSH pages share responsive themes; context retries, reports and settings p
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     const contextPanel = page.getByRole("region", { name: "语境分析", exact: true });
-    await contextPanel.getByRole("button", { name: "重试语境分析", exact: true }).waitFor();
+    await contextPanel.getByRole("button", { name: "重新分析全部语境", exact: true }).waitFor();
     assert.equal(await page.getByRole("region", { name: "翻译流程", exact: true }).getByRole("region", { name: "语境分析", exact: true }).count(), 1);
     assert.equal(await contextPanel.getAttribute("data-status"), "needs_attention");
     assert.equal(await page.getByRole("button", { name: "查看本地 QA详情", exact: true }).getAttribute("data-status"), "legacy", "old QA records must not imply completion of a new per-segment phase");
@@ -100,7 +100,7 @@ test("DSH pages share responsive themes; context retries, reports and settings p
       assert.equal(await page.locator(".kami").evaluate((element) => element.scrollWidth > element.clientWidth), false);
       if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, `context-retry-${width}.png`) });
     }
-    await contextPanel.getByRole("button", { name: "重试语境分析", exact: true }).click();
+    await contextPanel.getByRole("button", { name: "重新分析全部语境", exact: true }).click();
     await contextPanel.getByRole("alert").filter({ hasText: "模拟语境重试提交失败" }).waitFor();
     failContextSubmit = false; holdContext = true;
     await contextPanel.getByRole("alert").filter({ hasText: "模拟语境重试提交失败" }).getByRole("button", { name: "重试", exact: true }).click();

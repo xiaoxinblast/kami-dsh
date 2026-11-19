@@ -277,6 +277,23 @@ function markerIds(value) {
   return ids;
 }
 
+export function xliffTagProblem(source, translation) {
+  const expected = [...String(source || "").matchAll(MARKER_RE)].map(match => match[0]);
+  const actual = [...String(translation || "").matchAll(MARKER_RE)].map(match => match[0]);
+  if (expected.length === actual.length && expected.every((tag, i) => tag === actual[i])) return "";
+  return expected.length !== actual.length
+    ? `内联标签数量不符：原文 ${expected.length} 个，译文 ${actual.length} 个`
+    : "内联标签的标识、属性或顺序与原文不符";
+}
+
+export function xliffExportIssues(segments) {
+  return segments.flatMap((segment, index) => {
+    if (segment.selected === false || !segment.translation) return [];
+    const reason = xliffTagProblem(segment.source, segment.translation);
+    return reason ? [{ segmentId: segment.id, index: index + 1, unitId: segment.locator?.unitId || "", reason, accepted: segment.accepted === true }] : [];
+  });
+}
+
 function restoreMixedText(value, tagMap, expectedIds) {
   const expected = expectedIds || [];
   const actual = markerIds(value);
@@ -469,6 +486,8 @@ export function exportXliffDocument({ filename, base64, segments = [] } = {}) {
     if (!unit || unit.id !== String(segment?.locator?.unitId || "")) fail("XLIFF 翻译单元与原始文件不匹配，请重新载入该文件");
     if (unit.locked || unit.targetText.trim()) fail(`XLIFF 单元 ${unit.id} 不允许覆盖`);
     const translation = String(segment?.translation || "").trim() || String(segment?.source || "");
+    const problem = xliffTagProblem(unit.sourceText, translation);
+    if (problem) fail(`XLIFF 单元 ${unit.id}：${problem}；请恢复原有标签后再导出`);
     const content = restoreMixedText(translation, unit.sourceTagMap, unit.sourceTagIds);
     replacements.push(renderTarget(parsed.xml, unit, content));
     if (extension === "mqxliff") replacements.push({

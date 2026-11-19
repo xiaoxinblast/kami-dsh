@@ -392,6 +392,19 @@ function mapDirectusMemory(item, { contentType = "general", domain = "general", 
   };
 }
 
+export async function listSurveyMemoryRows(locale, projectId, libraryIds) {
+  const params = new URLSearchParams({ limit: "500", sort: "-date_created,id", fields: "id,source,target,source_file,library_id", "filter[library_id][_in]": libraryIds.join(",") });
+  if (projectId) params.set("filter[project_id][_eq]", projectId);
+  else params.set("filter[project_id][_empty]", "true");
+  const rows = [];
+  while (true) {
+    params.set("offset", String(rows.length));
+    const page = await request(`/items/${memoryCollectionFor(locale)}?${params}`, { timeoutMs: 120_000 });
+    if (!page.length) return rows;
+    rows.push(...page.map(row => ({ id: row.id, source: row.source, target: row.target, sourceFile: row.source_file, libraryId: row.library_id })));
+  }
+}
+
 export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, offset = 0, search = "", exactContentType = false, scopeFallback = false, projectId = "" } = {}) {
   const collection = memoryCollectionFor(locale);
   const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(1000, limit));

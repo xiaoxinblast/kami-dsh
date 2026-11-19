@@ -1,3 +1,4 @@
+import { xliffTagProblem } from "./xliff-document.mjs";
 import { textContainsTerm } from "./asset-governance.mjs";
 import { digitSequence, digitsRecoverable, extractProtectedTokens, normalizeSource, withoutProtectedTokens } from "./text.mjs";
 import { checkOrthography } from "./orthography.mjs";
@@ -25,6 +26,10 @@ export function checkExactMasterTm({ translation = "", translationReferences = [
 export function runQa({ source, translation, matches = [], translationReferences = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null, draftCheck = false }) {
   const issues = [];
   const chinese = chineseQaLocale(locale);
+  if (String(source).includes("<tag ") || String(translation).includes("<tag ")) {
+    const problem = xliffTagProblem(source, translation);
+    if (problem) issues.push({ severity: "error", type: "inline_tag_sequence", message: problem });
+  }
   for (const token of extractProtectedTokens(source, { numericUnits: !chinese })) {
     if (!String(translation).includes(token)) {
       issues.push({ severity: "error", type: "protected_token", token, message: `受保护内容缺失：${token}` });

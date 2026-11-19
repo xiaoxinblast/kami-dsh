@@ -12,7 +12,8 @@ export function taskResources(projectId = "") {
 
 export function workspaceStyleGuide(projectId = "") {
   const snapshot = taskResources(projectId);
-  if (snapshot?.styleGuideMode !== "agent-native") return snapshot?.guide;
+  // 收尾请求会直接附上原件内容，无需再向模型发出查阅工具的指令。
+  if (runtimeOptions().followupOnly || snapshot?.styleGuideMode !== "agent-native") return snapshot?.guide;
   const files = snapshot.resources.filter((item) => item.purpose === "style-guide" && item.reader !== "compiled");
   if (!files.length) return null;
   const workspace = snapshot.workspace;

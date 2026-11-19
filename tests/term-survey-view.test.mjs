@@ -107,7 +107,7 @@ test("术语普查接线：手动端点、逐条回填结果落库、界面按�
   ]);
   // 手动重跑普查 + 批次读取时算好界面数据。
   assert.match(server, /\/\^\\\/api\\\/batch\\\/run\\\/\[\^\/\]\+\\\/term-survey\$\//u);
-  assert.match(server, /startTermSurvey\(batchId\)\.catch\(\(error\) => console\.error\("\[Kami\] 术语普查任务异常"/u);
+  assert.match(server, /startTermSurvey\(batchId, body\.failedOnly === true\)\.catch\(\(error\) => console\.error\("\[Kami\] 术语普查任务异常"/u);
   assert.match(server, /termSurvey: buildTermSurveyView\(\{/u);
   // 回填时把逐条结果写回批次记录，否则界面只能看到汇总数字。
   assert.match(server, /runnerOptions: \{ \.\.\.\(latest\.runnerOptions \|\| \{\}\), termSurvey: \{ \.\.\.survey, terms: surveyed, review \} \}/u);

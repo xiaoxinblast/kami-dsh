@@ -421,6 +421,7 @@ window.__ModuleLoader__.load({
       "有未保存的译文草稿": "Unsaved translation drafts", "切换批次前，保存或放弃当前草稿。": "Save or discard your drafts before switching batches.", "保存并切换": "Save and switch", "放弃并切换": "Discard and switch", "取消切换": "Cancel", "草稿保存在当前会话中，退出应用前请保存。": "Drafts stay in this session. Save before exiting the app.",
       "译文已保存，可导出到 memoQ 审校。": "Translation saved. Export it for review in memoQ.",
       "检查本批次": "Check this batch", "查看上次报告": "View saved report", "上次保存的质量报告": "Last saved QA report", "当前任务快照": "Current task snapshot", "当前工作区最新资源": "Latest workspace resources", "报告没有评分": "No score available", "重试": "Retry",
+      "只补失败分片时会保留其他分片的分析结果。": "Retrying failed chunks keeps the other analysis results.", "让 Agent 排查导出错误": "Ask Agent to diagnose export", "旧报告未记录失败位置，无法单独重试。": "This older report has no locations for an isolated retry.", "旧报告未记录可安全重试的术语修订。": "This older report lacks the details needed to retry term repairs.", "导出前需修复": "Repair before export", "让 Agent 修复": "Ask Agent to repair", "重新核对": "Check again", "仅重试失败分片": "Retry failed chunks only", "重新分析全部语境": "Reanalyze all context", "仅重试一致性失败项": "Retry failed consistency items only", "重新检查全部一致性": "Recheck all consistency", "仅重试术语失败项": "Retry failed survey items only", "重新普查全部术语": "Rerun full term survey",
       "工作区导出": "Export to workspace", "导出路径": "Output path", "留空使用工作区默认输出目录；同名文件会报错。": "Leave blank for the workspace output directory. Existing files are never overwritten.", "导出成功": "Exported", "任务记录": "Task history", "后台任务": "Background task", "独立审校": "Standalone QA", "翻译批次": "Translation batch", "打开批次": "Open batch", "关联批次": "Related batch", "任务 ID": "Task ID", "暂无任务记录": "No task history",
       "下次任务使用的资源": "Resources for the next task", "这些路径引用工作区原件；新建批次时读取最新版。": "These paths reference workspace originals. New batches read the latest content.", "工作区相对路径": "Workspace-relative path", "预览最新版": "Preview latest file", "关联到下次任务": "Use for the next task", "解除关联": "Unlink", "已关联": "Linked", "尚未关联文件": "No files linked", "工作区最新版预览": "Latest workspace preview", "关闭预览": "Close preview", "预览条数": "Preview items", "总条数": "Total items", "字符": "characters", "文件大小": "File size", "用途": "Purpose",
       "项目旧指南与参考资料": "Legacy project guides and references", "查看旧版资源": "View legacy resources", "旧版项目指南": "Legacy project guide", "正式资产库": "Canonical assets", "工作区文件资源请在“资源”中关联，不会自动写入正式库。": "Link workspace files in Resources. They are not automatically imported into the canonical library.",
@@ -678,8 +679,9 @@ window.__ModuleLoader__.load({
       const retryFailed = selected.filter((segment) => segment.retryTranslationReason && !segment.accepted).length;
       const brief = run.contextBrief, briefBusy = run.contextBriefPending || model.view.operations[`context-brief:${id}`]?.pending;
       const briefFailed = brief?.status === "failed" || Boolean(brief?.warning) || (brief?.coverage && brief.coverage.covered < brief.coverage.total);
-      const command = (verb) => model.perform(`${verb}:${id}`, async (token) => {
-        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", scopeArgs(model, token), token);
+      const command = (verb, failedOnly = false) => model.perform(`${verb}:${id}`, async (token) => {
+        token.view.operations[`${verb}:${id}`].failedOnly = failedOnly;
+        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/${verb}`, "POST", scopeArgs(model, token, failedOnly ? { failedOnly } : {}), token);
         await model.loadRun(token, id);
       });
       return h("section", { className: "card" }, h("div", { className: "task-status" }, h("span", { className: "muted" }, t("当前任务")), h("span", { className: "badge" }, stateText(briefBusy ? "in_progress" : briefFailed ? "needs_attention" : run.workflow?.overall?.status || run.runState || "ready", t))),
@@ -693,10 +695,12 @@ window.__ModuleLoader__.load({
               h("span", { className: "status-pill" }, t(briefBusy ? "分析中" : briefFailed ? "分析未完成" : brief?.status === "ready" ? "已完成" : run.requiresBrief ? "尚未开始" : "可选"))),
             h("div", { className: "context-details" }, h("div", null,
               brief?.coverage && h("p", { className: "context-coverage" }, `${t("已覆盖")} ${brief.coverage.covered} / ${brief.coverage.total} ${t("段")}`),
-              h("p", { className: "muted" }, t(!run.requiresBrief && !brief ? "短文件可按需分析，帮助理解全文。" : "重新分析全文，保留现有译文。修改模型设置后可在这里重试。"))),
-              h(Button, { onClick: () => command("context-brief"), busy: briefBusy, disabled: locked || pending || briefBusy, small: true }, t(briefBusy ? "语境分析中" : briefFailed ? "重试语境分析" : brief?.status === "ready" ? "重新分析语境" : "开始语境分析"))),
+              h("p", { className: "muted" }, t(!run.requiresBrief && !brief ? "短文件可按需分析，帮助理解全文。" : brief?.retryParts?.failed?.length ? "只补失败分片时会保留其他分片的分析结果。" : "重新分析全文，保留现有译文。修改模型设置后可在这里重试。"))),
+              brief?.retryParts?.failed?.length > 0 && !brief.editedAt && h(Button, { primary: true, small: true, disabled: locked || pending || briefBusy, onClick: () => command("context-brief", true) }, `${t("仅重试失败分片")} (${brief.retryParts.failed.length})`),
+              h(Button, { onClick: () => command("context-brief"), busy: briefBusy, disabled: locked || pending || briefBusy, small: true }, t(briefBusy ? "语境分析中" : briefFailed ? "重新分析全部语境" : brief?.status === "ready" ? "重新分析语境" : "开始语境分析"))),
             brief?.warning && h("p", { className: "feedback error", role: "alert" }, brief.warning),
-            h(Feedback, { model, name: `context-brief:${id}`, retry: () => command("context-brief"), t }))),
+            briefFailed && !brief?.retryParts && !brief?.editedAt && !brief.warning?.includes("原文或分片已变化") && h("p", { className: "muted" }, t("旧报告未记录失败位置，无法单独重试。")),
+            h(Feedback, { model, name: `context-brief:${id}`, retry: !locked && !pending ? () => command("context-brief", model.view.operations[`context-brief:${id}`]?.failedOnly === true) : undefined, t }))),
         h("div", { className: "button-row" }, ["running", "queued"].includes(run.runState)
           ? h(Button, { onClick: () => command("pause"), busy: model.view.operations[`pause:${id}`]?.pending }, t("暂停"))
           : done === selected.length && selected.length && !locked ? h(Button, { primary: true, disabled: pending || model.view.operations[`qa:${id}`]?.pending, busy: model.view.operations[`retry-qa:${id}`]?.pending, onClick: qaFailed ? () => command("retry-qa") : review }, t(qaFailed ? "重试未完成 QA" : "检查译文"))
@@ -731,25 +735,30 @@ window.__ModuleLoader__.load({
       const qualityWarning = !run.workflow?.qualityReport?.qaResolved && quality?.warning;
       const surveyKey = `term-survey:${id}`;
       const consistencyKey = `consistency-check:${id}`;
-      const consistencyAgain = () => model.perform(consistencyKey, async (token) => {
-        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/consistency-check`, "POST", scopeArgs(model, token), token);
+      const consistencyAgain = (failedOnly = false) => model.perform(consistencyKey, async (token) => {
+        token.view.operations[consistencyKey].failedOnly = failedOnly;
+        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/consistency-check`, "POST", scopeArgs(model, token, { failedOnly }), token);
         await model.loadRun(token, id);
       });
-      const surveyAgain = () => model.perform(surveyKey, async (token) => {
-        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/term-survey`, "POST", scopeArgs(model, token), token);
+      const surveyFailures = (survey?.coverage?.failedTerms || 0) + (survey?.repair?.skipped?.length || 0);
+      const surveyAgain = (failedOnly = false) => model.perform(surveyKey, async (token) => {
+        token.view.operations[surveyKey].failedOnly = failedOnly;
+        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/term-survey`, "POST", scopeArgs(model, token, { failedOnly }), token);
         await model.loadRun(token, id);
       });
       return h("section", { className: "stack", "aria-label": t("质量与复查详情") }, h(SectionTabs, { label: "报告类型", value: tab, onChange: (value) => { setTab(value); setOffset(0); }, t, items: [["aiQa", "质量报告", "check"], ["qualityReport", "一致性复查", "search"], ["termSurvey", "术语普查", "terms"]] }),
         tab === "aiQa" && h(React.Fragment, null, h(Feedback, { model, name: `section:${key}`, retry: () => model.loadSection(key, load), t }), qa && h(QaReport, { report: qa, t, review })),
         tab === "qualityReport" && h("section", { className: "card stack" }, h("h3", null, t("一致性复查")), h("p", { className: "muted" }, run.workflow?.qualityReport?.message || t("尚未开始")), qualityWarning && h("p", { className: "error", role: "alert" }, qualityWarning),
-          h("div", null, h(Button, { onClick: consistencyAgain, busy: model.view.operations[consistencyKey]?.pending, disabled: editingLocked(run) || model.dirty() }, t(qualityWarning ? "重试一致性检查" : report ? "重新检查一致性" : "开始一致性检查"))), h(Feedback, { model, name: consistencyKey, retry: consistencyAgain, t }),
+          h("div", { className: "button-row" }, run.consistencyRetryCount > 0 && h(Button, { primary: true, onClick: () => consistencyAgain(true), busy: model.view.operations[consistencyKey]?.pending, disabled: editingLocked(run) || model.dirty() }, `${t("仅重试一致性失败项")} (${run.consistencyRetryCount})`), h(Button, { onClick: () => consistencyAgain(), busy: model.view.operations[consistencyKey]?.pending, disabled: editingLocked(run) || model.dirty() }, t(report || qualityWarning ? "重新检查全部一致性" : "开始一致性检查"))), h(Feedback, { model, name: consistencyKey, retry: !editingLocked(run) && !model.dirty() ? () => consistencyAgain(model.view.operations[consistencyKey]?.failedOnly === true) : undefined, t }),
+          qualityWarning && !run.consistencyRetryCount && !quality?.repair?.failedChunks && h("p", { className: "muted" }, t("旧报告未记录失败位置，无法单独重试。")),
           report ? h(React.Fragment, null, h("p", { className: "muted" }, timeText(report.generatedAt)), h("div", { className: "metrics" }, ...[["模型 QA", report.coverage?.modelQa], ["QA 未完成", report.coverage?.qaIncomplete], ["事实问题", report.facts?.issueCount], ["建议人工复查", report.humanReview?.suggested]].map(([label, value]) => h("span", { key: label }, h("strong", null, value ?? "—"), t(label)))),
             h("p", null, `${t("保护标记")} ${report.protectedTokens?.preserved ?? 0} / ${report.protectedTokens?.total ?? 0} · ${t("精确术语采用")} ${report.terms?.applied ?? 0} / ${report.terms?.expectedUses ?? 0}`),
             ...(report.humanReview?.reasons || []).map((item) => h("p", { key: item.reason }, `${item.reason} · ${item.count}`)),
             ...findings.slice(offset, offset + 20).map((finding, index) => h("article", { className: "resource-row", key: index }, h("strong", null, finding.detail), h("p", null, finding.suggestion), ...(finding.evidence || []).map((item, i) => h("p", { className: "muted", key: i }, item.ref, item.note ? ` · ${item.note}` : "")), ...(finding.ids || []).map((segmentId) => h(Button, { small: true, key: segmentId, onClick: () => review(segmentId) }, `${t("查看译段")} #${run.segments.findIndex((item) => String(item.id) === String(segmentId)) + 1}`)))),
             !findings.length && h("p", { className: "muted" }, t("暂无已记录的一致性问题")), h(Pager, { offset, total: findings.length, onChange: setOffset, t })) : h(Empty, { title: "尚无一致性报告", description: "批次检查完成后可在这里查看结果。", t })),
         tab === "termSurvey" && h("section", { className: "card stack" }, h("h3", null, t("术语普查")), h("p", { className: "muted" }, run.workflow?.termSurvey?.message || t("尚未开始")), survey?.warning && h("p", { className: "error", role: "alert" }, survey.warning),
-          h("div", { className: "button-row" }, h(Button, { onClick: surveyAgain, busy: model.view.operations[surveyKey]?.pending, disabled: editingLocked(run) || model.dirty() || run.segments.some((segment) => segment.accepted === true) }, survey?.generatedAt ? "重新查 TM 并统一译法" : "查 TM 并统一译法")), h(Feedback, { model, name: surveyKey, retry: surveyAgain, t }),
+          h("div", { className: "button-row" }, surveyFailures > 0 && survey?.repair?.verifiedMemoryOnly && h(Button, { primary: true, onClick: () => surveyAgain(true), busy: model.view.operations[surveyKey]?.pending, disabled: editingLocked(run) || model.dirty() || run.segments.some(segment => segment.accepted) }, `${t("仅重试术语失败项")} (${surveyFailures})`), h(Button, { onClick: () => surveyAgain(), busy: model.view.operations[surveyKey]?.pending, disabled: editingLocked(run) || model.dirty() || run.segments.some((segment) => segment.accepted === true) }, t(survey?.generatedAt ? "重新普查全部术语" : "查 TM 并统一译法"))), h(Feedback, { model, name: surveyKey, retry: !editingLocked(run) && !model.dirty() && !run.segments.some(segment => segment.accepted) ? () => surveyAgain(model.view.operations[surveyKey]?.failedOnly === true) : undefined, t }),
+          surveyFailures > 0 && !survey?.repair?.verifiedMemoryOnly && h("p", { className: "muted" }, t("旧报告未记录可安全重试的术语修订。")),
           survey?.coverage?.markedTerms != null && h("p", { className: "muted" }, `标记 ${survey.coverage.markedTerms} 条 · 已核对 ${survey.coverage.checkedTerms} 条 · 译文统一 ${survey.repair?.changed?.length || 0} 处`),
           ...(survey?.repair?.skipped || []).map((item, index) => h("p", { className: "error", key: index }, `${item.source} · ${item.reason}`, h(Button, { small: true, onClick: () => review(item.segmentId) }, t("查看译段")))),
           ...terms.slice(offset, offset + 20).map((item) => h("article", { className: "resource-row stack term-survey-row", key: item.source }, h("strong", null, `${item.source} → ${item.suggestedTarget}`), h("p", { className: "muted" }, item.reason), h("p", null, `${t("术语库登记")} · ${item.library?.found ? item.library.target : t("尚未入库")}`),
@@ -821,8 +830,13 @@ window.__ModuleLoader__.load({
               qaRetryable(segment) && h(Button, { small: true, onClick: () => retry("retry-qa", [segment.id]), disabled: locked || model.dirty() }, t(qaRetryStage(segment) === "modelQa" ? "重试此句模型 QA" : segment.result?.stages?.localQa?.status === "optional" ? "手动检查此句 QA" : "仅重试此句 QA"))), h(Feedback, { model, name: "save", t }))),
         !page.total && h(Empty, { title: "此筛选下没有译段", t }));
     }
-    function ExportPanel({ model, run, t, onFinal }) {
+    function ExportPanel({ model, run, t, onFinal, review }) {
       const [path, setPath] = useState(""), id = run.batchId, key = `export:${id}`, receipt = model.view.exports[id];
+      const issues = run.exportIssues || [], repairKey = `export-repair:${id}`;
+      const busy = editingLocked(run) || model.dirty() || run.contextBriefPending;
+      const canExport = !issues.length && !busy && !model.view.operations[`qa:${id}`]?.pending && run.segments.some(segment => segment.translation?.trim());
+      const repair = () => model.ask(`请修复当前 Kami 批次的导出问题。用 kami_workbench GET /api/batch/run/${encodeURIComponent(id)}/export-repair?projectId=${encodeURIComponent(model.view.projectId)} 查看问题（在 path 查询串用 offset、limit 分页，工具的 offset 固定为 0；修复后列表会缩短，重新查询第一页，跳过已人工确认的段）。逐段对照原文与现译，保留语义及原有标签顺序。只对该列表中未人工确认的段，POST /api/batch/run/${encodeURIComponent(id)}/export-repair，body 为 {projectId:${JSON.stringify(model.view.projectId)}, segmentId, before:读取的完整旧译文, translation:修复译文}。失败请报告具体原因。最后再 GET 核对剩余数量，无须整批翻译或导出。`, repairKey);
+      const diagnose = () => model.ask(`请排查 Kami 当前批次 ${JSON.stringify(id)} 的导出错误 ${JSON.stringify(model.view.operations[key]?.error)}。先核实工作区输出文件和后台导出任务，确认文件是否已经生成。检查已保存的原文件和错误记录，说明失败原因和处理结果；如有 XLIFF 标签问题，使用本批次 export-repair 接口逐段修复。保留已有文件，避免重复写出或重跑翻译。`, repairKey);
       const write = () => model.perform(key, async (token) => {
         const result = await model.request({ action: "export", batchId: id, projectId: token.view.projectId, mode: "writeback", outputPath: path.trim() }, token);
         token.view.exports[id] = { ...result, at: new Date().toISOString() };
@@ -830,8 +844,13 @@ window.__ModuleLoader__.load({
       return h("section", { className: "card stack export-panel" }, h("div", { className: "panel-heading" }, h("span", { className: "surface-icon" }, h(Glyph, { name: "export", size: 22 })), h("div", null, h("h3", null, t("工作区导出")), h("p", { className: "muted" }, t("将本批次译文写回文件，保存到工作区。")))),
         h("label", null, t("导出路径"), h("input", { value: path, placeholder: `${model.workspace?.config?.outputDirectory || "outputs"}/`, onChange: (event) => setPath(event.target.value) })),
         h("p", { className: "muted" }, t("留空使用工作区默认输出目录；同名文件会报错。")),
-        h(Button, { primary: true, onClick: write, busy: model.view.operations[key]?.pending, disabled: editingLocked(run) || model.dirty() || model.view.operations[`qa:${id}`]?.pending || !run.segments.some((segment) => segment.translation?.trim()) }, t("导出文件")),
-        model.dirty() && h("p", { className: "muted" }, t("未保存译文不会用于检查或导出。")), h(Feedback, { model, name: key, retry: write, t }),
+        issues.length > 0 && h("div", { className: "resource-row stack", role: "alert" }, h("strong", null, `${t("导出前需修复")} · ${issues.length} ${t("段")}`),
+          ...issues.map(issue => h("div", { key: issue.segmentId, className: "button-row" }, h("span", null, `#${issue.index}${issue.unitId && String(issue.unitId) !== String(issue.index) ? ` · XLIFF ${issue.unitId}` : ""} · ${issue.reason}`), h(Button, { small: true, quiet: true, onClick: () => review(issue.segmentId) }, t("查看译段")))),
+          h("div", { className: "button-row" }, issues.some(issue => !issue.accepted) && h(Button, { primary: true, small: true, busy: model.view.operations[repairKey]?.pending, disabled: busy, onClick: repair }, t("让 Agent 修复")), h(Button, { small: true, onClick: () => model.perform(`export-check:${id}`, token => model.loadRun(token, id)) }, t("重新核对"))),
+          h(Feedback, { model, name: repairKey, t }), h(Feedback, { model, name: `export-check:${id}`, t })),
+        h(Button, { primary: true, onClick: write, busy: model.view.operations[key]?.pending, disabled: !canExport }, t("导出文件")),
+        model.dirty() && h("p", { className: "muted" }, t("未保存译文不会用于检查或导出。")), h(Feedback, { model, name: key, retry: canExport ? write : undefined, t }),
+        !issues.length && model.view.operations[key]?.error && h("div", { className: "stack" }, h("div", { className: "button-row" }, h(Button, { small: true, disabled: busy, busy: model.view.operations[repairKey]?.pending, onClick: diagnose }, t("让 Agent 排查导出错误"))), h(Feedback, { model, name: repairKey, t })),
         receipt && h("div", { className: "notice", role: "status" }, h("strong", null, t("上次导出成功")), h("p", null, h("code", null, receipt.path)), h("span", { className: "muted" }, `${sizeText(receipt.bytes)} · ${timeText(receipt.at)}`)),
         ["mqxliff", "xliff"].includes(run.format) && h("div", { className: "stack" }, h("p", { className: "muted" }, t("导入 memoQ 并完成人工审校后，将双语终稿放回工作区，再关联到本批次。")), h(Button, { onClick: onFinal, quiet: true }, t("关联人工终稿"))));
     }
@@ -884,7 +903,7 @@ window.__ModuleLoader__.load({
         !run && !view.operations["task-load"]?.pending && h(Empty, { title: "从工作区开始", description: "指定原文、关联资源，然后开始第一批翻译。", artwork: true, t }),
         (!run || panel === "overview") && h(QuickBatch, { model, t }),
         run && h("section", { className: "stack", key: run.batchId }, h(SectionTabs, { label: "当前任务分区", value: panel, onChange: setPanel, t, items: [["overview", "任务概览", "overview"], ["review", "译文检查", "check"], ["reports", "质量与复查", "search"], ["export", "工作区导出", "export"], ["final", "终稿与学习", "learning"]] }),
-          panel === "overview" ? h(TaskSummary, { model, run, t, review: () => review(), reports, exportFile: () => setPanel("export") }) : panel === "review" ? h(ReviewPanel, { model, run, t, key: `${run.batchId}:${selectedSegment}`, initialSelected: selectedSegment, reports }) : panel === "reports" ? h(TaskReports, { model, run, t, key: `${run.batchId}:${reportTab}`, initial: reportTab, review }) : panel === "final" ? h(FinalReviewPanel, { model, run, t, key: run.batchId }) : h(ExportPanel, { model, run, t, key: run.batchId, onFinal: () => setPanel("final") })), h(TaskHistory, { model, t }));
+          panel === "overview" ? h(TaskSummary, { model, run, t, review: () => review(), reports, exportFile: () => setPanel("export") }) : panel === "review" ? h(ReviewPanel, { model, run, t, key: `${run.batchId}:${selectedSegment}`, initialSelected: selectedSegment, reports }) : panel === "reports" ? h(TaskReports, { model, run, t, key: `${run.batchId}:${reportTab}`, initial: reportTab, review }) : panel === "final" ? h(FinalReviewPanel, { model, run, t, key: run.batchId }) : h(ExportPanel, { model, run, t, review, key: run.batchId, onFinal: () => setPanel("final") })), h(TaskHistory, { model, t }));
     }
     function ResourcePreview({ model, preview, t, close }) {
       const key = `agent-read:${preview.purpose}:${preview.path}`;

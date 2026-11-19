@@ -5,7 +5,12 @@ import { measureStage } from "./src/performance.mjs";
 import { translateMicroBatchWithModel } from "./src/provider.mjs";
 import { mergeWorkspaceMemories, mergeWorkspaceTerms, taskResources, workspaceStyleGuide } from "./src/workspace-resources.mjs";
 import ExcelJS from "exceljs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { runFollowupGroups } from "./src/followup-batch.mjs";
+import { indexSurveyMemories } from "./src/survey-memory-index.mjs";
+import { consistencyResultCache } from "./src/consistency-result-cache.mjs";
+import { consistencyRetryWork, remainingConsistencySkips, retryableConsistencyRepair } from "./src/consistency-retry.mjs";
+import { xliffExportIssues, exportXliffDocument } from "./src/xliff-document.mjs";
 import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +34,7 @@ import { buildPatternKey } from "./src/pattern-memory.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetGenerationToken, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, findQaCase, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile as getStoredProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemories, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleEvidences, loadStyleEvidenceIndex, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, updateQualityRun, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, saveReferenceFolder, getReferenceFolder, listReferenceFolders, deleteReferenceFolder, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetGenerationToken, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, findQaCase, getQaRuns, getStoreMetadata, getSurveyMemoryRows, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile as getStoredProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemories, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleEvidences, loadStyleEvidenceIndex, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, updateQualityRun, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, saveReferenceFolder, getReferenceFolder, listReferenceFolders, deleteReferenceFolder, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
 import { MAX_REFERENCE_FILE_BYTES, chunkReferencePages, extractReferenceFile, planReferenceExtraction, scanReferenceRisk } from "./src/reference-materials.mjs";
 import { getMemoryCandidates as getStoredMemoryCandidates, sampleStyleEvidence, saveTmImportAudit } from "./src/store.mjs";
 import { buildReferenceToolRunner as assembleReferenceToolRunner, createProjectReferenceIndex } from "./src/reference-context.mjs";
@@ -2741,8 +2746,8 @@ async function translateBatchSegment(body, path = "/api/translate", { draft = nu
 async function dispatchBatchSegment(body, path) {
   const dispatch = runtimeOptions().dispatch;
   if (dispatch) return dispatch({ method: "POST", path, body });
-  // Group preparations and validated drafts are private to this worker's async context.
-  if (runtimeOptions().prepareTranslation || runtimeOptions().translationDraft) {
+  // 组装译稿和收尾任务的资料范围均保存在当前异步上下文中。
+  if (runtimeOptions().prepareTranslation || runtimeOptions().translationDraft || runtimeOptions().followupOnly) {
     const request = Readable.from([Buffer.from(JSON.stringify(body))]);
     request.method = "POST";
     let status, payload;
@@ -3368,12 +3373,17 @@ function taskProgressReporter(taskId) {
  * 分片并行（每片 ≤100 条且 ≤40000 字），片内失败只丢这一片，最后合并成一份档案；
  * 全部分片都失败时档案标记为 failed，翻译路径自动回落通用口径。
  */
-async function runContextAnalysis(batchId, { taskId = "" } = {}) {
+async function runContextAnalysis(batchId, { taskId = "", failedOnly = false } = {}) {
   const run = await getBatchRun(batchId);
   if (!run) throw new Error("未找到这条翻译任务");
   const segments = Array.isArray(run.segments) ? run.segments : [];
   if (!segments.length) throw new Error("这条任务还没有分段，无法做语境分析");
-  const chunks = splitContextChunks(segments);
+  const allChunks = splitContextChunks(segments);
+  const previous = failedOnly ? run.contextBrief?.retryParts : null;
+  if (failedOnly && !previous?.failed?.length) throw new Error("没有可定位的失败语境分片");
+  const inputKey = createHash("sha256").update(JSON.stringify([run.filename, run.locale, run.format, run.contentType, contextBriefEntries(segments), allChunks.map(chunk => chunk.indices)])).digest("hex");
+  if (previous && previous.inputKey !== inputKey) throw Object.assign(new Error("原文或分片已变化，请重新分析全部语境"), { code: "STALE_CONTEXT_PARTS" });
+  const chunks = failedOnly ? allChunks.filter(chunk => previous.failed.includes(chunk.index)) : allChunks;
   const report = taskProgressReporter(taskId);
   const provider = getProviderConfig();
   const declaredLabel = CONTENT_TYPES[run.contentType]?.label || "";
@@ -3386,7 +3396,7 @@ async function runContextAnalysis(batchId, { taskId = "" } = {}) {
     locale: run.locale,
     declaredPurpose: run.contentType && run.contentType !== "general" ? declaredLabel : "",
     entries: contextBriefEntries(segments, chunk.indices),
-    part: { index: chunk.index, total: chunks.length }
+    part: { index: chunk.index, total: allChunks.length }
   }), {
     concurrency: CONTEXT_ANALYSIS_CONCURRENCY,
     onSettled: (result) => {
@@ -3401,15 +3411,20 @@ async function runContextAnalysis(batchId, { taskId = "" } = {}) {
       });
     }
   });
-  const parts = [];
-  const dropped = [];
-  for (const result of results) {
-    if (result.status !== "fulfilled") continue;
-    parts.push(result.value.part);
-    dropped.push(...(result.value.dropped || []));
+  const saved = { ...(previous?.completed || {}) };
+  const failed = [];
+  for (const [i, result] of results.entries()) {
+    const chunk = chunks[i];
+    if (result.status !== "fulfilled") { failed.push(chunk.index); continue; }
+    saved[chunk.index] = result.value;
+    if (!chunk.indices.every(index => result.value.part.sections?.some(section => section.from <= index + 1 && section.to >= index + 1))) failed.push(chunk.index);
   }
+  const values = Object.values(saved);
+  const dropped = values.flatMap(value => value.dropped || []);
+  const parts = values.map(value => value.part);
   const brief = mergeContextBrief(parts, { filename: run.filename, total: segments.length, model: provider.model });
   brief.dropped = dropped.slice(0, 50);
+  if (failed.length) brief.retryParts = { failed, completed: saved, inputKey };
   if (failures.length && !parts.length) brief.status = "failed";
   if (failures.length) brief.warning = `${failures.length} 片分析失败：${failures[0]}`;
   const latest = await getBatchRun(batchId);
@@ -3418,7 +3433,7 @@ async function runContextAnalysis(batchId, { taskId = "" } = {}) {
 }
 
 /** 起一个语境分析后台任务；同一批次已在跑时直接复用。 */
-function startContextAnalysis(batchId) {
+function startContextAnalysis(batchId, failedOnly = false) {
   const running = contextAnalysisTasks.get(batchId);
   if (running) return running;
   const tracked = (async () => {
@@ -3432,7 +3447,7 @@ function startContextAnalysis(batchId) {
       progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length }
     });
     try {
-      const brief = await runContextAnalysis(batchId, { taskId: task.id });
+      const brief = await runContextAnalysis(batchId, { taskId: task.id, failedOnly });
       const complete = brief.status === "ready" && !brief.warning && brief.coverage.covered >= brief.coverage.total;
       await updateBackgroundTaskProgress(task.id, {
         status: complete ? "completed" : "failed",
@@ -3456,7 +3471,9 @@ function startContextAnalysis(batchId) {
       return { batchId, taskId: task.id, brief };
     } catch (error) {
       const latest = await getBatchRun(batchId);
-      await saveBatchRun({ ...(latest || run), contextBrief: { ...(latest?.contextBrief || {}), status: "failed", warning: error.message } });
+      const brief = { ...(latest?.contextBrief || {}), status: "failed", warning: error.message };
+      if (error.code === "STALE_CONTEXT_PARTS") delete brief.retryParts;
+      await saveBatchRun({ ...(latest || run), contextBrief: brief });
       await updateBackgroundTaskProgress(task.id, {
         status: "failed",
         progress: { phase: "failed", message: error.message, percent: 100 }
@@ -3591,7 +3608,7 @@ function consistencySegmentIssues(run, segment, translation) {
 }
 
 /** 定向修订：只按一致性要求改这一处，改完由调用方做确定性校验。 */
-async function reviseSegmentForConsistency({ run, segment, assets, source, target, reason }) {
+async function reviseSegmentForConsistency({ run, segment, assets, source, target, reason, requirements }) {
   const locale = run.locale;
   const classification = await classify({ text: segment.source || "", hint: run.contentType || "general", useModel: false });
   const matches = matchTerms(segment.source || "", assets, {
@@ -3629,18 +3646,21 @@ async function reviseSegmentForConsistency({ run, segment, assets, source, targe
     issues: [{
       severity: "major",
       category: "consistency",
-      message: `本文件要求统一：${source} 统一译为「${target}」（依据：${reason}）。只改这一处，其余内容、格式与信息保持不变。`
+      message: `本文件要求统一：${(requirements || [{ source, target, reason }]).map(term => `${term.source} 统一译为「${term.target}」（依据：${term.reason}）`).join("；")}。只改指定处，其余内容、格式与信息保持不变。`
     }],
     references: [],
     qaCases: qaGuidance,
-    toolRunner: buildReferenceToolRunner({ projectId: run.projectId })
+    referenceSession: { contextPack, toolRunner: buildReferenceToolRunner({ projectId: run.projectId }) }
   });
   return String(revised || "").trim();
 }
 
 /** 修复后只复核改动所在的分片，确认漂移消失；不整批重跑，避免重复花钱。 */
-async function recheckConsistencyChunks({ run, pairs, changedIds, style, termEvidence, tmEvidence }) {
-  const chunks = splitConsistencyChunks(pairs).filter((chunk) => chunk.ids.some((id) => changedIds.has(String(id))));
+async function recheckConsistencyChunks({ run, pairs, changedIds, retryChunks = [], style, termEvidence, tmEvidence }) {
+  const allChunks = splitConsistencyChunks(pairs);
+  const chunks = [...retryChunks];
+  const scheduled = new Set(chunks.flatMap(chunk => chunk.ids));
+  chunks.push(...allChunks.filter(chunk => chunk.ids.some(id => changedIds.has(id) && !scheduled.has(id))));
   if (!chunks.length) return { checkedChunks: 0, remaining: [], failures: [] };
   const byId = new Map(pairs.map((pair) => [String(pair.id), pair]));
   const results = await runTaskPool(chunks, async (chunk) => {
@@ -3650,13 +3670,16 @@ async function recheckConsistencyChunks({ run, pairs, changedIds, style, termEvi
       locale: run.locale,
       purpose: run.contentType || "general",
       pairs: chunkPairs,
-      part: { index: chunk.index, total: chunks.length },
+      cacheSlot: `verify:${chunk.index}`,
+      part: { index: chunk.index, total: allChunks.length },
       evidence: consistencyChunkEvidence({ style, termEvidence, tmEvidence, pairs: chunkPairs }),
       toolRunner: buildReferenceToolRunner({ projectId: run.projectId })
     });
   }, { concurrency: CONSISTENCY_CHECK_CONCURRENCY });
   return {
-    checkedChunks: chunks.length,
+    checkedChunks: results.filter(result => result.status === "fulfilled").length,
+    checkedIds: chunks.filter((_, i) => results[i].status === "fulfilled").flatMap(chunk => chunk.ids),
+    failedChunks: chunks.filter((_, i) => results[i].status === "rejected"),
     remaining: mergeConsistencyFindings(results.filter((result) => result.status === "fulfilled").map((result) => result.value)),
     failures: results.filter((result) => result.status === "rejected").map((result) => String(result.reason?.message || result.reason))
   };
@@ -3667,7 +3690,7 @@ async function recheckConsistencyChunks({ run, pairs, changedIds, style, termEvi
  * 逐段确定性校验（改出新的阻断问题就回退）→ 交给调用方落库。
  * 人工回填过的批次与"关掉自动统一"的设置都只报告，不改稿。
  */
-async function applyConsistencyRepairs({ run, segments, findings, assets, taskId = "" }) {
+async function applyConsistencyRepairs({ run, segments, findings, assets, taskId = "", allowed = null }) {
   const report = taskProgressReporter(taskId);
   const repair = { at: new Date().toISOString(), enabled: true, blocked: null, changed: [], skipped: [] };
   if (getSettings().quality?.consistencyAutoRepair === false) {
@@ -3724,7 +3747,14 @@ async function applyConsistencyRepairs({ run, segments, findings, assets, taskId
   let completed = 0;
   report({ phase: "repairing", message: `正在按证据统一译法：0 / ${totalChanges} 段`, percent: 30, completed: 0, total: totalChanges });
   for (const action of plan.actions) {
+    const toRevise = action.changes.filter(change => change.method !== "replace" && (!allowed || allowed(action.findingIndex, change.segmentId)) && updated.get(change.segmentId)?.translation && !updated.get(change.segmentId).accepted)
+      .map(change => ({ segment: updated.get(change.segmentId), targets: [change.target || action.target], change }));
+    const revisions = await runFollowupGroups(run, toRevise, "AIQA 修订", ({ segment, change }) => reviseSegmentForConsistency({
+      run, segment, assets, source: change.source || action.source, target: change.target || action.target,
+      reason: REPAIR_EVIDENCE_LABELS[(change.evidence || action.evidence)?.kind] || "一致性核对"
+    }));
     for (const change of action.changes) {
+      if (allowed && !allowed(action.findingIndex, change.segmentId)) continue;
       completed += 1;
       const segment = updated.get(change.segmentId);
       if (!segment || segment.accepted === true) continue;
@@ -3736,14 +3766,9 @@ async function applyConsistencyRepairs({ run, segments, findings, assets, taskId
       const changeEvidence = change.evidence || action.evidence || null;
       if (!after) {
         try {
-          after = await reviseSegmentForConsistency({
-            run,
-            segment,
-            assets,
-            source: changeSource,
-            target: changeTarget,
-            reason: REPAIR_EVIDENCE_LABELS[changeEvidence?.kind] || "一致性核对"
-          });
+          const revised = revisions.get(segment.id);
+          if (revised?.error) throw revised.error;
+          after = revised?.value || await reviseSegmentForConsistency({ run, segment, assets, source: changeSource, target: changeTarget, reason: REPAIR_EVIDENCE_LABELS[changeEvidence?.kind] || "一致性核对" });
         } catch (error) {
           repair.skipped.push({ findingIndex: action.findingIndex, type: action.type, ids: [change.segmentId], reason: `定向修订失败：${error.message}` });
           continue;
@@ -3803,7 +3828,7 @@ async function applyConsistencyRepairs({ run, segments, findings, assets, taskId
   }
   if (!repair.changed.length) return { repair, segments };
   const nextSegments = segments.map((segment) => updated.get(String(segment.id || "")) || segment);
-  await syncConsistencyRepairRecords({ run, changes: repair.changed, segments: nextSegments });
+  await syncConsistencyRepairRecords({ run, changes: repair.changed, segments: nextSegments, existingOnly: Boolean(allowed) });
   return { repair, segments: nextSegments };
 }
 
@@ -3811,7 +3836,7 @@ async function applyConsistencyRepairs({ run, segments, findings, assets, taskId
  * 修复后的资产同步：工作 TM 里这条批次的机器条改成新译法（不新增分叉，也不碰人工条），
  * 有学习轨迹的段落把机器终稿同步成修复后的译文，保证 SFT / 回归集用的是实际交付的机器稿。
  */
-async function syncConsistencyRepairRecords({ run, changes, segments }) {
+async function syncConsistencyRepairRecords({ run, changes, segments, existingOnly = false }) {
   if (!changes.length) return;
   const libraries = run.projectId ? await getResourceLibraries(run.projectId, { kind: "translation_memory" }).catch(() => []) : [];
   const workingLibrary = libraries.find((library) => library.role === "working" && library.enabled !== false) || null;
@@ -3834,24 +3859,30 @@ async function syncConsistencyRepairRecords({ run, changes, segments }) {
           && normalizeMemoryText(row.source) === normalizeMemoryText(segment.source)
           && normalizeMemoryText(row.target) !== normalizeMemoryText(change.after)
           && String(row.qualityStatus || "") !== "human_approved");
-        for (const row of stale) await deleteMemory(run.locale, row.id).catch(() => {});
-        await saveMemory(run.locale, {
-          source: segment.source,
-          target: change.after,
-          domain: run.domain || "general",
-          contentType: run.contentType || "general",
-          qualityStatus: "machine_verified",
-          assetTier: "working",
-          project: run.projectId,
-          projectId: run.projectId,
-          libraryId: workingLibrary.id,
-          provenance: "consistency-repair",
-          batchId: run.batchId,
-          entryId: segment.locator?.unitId || segment.locator?.entryId || segment.context?.entryId || "",
-          entryKey: segment.entryKey || segment.locator?.entryKey || "",
-          sourceFile: run.filename,
-          sourceRow: segment.locator?.row || segment.context?.row || null
-        });
+        if (existingOnly) {
+          for (const row of stale) {
+            if (row.target === change.before && row.entryId && row.entryId === (segment.locator?.unitId || segment.locator?.entryId) && (!row.entryKey || row.entryKey === segment.entryKey)) await updateMemory(run.locale, row.id, { target: change.after });
+          }
+        } else {
+          for (const row of stale) await deleteMemory(run.locale, row.id).catch(() => {});
+          await saveMemory(run.locale, {
+            source: segment.source,
+            target: change.after,
+            domain: run.domain || "general",
+            contentType: run.contentType || "general",
+            qualityStatus: "machine_verified",
+            assetTier: "working",
+            project: run.projectId,
+            projectId: run.projectId,
+            libraryId: workingLibrary.id,
+            provenance: "consistency-repair",
+            batchId: run.batchId,
+            entryId: segment.locator?.unitId || segment.locator?.entryId || segment.context?.entryId || "",
+            entryKey: segment.entryKey || segment.locator?.entryKey || "",
+            sourceFile: run.filename,
+            sourceRow: segment.locator?.row || segment.context?.row || null
+          });
+        }
       } catch (error) {
         console.error(`[Kami] 一致性修复后同步工作 TM 失败（${change.segmentId}）：${error.message}`);
       }
@@ -3924,7 +3955,7 @@ function annotateConsistencyFindings(findings, repair, verification) {
  * 规则/模型发现、但没有证据可自动统一的问题（就是把报告里的"待核对"），
  * 再交给模型终审一次：能确定改法的做短语级替换，拿不准的写进"AI 判断保留"。
  */
-async function adjudicateRemainingFindings({ run, segments, findings, repair, assets, taskId = "" }) {
+async function adjudicateRemainingFindings({ run, segments, findings, repair, assets, taskId = "", allowed = null }) {
   const report = taskProgressReporter(taskId);
   const repairedIndexes = new Set((repair.changed || []).map((change) => change.findingIndex));
   const unresolved = [];
@@ -3946,6 +3977,7 @@ async function adjudicateRemainingFindings({ run, segments, findings, repair, as
       segments: segments.map((segment) => ({ id: segment.id, source: segment.source, translation: segment.translation }))
     });
   } catch (error) {
+    for (const index of unresolved.slice(0, inputs.length)) repair.skipped.push({ findingIndex: index, ids: findings[index].ids, retryable: true, reason: `AI 终审失败：${error.message}` });
     console.error(`[Kami] 一致性 AI 终审失败：${error.message}`);
     report({ phase: "adjudicating", message: `AI 终审失败，保留待核对：${error.message}` });
     return { segments, repair, decisions: [] };
@@ -3961,8 +3993,17 @@ async function adjudicateRemainingFindings({ run, segments, findings, repair, as
       repair.skipped.push({ findingIndex: originalIndex, type: finding.type, ids: (finding.ids || []).map(String), reason: `AI 判断保留：${decision.reason || "无需统一"}` });
       continue;
     }
-    const targetIds = (decision.ids?.length ? decision.ids : finding.ids).map(String).slice(0, 12);
+    const targetIds = [...new Set((decision.ids?.length ? decision.ids : finding.ids).map(String))].slice(0, 12);
+    const eligible = targetIds.filter(id => (!allowed || allowed(originalIndex, id)) && updated.get(id)?.translation && !updated.get(id).accepted);
+    const previews = new Map(eligible.map(id => {
+      const s = updated.get(id);
+      return [id, applyDeterministicReplacement({ translation: s.translation, from: decision.from, to: decision.target, protectedTokens: extractProtectedTokens(s.source) })];
+    }));
+    const toRevise = eligible.slice(0, Math.max(0, budget - changed)).filter(id => !previews.get(id).ok).map(id => ({ segment: updated.get(id), targets: [decision.target] }));
+    const revise = ({ segment }) => reviseSegmentForConsistency({ run, segment, assets, source: decision.from || segment.source || "", target: decision.target, reason: "AI 终审" });
+    const revisions = await runFollowupGroups(run, toRevise, "AIQA 修订", revise);
     for (const id of targetIds) {
+      if (allowed && !allowed(originalIndex, id)) continue;
       if (changed >= budget) {
         repair.skipped.push({ findingIndex: originalIndex, type: finding.type, ids: [id], reason: REPAIR_SKIP_REASONS.limit });
         continue;
@@ -3971,12 +4012,14 @@ async function adjudicateRemainingFindings({ run, segments, findings, repair, as
       if (!segment || segment.accepted === true) continue;
       const before = String(segment.translation || "");
       if (!before) continue;
-      const replaced = applyDeterministicReplacement({ translation: before, from: decision.from, to: decision.target, protectedTokens: extractProtectedTokens(segment.source) });
+      const replaced = previews.get(id);
       let after = replaced.ok ? replaced.value : "";
       const method = replaced.ok ? "replace" : "revise";
       if (!after) {
         try {
-          after = await reviseSegmentForConsistency({ run, segment, assets, source: decision.from || segment.source || "", target: decision.target, reason: "AI 终审" });
+          const revised = revisions.get(id);
+          if (revised?.error) throw revised.error;
+          after = revised?.value || await revise({ segment });
         } catch (error) {
           repair.skipped.push({ findingIndex: originalIndex, type: finding.type, ids: [id], reason: `AI 定向修订失败：${error.message}` });
           continue;
@@ -3998,9 +4041,11 @@ async function adjudicateRemainingFindings({ run, segments, findings, repair, as
   return { segments: segments.map((segment) => updated.get(String(segment.id || "")) || segment), repair, decisions };
 }
 
-async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
+async function runConsistencyCheck(batchId, { taskId = "", failedOnly = false } = {}) {
   const run = await getBatchRun(batchId);
   if (!run) throw new Error("未找到这条翻译任务");
+  const retry = failedOnly ? consistencyRetryWork(run) : null;
+  const prior = retry ? run.qualityReport : null;
   const segments = Array.isArray(run.segments) ? run.segments : [];
   const translated = segments.filter((segment) => segment.selected !== false && String(segment.translation || "").trim());
   if (!translated.length) throw new Error("这条任务还没有译文，无法核对一致性");
@@ -4017,10 +4062,10 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
   // 只按正式术语重算骨架；工作术语的可靠 TM 命中由术语普查逐段 QA 后处理。
   const patternTerms = baseAssets.terms || [];
   for (const segment of segments) {
-    if (segment.status !== "done" || !segment.result || !String(segment.source || "")) continue;
+    if (retry || segment.status !== "done" || !segment.result || !String(segment.source || "")) continue;
     segment.result = { ...segment.result, matches: (segment.result.matches || []).filter(match => !match.term?.working), patternKey: buildPatternKey(segment.source, { terms: patternTerms }) };
   }
-  const deterministic = deterministicConsistencyFindings(segments, { terms: assets.terms || [] });
+  const deterministic = retry ? [] : deterministicConsistencyFindings(segments, { terms: assets.terms || [] });
   const styleProfile = await getProjectStyleProfile(run.locale, { projectId: run.projectId }).catch(() => null);
   const style = styleProfile ? {
     id: String(styleProfile.id || ""),
@@ -4044,7 +4089,8 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
     domain: run.domain,
     sources: [...tmSources]
   });
-  const chunks = splitConsistencyChunks(pairs);
+  const allChunks = splitConsistencyChunks(pairs);
+  const chunks = retry ? retry.checking : allChunks;
   report({ phase: "checking", message: `正在核对跨条目一致性：0 / ${chunks.length} 片`, percent: 10, completed: 0, total: chunks.length });
   let completed = 0;
   const failures = [];
@@ -4056,7 +4102,8 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
       locale: run.locale,
       purpose: run.contentType || "general",
       pairs: chunkPairs,
-      part: { index: chunk.index, total: chunks.length },
+      cacheSlot: `check:${chunk.index}`,
+      part: { index: chunk.index, total: allChunks.length },
       evidence: consistencyChunkEvidence({ style, termEvidence, tmEvidence, pairs: chunkPairs }),
       toolRunner: buildReferenceToolRunner({ projectId: run.projectId })
     });
@@ -4075,49 +4122,78 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
     }
   });
   const modelFindings = mergeConsistencyFindings(results.filter((result) => result.status === "fulfilled").map((result) => result.value));
-  const merged = [...deterministic, ...modelFindings];
-  const repaired = await applyConsistencyRepairs({ run, segments, findings: merged, assets, taskId });
+  const failedChunks = chunks.filter((_, i) => results[i].status === "rejected");
+  const merged = [...(prior?.findings || []), ...deterministic, ...modelFindings];
+  const selected = merged.flatMap((finding, index) => {
+    if (!prior || index >= (prior.findings?.length || 0)) return [{ finding, index }];
+    const ids = [...new Set(retry.repairItems.filter(item => item.findingIndex === index).flatMap(item => item.ids))];
+    return ids.length ? [{ index, finding: { ...finding, ids } }] : [];
+  });
+  const work = selected.map(item => item.finding);
+  const allowed = retry ? (index, id) => work[index]?.ids?.includes(id) : null;
+  const repaired = await applyConsistencyRepairs({ run, segments, findings: work, assets, taskId, allowed });
   // 剩下"待核对"的项再让 AI 终审一次：能改的按短语替换改掉，改完再出报告。
   // 自动统一被关闭、或有人工回填的批次，终审也必须一起停下。
   if (!repaired.repair.blocked) {
-    const adjudicated = await adjudicateRemainingFindings({ run, segments: repaired.segments, findings: merged, repair: repaired.repair, assets, taskId });
+    const adjudicated = await adjudicateRemainingFindings({ run, segments: repaired.segments, findings: work, repair: repaired.repair, assets, taskId, allowed });
     repaired.segments = adjudicated.segments;
   }
   const changedIds = new Set((repaired.repair.changed || []).map((change) => String(change.segmentId)));
+  if (prior) {
+    for (const item of [...repaired.repair.changed, ...repaired.repair.skipped]) item.findingIndex = selected[item.findingIndex]?.index ?? item.findingIndex;
+    repaired.repair.changed = [...(prior.repair.changed || []), ...repaired.repair.changed];
+    repaired.repair.skipped = [...(prior.repair.skipped || []).filter(item => repaired.repair.blocked || !retryableConsistencyRepair(item)), ...repaired.repair.skipped];
+  }
   // 一致性修订（含旧版本留下的改稿）不能继续显示旧译文的 QA 分数与意见。
   for (const segment of repaired.segments) {
     if (segment.selected === false || segment.accepted === true || segment.status !== "done") continue;
-    if (typeof segment.result?.translation === "string" && segment.result.translation !== segment.translation) changedIds.add(String(segment.id));
+    if (!retry && typeof segment.result?.translation === "string" && segment.result.translation !== segment.translation) changedIds.add(String(segment.id));
   }
+  const verifyIds = new Set(changedIds);
+  for (const id of retry?.qaIds || []) changedIds.add(id);
   if (changedIds.size) {
+    const beforeQa = new Map(repaired.segments.filter(segment => changedIds.has(segment.id)).map(segment => [segment.id, segment.translation]));
     let qaRun = { ...run, segments: repaired.segments.map(segment => !changedIds.has(String(segment.id)) || segment.accepted === true ? segment : {
       ...segment, result: { ...segment.result, translation: segment.translation, qaScore: null, issues: [], qa: null, aiQa: { status: "not_run", used: false, score: null } }
     }) };
     const qa = await retryServerBatchQa(batchId, {
-      loadRun: async () => qaRun, saveRun: async value => { qaRun = value; }, segmentIds: [...changedIds],
+      loadRun: async () => qaRun, saveRun: async value => { qaRun = value; }, segmentIds: [...changedIds], groupModelQa: true,
       recheckSegment: body => translateBatchSegment({ ...body, workingTerms: [] }, "/api/qa"),
       report: ({ completed, total }) => report({ phase: "rechecking", message: `正在复检一致性修订：${completed} / ${total} 段`, percent: 50 + Math.round(completed / Math.max(1, total) * 15), completed, total })
     });
     repaired.segments = qaRun.segments;
+    for (const segment of repaired.segments) if (beforeQa.has(segment.id) && beforeQa.get(segment.id) !== segment.translation) verifyIds.add(segment.id);
     if (qa.failed) failures.push(`${qa.failed} 段一致性修订后的 QA 未完成，可批量重试`);
   }
-  let verification = null;
-  if (changedIds.size) {
+  let verification = prior?.repair.verification || null;
+  if (verifyIds.size || retry?.verifying.length) {
     report({ phase: "verifying", message: `正在复核统一结果：0 片`, percent: 70, completed: 0, total: 1 });
     try {
       verification = await recheckConsistencyChunks({
         run,
         pairs: toPairs(repaired.segments.filter((segment) => segment.selected !== false && String(segment.translation || "").trim())),
-        changedIds,
+        changedIds: verifyIds,
+        retryChunks: retry?.verifying,
         style,
         termEvidence,
         tmEvidence
       });
     } catch (error) {
-      verification = { checkedChunks: 0, remaining: [], failures: [error.message] };
+      verification = { checkedChunks: 0, remaining: [], failedChunks: [...(retry?.verifying || []), ...allChunks.filter(chunk => chunk.ids.some(id => verifyIds.has(id)))], failures: [error.message] };
     }
   }
+  if (prior?.repair.verification && verification !== prior.repair.verification) {
+    const checked = new Set(verification.checkedIds || []);
+    const previous = prior.repair.verification;
+    verification.remaining = [...(previous.remaining || []).filter(f => !f.ids?.some(id => checked.has(id))), ...verification.remaining];
+    verification.checkedIds = [...new Set([...(previous.checkedIds || []), ...checked])];
+    const successful = new Set(verification.checkedIds);
+    verification.checkedChunks = Math.max(previous.checkedChunks || 0, allChunks.filter(chunk => chunk.ids.every(id => successful.has(id))).length);
+  }
   failures.push(...(verification?.failures || []));
+  repaired.repair.skipped = remainingConsistencySkips(repaired.repair);
+  const unresolvedRepairs = repaired.repair.skipped.filter(retryableConsistencyRepair);
+  if (unresolvedRepairs.length) failures.push(`${unresolvedRepairs.length} 个一致性修订失败项可单独重试`);
   const findings = annotateConsistencyFindings(merged, repaired.repair, verification);
   const qualityReport = buildQualityReport({
     segments: repaired.segments, brief: run.contextBrief || null, findings, provider, styleProfile,
@@ -4127,7 +4203,7 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
   // 写回前重新读一次批次，按 segment id 合并，避免覆盖这段时间里的并发改动。
   const latestSegments = Array.isArray(latest?.segments) ? latest.segments : [];
   const mergedSegments = latestSegments.length
-    ? latestSegments.map((segment) => repaired.segments.find((item) => String(item.id) === String(segment.id)) || segment)
+    ? latestSegments.map((segment) => retry && !changedIds.has(segment.id) ? segment : repaired.segments.find((item) => String(item.id) === String(segment.id)) || segment)
     : repaired.segments;
   const repairSummary = {
     at: repaired.repair.at,
@@ -4135,18 +4211,19 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
     blocked: repaired.repair.blocked,
     changed: repaired.repair.changed,
     skipped: repaired.repair.skipped,
+    failedChunks,
     verification
   };
   await saveBatchRun({
     ...(latest || run),
     segments: mergedSegments,
-    qualityReport: { report: qualityReport, findings, warning: failures[0] || "", repair: repairSummary }
+    qualityReport: { report: qualityReport, findings, warning: failures[0] || "", repair: repairSummary, chunkResults: runtimeOptions().chunkResults?.records }
   });
   return { report: qualityReport, findings, failures, repair: repairSummary };
 }
 
 /** 起一个一致性核对后台任务；同一批次已在跑时直接复用。 */
-function startConsistencyCheck(batchId) {
+function startConsistencyCheck(batchId, failedOnly = false) {
   const running = consistencyCheckTasks.get(batchId);
   if (running) return running;
   const tracked = (async () => {
@@ -4164,7 +4241,10 @@ function startConsistencyCheck(batchId) {
       await attachBatchWorkflowTask(batchId, "qualityReport", task.id);
       const cached = runtimeOptions().evidenceCache;
       const evidenceCache = cached?.batchId === batchId ? cached : { batchId, guides: new Map(), snippets: new Map() };
-      const outcome = await withRuntimeCall({ evidenceCache }, () => runConsistencyCheck(batchId, { taskId: task.id }));
+      const snapshot = run.runnerOptions?.workspaceSnapshot;
+      const settings = getSettings();
+      const chunkResults = consistencyResultCache(run, [snapshot?.resources?.filter(r => r.purpose !== "reference"), snapshot?.guide, snapshot?.terms, snapshot?.memories?.map(m => [m.id, m.source, m.target, m.libraryId, m.linkedLibraryId]), settings.model]);
+      const outcome = await withRuntimeCall({ evidenceCache, chunkResults, followupOnly: true }, () => runConsistencyCheck(batchId, { taskId: task.id, failedOnly }));
       const repairedCount = (outcome.repair?.changed || []).length;
       await updateBackgroundTaskProgress(task.id, {
         status: outcome.failures.length ? "needs_attention" : "completed",
@@ -4196,20 +4276,20 @@ function startConsistencyCheck(batchId) {
  *
  * 这一步失败不影响批次：只记一条失败任务，翻译结果照常使用。
  */
-async function runTermSurvey(batchId, { taskId = "" } = {}) {
+async function runTermSurvey(batchId, { taskId = "", failedOnly = false } = {}) {
   let run = await getBatchRun(batchId);
   if (!run) throw new Error("未找到这条翻译任务");
   const previous = run.runnerOptions?.termSurvey;
   if (previous && run.segments?.some((segment) => segment.accepted === true)) return { ...previous, failures: [] };
   const report = taskProgressReporter(taskId), failures = [];
-  const recovery = restoreUnverifiedSurveyRepairs(run);
+  const recovery = failedOnly ? { changed: [], skipped: [] } : restoreUnverifiedSurveyRepairs(run);
   if (recovery.changed.length || recovery.skipped.length) {
     run = { ...run, segments: recovery.segments, runnerOptions: { ...run.runnerOptions, termSurvey: { ...previous, recovery: { at: new Date().toISOString(), changed: recovery.changed, skipped: recovery.skipped } } } };
     await saveBatchRun(run);
     await syncConsistencyRepairRecords({ run, changes: recovery.changed, segments: run.segments });
   }
   const recoveredIds = (run.runnerOptions?.termSurvey?.recovery?.changed || []).map(change => change.segmentId);
-  if (recoveredIds.length) {
+  if (!failedOnly && recoveredIds.length) {
     const outcome = await retryServerBatchQa(batchId, {
       loadRun: getBatchRun, saveRun: saveBatchRun, segmentIds: recoveredIds,
       recheckSegment: body => translateBatchSegment({ ...body, workingTerms: [] }, "/api/qa"),
@@ -4221,12 +4301,16 @@ async function runTermSurvey(batchId, { taskId = "" } = {}) {
   const pairs = surveyPairs(run.segments || []);
   if (!pairs.length) throw new Error("这条任务还没有译文，无法做术语普查");
   const assets = (await getProjectAssets(run.locale, run.projectId)).assets || {};
-  const marks = markedSurveyTerms(run.runnerOptions?.workingGlossary, assets.terms || []);
+  if (failedOnly && !previous?.repair?.verifiedMemoryOnly) throw new Error("旧报告没有可安全重试的术语记录，请手动选择完整普查");
+  const marks = failedOnly ? previous.terms.filter(term => term.tm?.status === "failed")
+    : markedSurveyTerms(run.runnerOptions?.workingGlossary, assets.terms || []);
+  const failedPairs = failedOnly ? previous.repair.skipped || [] : null;
   const libraries = await getResourceLibraries(run.projectId, { kind: "translation_memory" });
   report({ phase: "surveying", message: `正在查找标记术语的 TM 译法：0 / ${marks.length}`, percent: 10, completed: 0, total: marks.length });
   let completed = 0;
+  const lookup = termSurveyMemoryEntries(run, marks.map(term => term.source), libraries);
   const results = await runTaskPool(marks, async (term) => ({ ...term, tm: await resolveTermMemory({
-    term, entries: await termSurveyMemoryEntries(run, term.source, libraries), align: resolveTermMemoryWithModel
+    term, entries: (await lookup).get(term.source) || [], align: resolveTermMemoryWithModel
   }) }), {
     concurrency: CONSISTENCY_CHECK_CONCURRENCY,
     onSettled: (result) => {
@@ -4241,24 +4325,34 @@ async function runTermSurvey(batchId, { taskId = "" } = {}) {
       });
     }
   });
-  const terms = results.map((result, index) => result.status === "fulfilled" ? result.value : { ...marks[index], tm: { status: "failed", target: "", evidence: [], reason: `TM 查询或对齐失败：${result.reason?.message || result.reason}` } });
-  const repaired = await repairSurveyTerms(run, terms, assets, { report });
+  const resolved = results.map((result, index) => result.status === "fulfilled" ? result.value : { ...marks[index], tm: { status: "failed", target: "", evidence: [], reason: `TM 查询或对齐失败：${result.reason?.message || result.reason}` } });
+  const retried = new Map(resolved.map(term => [term.source, term]));
+  const terms = failedOnly ? previous.terms.map(term => retried.get(term.source) || term) : resolved;
+  const repaired = await repairSurveyTerms(run, terms, assets, { report, failedPairs, retried });
+  const changedIds = new Set(repaired.repair.changed.map(change => change.segmentId));
+  if (failedOnly) repaired.repair = { ...previous.repair, ...repaired.repair,
+    changed: [...(previous.repair.changed || []), ...repaired.repair.changed] };
   const failedTerms = results.filter(result => result.status === "rejected").length;
   const coverage = { analyzedPairs: pairs.length, totalSegments: (run.segments || []).filter((segment) => segment.selected !== false).length, markedTerms: terms.length, checkedTerms: terms.length - failedTerms, failedTerms };
   if (repaired.repair.skipped.length) failures.push(`${repaired.repair.skipped.length} 处译文未能统一，请查看术语普查中的待核对原因`);
   const latest = await getBatchRun(batchId) || run;
   const glossary = latest.runnerOptions?.workingGlossary;
+  if (failedOnly) {
+    const changed = new Map(repaired.segments.filter(segment => changedIds.has(segment.id)).map(segment => [segment.id, segment]));
+    repaired.segments = latest.segments.map(segment => changed.get(segment.id) || segment);
+  }
   await saveBatchRun({
     ...latest,
     segments: repaired.segments,
-    ...(latest.qualityReport?.report ? { qualityReport: { ...latest.qualityReport, report: buildQualityReport({ segments: repaired.segments, brief: latest.contextBrief || null, findings: latest.qualityReport.findings || [], provider: getProviderConfig(), batchId, filename: run.filename, locale: run.locale }) } } : {}),
+    ...(latest.qualityReport?.report && (!failedOnly || changedIds.size) ? { qualityReport: { ...latest.qualityReport, report: buildQualityReport({ segments: repaired.segments, styleProfile: latest.qualityReport.report.styleProfile, brief: latest.contextBrief || null, findings: latest.qualityReport.findings || [], provider: getProviderConfig(), batchId, filename: run.filename, locale: run.locale }) } } : {}),
     runnerOptions: {
       ...(latest.runnerOptions || {}),
-      ...(glossary ? { workingGlossary: { ...glossary, revision: (Number(glossary.revision) || 0) + 1, terms: glossary.terms.map((mark) => {
-        const found = terms.find((term) => normalizeSource(term.source) === normalizeSource(mark.source));
+      ...(glossary && (!failedOnly || resolved.length) ? { workingGlossary: { ...glossary, revision: (Number(glossary.revision) || 0) + 1, terms: glossary.terms.map((mark) => {
+        const found = resolved.find((term) => normalizeSource(term.source) === normalizeSource(mark.source));
         return found ? { ...mark, initialTarget: found.initialTarget, target: found.suggestedTarget, tm: found.tm } : mark;
       }) } } : {}),
       termSurvey: {
+        ...(failedOnly ? previous : {}),
         version: 2,
         filename: run.filename,
         model: getProviderConfig().model,
@@ -4274,68 +4368,112 @@ async function runTermSurvey(batchId, { taskId = "" } = {}) {
   return { terms, failures, coverage };
 }
 
-async function termSurveyMemoryEntries(run, source, libraries) {
-  const enabled = new Map(libraries.filter((library) => library.enabled !== false && ["master", "reference"].includes(library.role)).map((library) => [library.id, library]));
-  const rows = [];
-  for (let offset = 0; ; offset += 200) {
-    const page = await getMemories(run.locale, { projectId: run.projectId, search: source, limit: 200, offset });
-    rows.push(...page);
-    if (page.length < 200) break;
-  }
+async function termSurveyMemoryEntries(run, sources, libraries) {
+  if (!sources.length) return new Map();
+  const enabled = libraries.filter(lib => lib.enabled !== false && ["master", "reference"].includes(lib.role));
+  const rows = await getSurveyMemoryRows(run.locale, run.projectId, enabled.map(lib => lib.id));
   const snapshot = taskResources(run.projectId) || run.runnerOptions?.workspaceSnapshot;
-  if (snapshot?.projectId === run.projectId) rows.push(...(snapshot.memories || []));
-  return rows.filter((row) => enabled.has(row.linkedLibraryId || row.libraryId) && textContainsTerm(row.source, source))
-    .map((row) => {
-      const library = enabled.get(row.linkedLibraryId || row.libraryId);
-      return { ...row, sourceFile: row.sourceFiles?.join("、") || row.resourcePath || row.sourceFile, libraryId: library.id, libraryName: library.name, libraryRole: library.role };
-    });
+  return indexSurveyMemories(sources, enabled, snapshot?.projectId === run.projectId ? rows.concat(snapshot.memories || []) : rows);
 }
 
-async function repairSurveyTerms(run, terms, assets, { report = () => {} } = {}) {
-  const segments = run.segments.map((segment) => ({ ...segment })), repair = { verifiedMemoryOnly: true, changed: [], skipped: [] };
-  let completed = 0;
-  for (const term of terms) {
-    report({ phase: "repairing", message: `正在核对有 TM 证据的术语修订：${++completed} / ${terms.length}`, percent: 75 + Math.round(completed / Math.max(1, terms.length) * 20), completed, total: terms.length });
-    if (!verifiedSurveyMemory(term)) continue;
+async function repairSurveyTerms(run, terms, assets, { report = () => {}, failedPairs = null, retried } = {}) {
+  const segments = run.segments.map(segment => ({ ...segment }));
+  const repair = { verifiedMemoryOnly: true, changed: [], skipped: [] };
+  const plans = new Map(), allTerms = [...terms, ...(assets.terms || [])];
+  const candidates = failedPairs === null ? terms : terms.filter(term => retried.has(term.source) || failedPairs.some(pair => pair.source === term.source));
+  for (const term of candidates) {
+    const pending = failedPairs?.filter(pair => pair.source === term.source);
+    if (!verifiedSurveyMemory(term)) { if (pending?.length) repair.skipped.push(...pending); continue; }
     const target = term.tm.target;
-    const variants = [...new Set([term.suggestedTarget, term.initialTarget, ...(run.runnerOptions?.workingGlossary?.conflicts || []).filter((item) => normalizeSource(item.source) === normalizeSource(term.source)).map((item) => item.ignored)])].filter((item) => item && normalizeSource(item) !== normalizeSource(target));
+    const variants = [...new Set([term.suggestedTarget, term.initialTarget, ...(run.runnerOptions?.workingGlossary?.conflicts || [])
+      .filter(item => normalizeSource(item.source) === normalizeSource(term.source)).map(item => item.ignored)])]
+      .filter(value => value && normalizeSource(value) !== normalizeSource(target));
     for (const segment of segments) {
-      if (segment.selected === false || !segment.translation || !surveyTermApplies(segment.source, term.source, [...terms, ...(assets.terms || [])])) continue;
-      if (segment.accepted === true) continue;
-      const before = segment.translation;
-      if (textContainsTerm(before, target) && !variants.some((variant) => !target.includes(variant) && before.includes(variant))) continue;
-      let after = before;
+      const pair = pending?.find(item => item.segmentId === segment.id);
+      if (pending && !retried.has(term.source) && !pair) continue;
+      if (pair?.before && pair.before !== segment.translation) { repair.skipped.push({ ...pair, reason: "译文已另行修改，请查看当前译段" }); continue; }
+      if (segment.selected === false || segment.accepted || !segment.translation || !surveyTermApplies(segment.source, term.source, allTerms)) continue;
+      const alreadyApplied = textContainsTerm(segment.translation, target) && !variants.some(v => !target.includes(v) && segment.translation.includes(v));
+      if (alreadyApplied) continue;
+      if (!plans.has(segment.id)) plans.set(segment.id, { segment, translation: segment.translation, terms: [], targets: [], revise: false });
+      const plan = plans.get(segment.id);
+      plan.terms.push(term);
+      plan.targets.push(target);
+      const prior = plan.translation;
       for (const from of variants) {
-        if (target.includes(from) && before.includes(target)) continue;
-        const replaced = applyDeterministicReplacement({ translation: after, from, to: target, protectedTokens: extractProtectedTokens(segment.source) });
-        if (replaced.ok) after = replaced.value;
+        if (target.includes(from) && plan.translation.includes(target)) continue;
+        const replacement = applyDeterministicReplacement({ translation: plan.translation, from, to: target, protectedTokens: extractProtectedTokens(segment.source) });
+        if (replacement.ok) plan.translation = replacement.value;
       }
-      try {
-        if (after === before) after = await reviseSegmentForConsistency({ run, segment, assets, source: term.source, target, reason: term.tm.reason });
-        if (JSON.stringify(extractProtectedTokens(before)) !== JSON.stringify(extractProtectedTokens(after)) || digitSequence(before) !== digitSequence(after)) throw new Error("统一译法改变了保护标记或数字，已保留原译文");
-        const qa = await translateBatchSegment({ projectId: run.projectId, batchId: run.batchId, source: segment.source, translation: after,
-          locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general", domain: run.domain || "auto", workingTerms: [], aiQa: true }, "/api/qa");
-        if (!qa.aiQa?.used || qa.aiQa.fallbackReason || qa.aiQa.status !== "passed") throw new Error(qa.aiQa?.fallbackReason || "术语修订未通过模型 QA，已保留原译文");
-        after = qa.translation || after;
-        if (JSON.stringify(extractProtectedTokens(before)) !== JSON.stringify(extractProtectedTokens(after)) || digitSequence(before) !== digitSequence(after)) throw new Error("QA 修订改变了保护标记或数字，已保留原译文");
-        const checked = { ...segment, result: { ...segment.result, matches: matchTerms(segment.source, assets, { exactOnly: true, contentType: run.contentType, domain: run.domain }) } };
-        const priorIssues = consistencySegmentIssues(run, checked, before);
-        const introduced = consistencySegmentIssues(run, checked, after).filter((issue) => issue.severity === "error" && !priorIssues.some((old) => old.severity === "error" && old.type === issue.type));
-        if (!after || !textContainsTerm(after, target) || introduced.length) throw new Error(introduced[0]?.message || "未能核实统一后的译法");
-        const change = { segmentId: segment.id, source: term.source, target, before, after, evidence: term.tm };
-        segment.translation = after;
-        segment.result = { ...segment.result, translation: after, qaScore: qa.qaScore, issues: qa.issues || [], aiQa: qa.aiQa, termSurveyRepair: change };
-        repair.changed.push(change);
-      } catch (error) { repair.skipped.push({ segmentId: segment.id, source: term.source, reason: error.message }); }
+      if (plan.translation === prior && !textContainsTerm(plan.translation, target)) plan.revise = true;
     }
     term.suggestedTarget = target;
   }
-  await syncConsistencyRepairRecords({ run, changes: repair.changed, segments });
+  const items = segments.flatMap(s => plans.has(s.id) ? [plans.get(s.id)] : []);
+  const skip = (plan, reason) => repair.skipped.push(...plan.terms.map(t => ({ segmentId: plan.segment.id, source: t.source, before: plan.segment.translation, reason })));
+  const validate = (plan, after) => {
+    const before = plan.segment.translation;
+    if (!after || JSON.stringify(extractProtectedTokens(before)) !== JSON.stringify(extractProtectedTokens(after)) || digitSequence(before) !== digitSequence(after)) throw new Error("统一译法改变了保护标记或数字，已保留原译文");
+    if (plan.targets.some(target => !textContainsTerm(after, target))) throw new Error("未能核实统一后的译法");
+  };
+  // 已有依据且原稿已采用的其他术语，也不能被本次修订改掉。
+  for (const plan of items) {
+    for (const term of terms) {
+      if (verifiedSurveyMemory(term) && textContainsTerm(plan.segment.translation, term.tm.target) && surveyTermApplies(plan.segment.source, term.source, allTerms) && !plan.targets.includes(term.tm.target)) plan.targets.push(term.tm.target);
+    }
+  }
+  report({ phase: "repairing", completed: 0, total: items.length, percent: 75, message: `正在统一术语：${items.length} 段` });
+  const revisions = await runFollowupGroups(run, items.filter(p => p.revise || p.targets.some(target => !textContainsTerm(p.translation, target))), "AIQA 修订", plan => {
+    const requirements = plan.terms.map(t => ({ source: t.source, target: t.tm.target, reason: t.tm.reason }));
+    return reviseSegmentForConsistency({ run, segment: plan.segment, assets, ...requirements[0], requirements });
+  });
+  const checking = [];
+  for (const plan of items) {
+    const revised = revisions.get(plan.segment.id);
+    try {
+      if (revised?.error) throw revised.error;
+      if (revised) plan.translation = revised.value;
+      validate(plan, plan.translation);
+      checking.push(plan);
+    } catch (error) { skip(plan, error.message); }
+  }
+  let completed = 0;
+  const checked = await runFollowupGroups(run, checking, "AIQA", async plan => {
+    try {
+      const s = plan.segment;
+      return await translateBatchSegment({ projectId: run.projectId, batchId: run.batchId, segmentId: s.id, source: s.source, translation: plan.translation,
+        locale: run.locale, contentType: s.result?.segmentPurpose || run.contentType || "general", domain: run.domain || "auto", workingTerms: [], aiQa: true }, "/api/qa");
+    } finally {
+      completed++;
+      report({ phase: "repairing", completed, total: checking.length, percent: 75 + Math.round(20 * completed / checking.length), message: `术语改后 QA：${completed} / ${checking.length} 段` });
+    }
+  });
+  for (const plan of checking) {
+    const segment = plan.segment, before = segment.translation, result = checked.get(segment.id);
+    try {
+      if (result.error) throw result.error;
+      const qa = result.value;
+      if (!qa.aiQa?.used || qa.aiQa.fallbackReason || qa.aiQa.status !== "passed") throw new Error(qa.aiQa?.fallbackReason || "术语修订未通过模型 QA，已保留原译文");
+      const after = qa.translation || plan.translation;
+      validate(plan, after);
+      const current = { ...segment, result: { ...segment.result, matches: matchTerms(segment.source, assets, { exactOnly: true, contentType: run.contentType, domain: run.domain }) } };
+      const prior = consistencySegmentIssues(run, current, before);
+      const issue = consistencySegmentIssues(run, current, after).find(i => i.severity === "error" && !prior.some(p => p.severity === "error" && p.type === i.type));
+      if (issue) throw new Error(issue.message);
+      const changes = plan.terms.map(t => ({ segmentId: segment.id, source: t.source, target: t.tm.target, before, after, evidence: t.tm }));
+      segment.translation = after;
+      segment.result = { ...segment.result, translation: after, qaScore: qa.qaScore, issues: qa.issues || [], aiQa: qa.aiQa, termSurveyRepair: changes.at(-1) };
+      repair.changed.push(...changes);
+    } catch (error) { skip(plan, error.message); }
+  }
+  const seen = new Set();
+  const changes = repair.changed.filter(change => !seen.has(change.segmentId) && seen.add(change.segmentId));
+  await syncConsistencyRepairRecords({ run, changes, segments, existingOnly: failedPairs !== null });
   return { segments, repair };
 }
 
 /** 起一个术语普查后台任务；同一批次已在跑时直接复用。 */
-function startTermSurvey(batchId) {
+function startTermSurvey(batchId, failedOnly = false) {
   const running = termSurveyTasks.get(batchId);
   if (running) return running;
   const tracked = (async () => {
@@ -4351,7 +4489,8 @@ function startTermSurvey(batchId) {
     });
     try {
       await attachBatchWorkflowTask(batchId, "termSurvey", task.id);
-      const outcome = await runTermSurvey(batchId, { taskId: task.id });
+      const evidenceCache = { batchId, guides: new Map(), snippets: new Map() };
+      const outcome = await withRuntimeCall({ evidenceCache, followupOnly: true }, () => runTermSurvey(batchId, { taskId: task.id, failedOnly }));
       await updateBackgroundTaskProgress(task.id, {
         status: outcome.failures.length ? "needs_attention" : "completed",
         progress: {
@@ -4590,6 +4729,49 @@ function startBatchWorker(batchId, backgroundTaskId = "", segmentIds = null) {
 async function apiHandler(req, res, url) {
   const lockedBatch = /^\/api\/batch\/run\/([^/]+)/u.exec(url.pathname)?.[1];
   if (req.method !== "GET" && lockedBatch && reviewFinalLocks.has(decodeURIComponent(lockedBatch))) return json(res, 409, { error: "人工终稿正在关联，请稍后重试" });
+  if (/^\/api\/batch\/run\/[^/]+\/export-repair$/u.test(url.pathname) && ["GET", "POST"].includes(req.method)) {
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const body = req.method === "POST" ? await readJsonBody(req) : {};
+    const run = await getBatchRun(batchId);
+    const projectId = body.projectId || url.searchParams.get("projectId");
+    if (!run || !projectId || projectId !== run.projectId) return json(res, 404, { error: "未找到当前项目的批次" });
+    if (!["xliff", "mqxliff"].includes(run.format)) return json(res, 400, { error: "此批次不是 XLIFF 格式" });
+    const issues = xliffExportIssues(run.segments);
+    if (req.method === "GET") {
+      const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset"))) || 0);
+      const limit = Math.max(1, Math.min(50, Math.trunc(Number(url.searchParams.get("limit"))) || 10));
+      return json(res, 200, { total: issues.length, offset, issues: issues.slice(offset, offset + limit).map(issue => {
+        const { source, translation } = run.segments[issue.index - 1];
+        return { ...issue, source, translation };
+      }) });
+    }
+    if (reviewFinalLocks.has(batchId) || batchWorkers.has(batchId) || batchQaWorkers.has(batchId) || batchTranslationStarts.has(batchId) || batchQaStarts.has(batchId) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId) || contextAnalysisTasks.has(batchId)) return json(res, 409, { error: "批次正在处理，请稍后修复" });
+    reviewFinalLocks.add(batchId);
+    try {
+      const current = await getBatchRun(batchId);
+      const segment = current.segments.find(item => item.id === body.segmentId);
+      if (!segment || segment.accepted || !xliffExportIssues([segment]).length || segment.translation !== body.before) return json(res, 409, { error: "译段已变更、已确认或已修复，请重新检查" });
+      const after = typeof body.translation === "string" ? body.translation.trim() : "";
+      if (!after) return json(res, 400, { error: "修复译文不能为空" });
+      const original = await readBatchOriginal({ dataRoot: runtimeOptions().dataDirectory || DATA_ROOT, relativePath: current.runnerOptions?.originalFile });
+      if (!original) return json(res, 409, { error: "缺少原文件快照，无法验证修复" });
+      exportXliffDocument({ filename: current.filename, segments: [{ ...segment, translation: after }], base64: original.toString("base64") });
+      const oldIssues = consistencySegmentIssues(current, segment, segment.translation);
+      const checked = consistencySegmentIssues(current, segment, after);
+      const introduced = checked.find(issue => (issue.severity === "error" || issue.type === "number_drift") && !oldIssues.some(old => old.type === issue.type && old.message === issue.message));
+      if (introduced) return json(res, 422, { error: introduced.message });
+      const change = { segmentId: segment.id, before: segment.translation, after, at: new Date().toISOString(), source: segment.source, reviewer: "Agent" };
+      segment.translation = after;
+      segment.result = { ...segment.result, translation: after, qaScore: null, qa: null, issues: checked, aiQa: { used: false, status: "not_run", score: null }, exportRepair: change };
+      if (current.qualityReport?.report) {
+        const previous = current.qualityReport.report;
+        current.qualityReport.report = buildQualityReport({ ...current, brief: current.contextBrief, findings: current.qualityReport.findings, provider: { model: previous.model }, styleProfile: previous.styleProfile });
+      }
+      await saveBatchRun(current);
+      await syncConsistencyRepairRecords({ run: current, changes: [change], segments: [segment], existingOnly: true });
+      return json(res, 200, { segmentId: segment.id, fixed: true, remaining: xliffExportIssues(current.segments).length });
+    } finally { reviewFinalLocks.delete(batchId); }
+  }
   if (req.method === "GET" && url.pathname === "/api/health") {
     return json(res, 200, { ok: true, version: "0.7.0", locales: ACTIVE_LOCALES, backend: getStoreMetadata() });
   }
@@ -7102,18 +7284,23 @@ async function apiHandler(req, res, url) {
       });
     }
     if (req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (body.failedOnly !== undefined && typeof body.failedOnly !== "boolean") return json(res, 400, { error: "failedOnly 必须是布尔值" });
       // 手动（重新）分析：立即返回，进度走 GET 轮询与任务中心；
       // 已在跑时服务端会复用同一次任务，不重复烧额度。
       if (batchWorkers.has(batchId) || batchTranslationStarts.has(batchId) || batchQaWorkers.has(batchId) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId) || reviewFinalLocks.has(batchId)) return json(res, 409, { error: "批次正在翻译、质检或关联人工终稿，请完成后再重试语境分析" });
       const alreadyRunning = contextAnalysisTasks.has(batchId);
-      if (!alreadyRunning) startContextAnalysis(batchId).catch((error) => console.error("[Kami] 语境分析任务异常", error));
+      if (body.failedOnly && (body.projectId !== run.projectId || !run.contextBrief?.retryParts?.failed?.length || run.contextBrief.editedAt)) return json(res, 409, { error: "没有可定位的失败语境分片" });
+      if (!alreadyRunning) startContextAnalysis(batchId, body.failedOnly === true).catch((error) => console.error("[Kami] 语境分析任务异常", error));
       return json(res, 202, { batchId, pending: true, alreadyRunning });
     }
     if (req.method === "PATCH") {
       // 人工修正：用途区间、注意点与整体结论都可以改，改完立即对后续翻译生效。
       const body = await readJsonBody(req);
       const current = run.contextBrief || { version: 1, status: "ready", generatedAt: new Date().toISOString() };
+      if (contextAnalysisTasks.has(batchId)) return json(res, 409, { error: "语境分析正在进行，请完成后再保存" });
       const next = { ...current };
+      delete next.retryParts;
       if (body.documentType && typeof body.documentType === "object") {
         next.documentType = { ...(current.documentType || {}), ...body.documentType };
       }
@@ -7156,14 +7343,19 @@ async function apiHandler(req, res, url) {
     const run = await getBatchRun(batchId);
     if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
     if (req.method === "GET") {
-      return json(res, 200, { batchId, pending: consistencyCheckTasks.has(batchId), ...(run.qualityReport || { report: null, findings: [] }) });
+      return json(res, 200, { batchId, pending: consistencyCheckTasks.has(batchId), ...(run.qualityReport || { report: null, findings: [] }), chunkResults: undefined });
     }
     if (req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (body.failedOnly !== undefined && typeof body.failedOnly !== "boolean") return json(res, 400, { error: "failedOnly 必须是布尔值" });
+      if (contextAnalysisTasks.has(batchId) || reviewFinalLocks.has(batchId)) return json(res, 409, { error: "批次正在分析语境、修复或关联终稿，请稍后重试" });
       // 同上：核对要跑几十次模型调用，不能挂在请求上等。
-      if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "QA 重试正在进行，请结束后再单独运行一致性检查" });
+      if (batchWorkers.has(batchId) || batchTranslationStarts.has(batchId) || batchQaStarts.has(batchId) || batchQaWorkers.has(batchId)) return json(res, 409, { error: "翻译或 QA 重试正在进行，请结束后再单独运行一致性检查" });
       if (termSurveyTasks.has(batchId)) return json(res, 409, { error: "术语普查正在统一译文，请完成后再运行一致性检查" });
       const alreadyRunning = consistencyCheckTasks.has(batchId);
-      if (!alreadyRunning) startConsistencyCheck(batchId).catch((error) => console.error("[Kami] 一致性核对任务异常", error));
+      if (body.failedOnly && body.projectId !== run.projectId) return json(res, 404, { error: "未找到当前项目的批次任务" });
+      if (body.failedOnly && !consistencyRetryWork(run).count) return json(res, 200, { count: 0, message: "没有可定位的一致性失败项" });
+      if (!alreadyRunning) startConsistencyCheck(batchId, body.failedOnly === true).catch((error) => console.error("[Kami] 一致性核对任务异常", error));
       return json(res, 202, { batchId, pending: true, alreadyRunning });
     }
     return json(res, 405, { error: "不支持的方法" });
@@ -7173,10 +7365,15 @@ async function apiHandler(req, res, url) {
     const batchId = decodeURIComponent(url.pathname.split("/")[4]);
     const run = await getBatchRun(batchId);
     if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
-    if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后可手动运行术语普查" });
-    if (batchWorkers.has(batchId) || reviewFinalLocks.has(batchId) || consistencyCheckTasks.has(batchId)) return json(res, 409, { error: "批次正在翻译、核对或关联人工终稿，请完成后再做术语普查" });
+    const body = await readJsonBody(req);
+    if (body.failedOnly !== undefined && typeof body.failedOnly !== "boolean") return json(res, 400, { error: "failedOnly 必须是布尔值" });
+    if (batchQaStarts.has(batchId) || batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后可手动运行术语普查" });
+    if (batchWorkers.has(batchId) || batchTranslationStarts.has(batchId) || contextAnalysisTasks.has(batchId) || reviewFinalLocks.has(batchId) || consistencyCheckTasks.has(batchId)) return json(res, 409, { error: "批次正在处理，请完成后再做术语普查" });
     const alreadyRunning = termSurveyTasks.has(batchId);
-    if (!alreadyRunning) startTermSurvey(batchId).catch((error) => console.error("[Kami] 术语普查任务异常", error));
+    if (body.failedOnly && (!body.projectId || body.projectId !== run.projectId || !run.runnerOptions?.termSurvey?.repair?.verifiedMemoryOnly)) return json(res, 409, { error: "没有可定位的术语失败记录" });
+    if (body.failedOnly && !(run.runnerOptions.termSurvey.repair.skipped?.length || run.runnerOptions.termSurvey.terms.some(t => t.tm?.status === "failed"))) return json(res, 200, { count: 0, message: "没有待重试的术语" });
+    if (body.failedOnly && run.segments.some(segment => segment.accepted)) return json(res, 409, { error: "批次已含人工终稿，无法自动修订" });
+    if (!alreadyRunning) startTermSurvey(batchId, body.failedOnly === true).catch((error) => console.error("[Kami] 术语普查任务异常", error));
     return json(res, 202, { batchId, pending: true, alreadyRunning });
   }
   if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/pause$/u.test(url.pathname)) {
@@ -7580,6 +7777,10 @@ async function apiHandler(req, res, url) {
     return json(res, 200, {
       ...run,
       segments,
+      ...(run.contextBrief?.retryParts ? { contextBrief: { ...run.contextBrief, retryParts: { failed: run.contextBrief.retryParts.failed } } } : {}),
+      exportIssues: ["mqxliff", "xliff"].includes(run.format) ? xliffExportIssues(run.segments) : [],
+      ...(run.qualityReport?.chunkResults ? { qualityReport: { ...run.qualityReport, chunkResults: undefined } } : {}),
+      consistencyRetryCount: consistencyRetryWork(run).count,
       // 术语普查界面数据：模型建议 / 机器稿实际用法 / 人工终稿 / 术语库登记 / 回填处理结果。
       workflow: await loadBatchWorkflow({ ...run, segments }),
       termSurvey: buildTermSurveyView({

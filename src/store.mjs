@@ -63,7 +63,7 @@ import {
   deleteDirectusBackgroundTask,
   saveDirectusMemory,
   saveDirectusMemories,
-  listDirectusMemoryIndexRows,
+  listDirectusMemoryIndexRows, listSurveyMemoryRows,
   getDirectusMemoriesByIds,
   saveDirectusQaCase,
   saveDirectusQaRun,
@@ -2189,6 +2189,13 @@ export async function persistImportCleaning(batchId, payload) {
 
 export async function completeImport(batchId, decisions, summary) {
   return usesDirectus() ? completeDirectusImport(batchId, decisions, summary) : completeJsonImport(batchId, decisions, summary);
+}
+
+export async function getSurveyMemoryRows(locale, projectId, libraryIds) {
+  if (!libraryIds.length) return [];
+  if (usesDirectus()) return listSurveyMemoryRows(locale, projectId, libraryIds);
+  const enabled = new Set(libraryIds);
+  return (await getJsonMemories(locale, { projectId, limit: 0 })).filter(row => String(row.projectId || "") === projectId && enabled.has(row.libraryId));
 }
 
 export async function getMemories(locale, options) {

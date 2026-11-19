@@ -5,6 +5,7 @@ import { isTransientConnectionError, retryTransient } from "./transient-errors.m
 import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
 import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { verifiedSurveyMemory } from "./term-memory-survey.mjs";
+import { runFollowupGroups } from "./followup-batch.mjs";
 import { batchQaRetryStage, isIncompleteBatchQa, isIncompleteBatchStage, segmentWorkflowComplete } from "../public/batch-status.js";
 import { translationRetryReason } from "./translation-output.mjs";
 import { microBatchSegments } from "./micro-batch.mjs";
@@ -345,7 +346,7 @@ export async function runServerBatch(batchId, {
 }
 
 /** 只重跑已有译文中未完成的 AIQA，逐段保存；成功段与翻译失败段不改。 */
-export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSegment, stage = null, segmentIds = null, shouldCancel = () => false, report = async () => {} } = {}) {
+export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSegment, groupModelQa = false, stage = null, segmentIds = null, shouldCancel = () => false, report = async () => {} } = {}) {
   let run = await loadRun(batchId);
   if (!run) throw new Error("未找到批次任务");
   const ids = segmentIds ? new Set(segmentIds.map(String)) : null;
@@ -358,6 +359,10 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
   let completed = 0;
   let failed = 0;
   await report({ completed, failed, total: targets.length });
+  const checked = groupModelQa && await runFollowupGroups(run, targets.filter(s => retryKind(s) === "modelQa").map(segment => ({ segment, translation: segment.translation })), "AIQA", ({ segment, translation }) => recheckSegment({
+    projectId: run.projectId, source: segment.source, translation, locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
+    domain: run.domain || "auto", batchId, segmentId: segment.id, workingTerms: [], aiQa: true
+  }));
   for (const target of targets) {
     if (shouldCancel()) break;
     run = await loadRun(batchId);
@@ -368,7 +373,9 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
       const originalTranslation = segment.translation;
       let update;
       try {
-        const qa = await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
+        const prior = checked && target.translation === originalTranslation && kind === "modelQa" && checked.get(segment.id);
+        if (prior?.error) throw prior.error;
+        const qa = prior?.value || await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
           locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
           domain: run.domain || "auto", batchId, segmentId: segment.id,
           ...(kind !== "modelQa" ? { workflowStage: kind, stages: segment.result.stages,

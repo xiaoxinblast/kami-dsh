@@ -270,7 +270,7 @@ export function partitionTranslationMemories(memories = [], context = {}, option
   };
 }
 
-function comparableText(value, caseSensitive) {
+export function comparableText(value, caseSensitive = false) {
   const normalized = String(value || "")
     .normalize("NFKC")
     .replace(/[\u200B-\u200D\uFEFF]/gu, "")

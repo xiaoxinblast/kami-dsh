@@ -54,7 +54,7 @@ function evidenceLines(evidence = null) {
   const styleText = style
     ? [
       `风格规范：${clip(style.name, 80) || "未命名"}${style.version ? ` · 版本 ${style.version}` : ""}`,
-      style.instruction ? `规范说明：${clip(style.instruction, 600)}` : "",
+      style.instruction ? `规范说明：${style.instruction}` : "",
       (Array.isArray(style.rules) ? style.rules : []).slice(0, CONSISTENCY_EVIDENCE_LIMITS.styleRules).length
         ? `规范要点：\n${(style.rules || []).slice(0, CONSISTENCY_EVIDENCE_LIMITS.styleRules).map((rule) => `· ${clip(rule, 140)}`).join("\n")}`
         : "",
@@ -163,10 +163,11 @@ function parseFindingEvidence(list = []) {
 /** 解析一片结论；引用了本片之外条目 id 的发现整条丢弃，宁可少报也不误报。 */
 export function parseConsistencyFindings(content, { validIds = [] } = {}) {
   const payload = extractJsonObject(content);
+  if (!Array.isArray(payload.findings)) throw new Error("一致性检查缺少 findings 数组");
   const allowed = new Set((Array.isArray(validIds) ? validIds : []).map(String));
   const findings = [];
   const dropped = [];
-  for (const item of Array.isArray(payload.findings) ? payload.findings : []) {
+  for (const item of payload.findings) {
     const ids = [...new Set((Array.isArray(item?.ids) ? item.ids : []).map(String).filter((id) => allowed.has(id)))];
     const detail = clip(item?.detail);
     if (!detail || ids.length < 2) {
