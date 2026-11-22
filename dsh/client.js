@@ -152,7 +152,8 @@ window.__ModuleLoader__.load({
     }
     function newView(workspace = "", projectId = "") {
       return { workspace, projectId, files: [], tasks: [], knownFiles: false, newBatches: [], selectedId: "", manual: false, run: null, drafts: {}, exports: {},
-        pendingSelection: null, operations: {}, sections: {}, loadSerial: 0 };
+        pendingSelection: null, operations: {}, sections: {}, loadSerial: 0,
+        logs: { level: "", search: "", runtime: [], thinking: [], settings: null, stats: null, texts: {}, loading: false, error: "" } };
     }
     class WorkbenchModel {
       constructor({ sessionId, call, prompt, modelCatalog, selectModel, visible = true }) {
@@ -239,6 +240,37 @@ window.__ModuleLoader__.load({
           const value = await this.invoke(this.path(`/api/batch/run/${encodeURIComponent(id)}`, {}, token), "GET", undefined, token);
           if (this.valid(token) && token.view.selectedId === id && serial === token.view.loadSerial) { token.view.run = value.run || value; this.emit(); }
         } catch (error) { if (this.valid(token)) throw error; }
+      }
+      async loadLogs(token = this.capture()) {
+        const logs = token.view.logs;
+        logs.loading = true; logs.error = ""; this.emit();
+        try {
+          const [runtime, thinking] = await Promise.all([
+            this.invoke(this.path("/api/logs", { level: logs.level || "", search: logs.search || "", limit: 200 }, token), "GET", undefined, token),
+            this.invoke(this.path("/api/logs/thinking", { search: logs.search || "", limit: 100 }, token), "GET", undefined, token)
+          ]);
+          if (!this.valid(token)) return;
+          logs.runtime = runtime.entries || []; logs.settings = runtime.settings || null;
+          logs.thinking = thinking.entries || []; logs.stats = thinking.stats || null;
+        } catch (error) {
+          if (this.valid(token)) logs.error = error.message;
+        } finally {
+          logs.loading = false;
+          if (this.valid(token)) this.emit();
+        }
+      }
+      async loadThinkingText(id, token = this.capture()) {
+        const value = await this.invoke(`/api/logs/thinking/${encodeURIComponent(id)}`, "GET", undefined, token);
+        if (!this.valid(token)) return;
+        token.view.logs.texts[id] = value.entry?.text || "";
+        this.emit();
+      }
+      clearLogCache(scope) {
+        return this.perform("logs-clear", async (token) => {
+          await this.request({ action: "logs", scope }, token);
+          await this.loadLogs(token);
+          return "已清空";
+        }, true);
       }
       async activate(id) {
         delete this.view.operations.save;
@@ -505,7 +537,7 @@ window.__ModuleLoader__.load({
       @container(max-width:460px){.kami .flow-row,.kami .flow-batch .flow-row{grid-template-columns:minmax(0,1fr);gap:14px}.kami button.flow-node{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;padding:10px 12px}.kami .flow-node-top{grid-column:1/-1}.kami .flow-hint{grid-column:1}.kami .flow-count{grid-column:2;grid-row:2/4;border:0;padding:0;align-self:center}.kami .flow-node:not(:last-child):after{content:"↓";right:50%;top:auto;bottom:-15px}.kami .flow-group-title>span{font-size:10px}.kami .flow-status{font-size:10px}}
       @container(max-width:360px){.kami .body{padding:14px 12px 22px}.kami .masthead{padding:14px 12px 0}.kami .connection-label{display:none}.kami h1{font-size:15px}.kami .project-chip{max-width:35%}.kami .card{padding:12px}.kami .stages{gap:4px}.kami .quick-submit{align-items:stretch;flex-direction:column}}
       .kami{--kami-accent:color-mix(in srgb,#82ad98 45%,var(--dsw-alias-label-primary));--kami-tint:color-mix(in srgb,#82ad98 9%,var(--dsw-alias-bg-layer-2));--kami-warning:color-mix(in srgb,#c99d59 55%,var(--dsw-alias-label-primary))}
-      .kami .masthead{border-bottom:1px solid var(--dsw-alias-border-l2)}.kami nav.main-nav{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;padding:0 0 12px;border:0}.kami .main-nav>button{padding:9px 6px;gap:8px;border-radius:10px}.kami .main-nav>button[aria-pressed=true]{background:var(--kami-tint);box-shadow:inset 0 0 0 1px color-mix(in srgb,#82ad98 65%,var(--dsw-alias-border-l2));color:var(--kami-accent)}
+      .kami .masthead{border-bottom:1px solid var(--dsw-alias-border-l2)}.kami nav.main-nav{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;padding:0 0 12px;border:0}.kami .main-nav>button{padding:9px 6px;gap:8px;border-radius:10px}.kami .main-nav>button[aria-pressed=true]{background:var(--kami-tint);box-shadow:inset 0 0 0 1px color-mix(in srgb,#82ad98 65%,var(--dsw-alias-border-l2));color:var(--kami-accent)}
       .kami .page-heading{display:flex;align-items:center;gap:14px;padding:4px 0 8px;min-width:0}.kami .page-heading>div{min-width:0}.kami .page-heading h2{font-size:21px;letter-spacing:0}.kami .page-heading p{margin:5px 0 0;font-size:12px}.kami .page-icon,.kami .surface-icon{display:grid;place-items:center;flex:none;width:46px;height:46px;border:1px solid color-mix(in srgb,#82ad98 30%,var(--dsw-alias-border-l2));border-radius:14px;color:var(--kami-accent);background:var(--kami-tint)}.kami .surface-icon{width:38px;height:38px;border-radius:11px}.kami .panel-heading{display:flex;gap:12px;align-items:center}.kami .panel-heading p{margin:4px 0 0}
       .kami .card{border-radius:14px}.kami .card>summary{font-weight:600;color:var(--dsw-alias-label-primary)}.kami .batch-picker{grid-template-columns:auto minmax(0,1fr);align-items:center;gap:16px;padding:12px 16px}.kami .task-title{margin-top:12px}.kami .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}.kami .metrics>span{display:flex;flex-direction:column;gap:4px;padding:12px;border-radius:10px;background:var(--dsw-alias-bg-layer-1);font-size:11px}.kami .metrics strong{font-size:22px;line-height:1.2;font-variant-numeric:tabular-nums}.kami .badge,.kami .status-pill{border-radius:999px;padding:3px 8px}.kami .status-pill{font-size:11px;white-space:nowrap;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary)}
       .kami .section-tabs{display:flex;gap:6px;padding:6px;border-radius:12px;margin:0}.kami .section-tabs>button{flex:1 1 auto;gap:8px;padding:9px 10px;border:1px solid transparent;border-radius:8px;white-space:normal;text-align:left;min-width:0}.kami .section-tabs>button[aria-pressed=true]{background:var(--kami-tint);border-color:color-mix(in srgb,#82ad98 50%,var(--dsw-alias-border-l2));box-shadow:none;color:var(--kami-accent)}.kami .tab-copy{display:grid;gap:4px;min-width:0}.kami .tab-copy small{font-size:10px;font-weight:400;line-height:1.5;color:var(--dsw-alias-label-secondary)}
@@ -533,7 +565,7 @@ window.__ModuleLoader__.load({
     }
     function Glyph({ name, size = 16 }) {
       const paths = { tasks: "M4 4h12v14H4zM7 8h6M7 12h6", resources: "M3 6h6l2 2h6v9H3z", assets: "m3 6 7-3 7 3-7 3-7-3Zm0 4 7 3 7-3M3 14l7 3 7-3", refresh: "M16 8a6 6 0 1 0 0 5M16 3v5h-5", plus: "M10 4v12M4 10h12", arrow: "M4 10h12M11 5l5 5-5 5", folder: "M3 6h6l2 2h6v9H3z",
-        context: "M3 4h5l2 2 2-2h5v12h-5l-2 2-2-2H3V4Zm7 2v12M5 8h2m-2 4h2m6-4h2m-2 4h2", check: "m4 10 4 4 8-8M3 3h8M3 3v14h14v-6", learning: "M4 16h12M5 13V9m5 4V6m5 7V3M3 5l4-2 4 1 6-2", settings: "M3 5h14M3 10h14M3 15h14M7 3v4m6 1v4m-6 1v4", overview: "M3 3h6v6H3zM12 3h5v6h-5zM3 12h6v5H3zM12 12h5v5h-5z", export: "M10 2v10m-4-4 4 4 4-4M3 12v5h14v-5", search: "M14 8a6 6 0 1 1-12 0 6 6 0 0 1 12 0Zm-2 5 5 5", terms: "M3 4h14M7 4v13M13 4v13M4 10h12", model: "M5 5h10v10H5zM8 8h4v4H8zM7 2v3m6-3v3M7 15v3m6-3v3M2 7h3m-3 6h3m10-6h3m-3 6h3" };
+        context: "M3 4h5l2 2 2-2h5v12h-5l-2 2-2-2H3V4Zm7 2v12M5 8h2m-2 4h2m6-4h2m-2 4h2", check: "m4 10 4 4 8-8M3 3h8M3 3v14h14v-6", learning: "M4 16h12M5 13V9m5 4V6m5 7V3M3 5l4-2 4 1 6-2", settings: "M3 5h14M3 10h14M3 15h14M7 3v4m6 1v4m-6 1v4", logs: "M5 4h11l3 3v13H5zM8 9h8M8 13h8M8 17h5", overview: "M3 3h6v6H3zM12 3h5v6h-5zM3 12h6v5H3zM12 12h5v5h-5z", export: "M10 2v10m-4-4 4 4 4-4M3 12v5h14v-5", search: "M14 8a6 6 0 1 1-12 0 6 6 0 0 1 12 0Zm-2 5 5 5", terms: "M3 4h14M7 4v13M13 4v13M4 10h12", model: "M5 5h10v10H5zM8 8h4v4H8zM7 2v3m6-3v3M7 15v3m6-3v3M2 7h3m-3 6h3m10-6h3m-3 6h3" };
       return h("svg", { width: size, height: size, viewBox: "0 0 20 20", fill: "none", "aria-hidden": true }, h("path", { d: paths[name] || paths.tasks, stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round" }));
     }
     function Button({ children, onClick, primary, disabled, busy, small, quiet, title, className = "" }) {
@@ -1193,8 +1225,8 @@ window.__ModuleLoader__.load({
       useEffect(() => { if (data) setSettings(data.settings || data); }, [data]);
       useEffect(() => { if (project) setProjectSettings(structuredClone(project.settings)); }, [project]);
       const groups = data?.groups || [], rules = project?.qaRuleMetadata || [];
-      const titles = { grouping: "分组翻译", model: "模型", quality: "质量参数", reference: "参考资料", learning: "学习与评测", retrieval: "检索", orthography: "标点", performance: "性能" };
-      const categories = { general: ["folder", "输出目录与数据备份"], qa: ["check", "规则开关与严重度"], model: ["model", "模型选择与输出预算"], quality: ["check", "评分与质量阈值"], reference: ["context", "原件查阅与工具轮数"], learning: ["learning", "样本积累与评测"], retrieval: ["search", "资源匹配与检索"], orthography: ["terms", "文字与标点规范"], performance: ["settings", "任务执行参数"] };
+      const titles = { grouping: "分组翻译", model: "模型", quality: "质量参数", reference: "参考资料", learning: "学习与评测", retrieval: "检索", orthography: "标点", performance: "性能", logs: "日志" };
+      const categories = { general: ["folder", "输出目录与数据备份"], qa: ["check", "规则开关与严重度"], model: ["model", "模型选择与输出预算"], quality: ["check", "评分与质量阈值"], reference: ["context", "原件查阅与工具轮数"], learning: ["learning", "样本积累与评测"], retrieval: ["search", "资源匹配与检索"], orthography: ["terms", "文字与标点规范"], performance: ["settings", "任务执行参数"], logs: ["logs", "运行日志与模型思考"] };
       const tabs = [{ id: "general", title: "常规与备份" }, { id: "qa", title: "QA 规则" }, ...groups.map((group) => ({ id: group.group, title: titles[group.group] || group.fields[0]?.label || group.group }))];
       categories.grouping = ["tasks", "初译与校对的分组上限"];
       const group = groups.find((item) => item.group === active), qa = active === "qa", saving = model.view.operations[qa ? "qa-settings-save" : "settings-save"]?.pending;
@@ -1238,6 +1270,7 @@ window.__ModuleLoader__.load({
               h("p", { className: "muted" }, t("不预先拆分片段或建立全文索引。Office、PDF 和图片由对应工具读取，返回容量由原生工具控制。")),
               h("p", null, t("人工风格指南是必读规范，关闭参考资料不会跳过指南。指南读取失败时任务报错，不会把查阅说明保存为译文。")),
               h("p", { className: "muted" }, t("保存后用于后续翻译与质检查阅；已开始的查阅沿用启动时的轮数。"))),
+            active === "logs" && h(LogsControls, { model, t }),
             settings && group && h("div", { className: "card settings-fields" }, ...group.fields.filter((field) => active !== "reference" || ["reference.enabled", "reference.nativeMaxRounds"].includes(field.path)).map((field) => {
               const keys = field.path.split("."), value = keys.reduce((object, key) => object?.[key], settings), boolean = typeof value === "boolean";
               const change = (next) => { const updated = structuredClone(settings); let object = updated; for (const key of keys.slice(0, -1)) object = object[key] ??= {}; object[keys.at(-1)] = next; setSettings(updated); };
@@ -1266,14 +1299,66 @@ window.__ModuleLoader__.load({
         h(Button, { primary: true, small: true, disabled: current && (editingLocked(model.view.run) || model.view.run.contextBriefPending || model.dirty() || verb === "term-survey" && model.view.run.segments.some(segment => segment.accepted)), busy: model.view.operations[operation]?.pending, onClick: handle }, t(current ? label : "查看待处理任务")),
         current && model.view.operations[operation]?.error && h(Feedback, { model, name: operation, t }));
     }
+    function LogsControls({ model, t }) {
+      const logs = model.view.logs;
+      const settings = logs.settings, stats = logs.stats || settings?.thinking || null;
+      const [confirming, setConfirming] = useState("");
+      useEffect(() => { if (!settings) model.loadLogs(); }, [model]);
+      const clear = (scope) => {
+        if (confirming !== scope) { setConfirming(scope); return; }
+        setConfirming("");
+        model.clearLogCache(scope);
+      };
+      return h("section", { className: "card stack" },
+        h("div", null, h("h3", null, t("日志与缓存")), h("p", { className: "muted" }, t("运行日志和模型思考只写在本机，不上传，也不进入后续提示词；清空只影响排查记录，不影响批次、术语和译文。"))),
+        h("p", { className: "muted" }, `${t("运行日志")} ${sizeText(settings?.fileBytes || 0)} · ${t("模型思考")} ${sizeText(stats?.totalBytes || 0)}`),
+        h("div", { className: "button-row" },
+          h(Button, { small: true, onClick: () => clear("thinking") }, t(confirming === "thinking" ? "确认清空模型思考" : "清空模型思考")),
+          h(Button, { small: true, onClick: () => clear("runtime") }, t(confirming === "runtime" ? "确认清空运行日志" : "清空运行日志")),
+          h(Button, { small: true, primary: true, onClick: () => clear("all") }, t(confirming === "all" ? "确认全部清空" : "全部清空"))),
+        h(Feedback, { model, name: "logs-clear", t }));
+    }
+    function LogsView({ model, t }) {
+      const logs = model.view.logs;
+      const [tab, setTab] = useState("runtime"), [query, setQuery] = useState(logs.search || "");
+      useEffect(() => { model.loadLogs(); }, [model, model.scopeKey, model.visible]);
+      const search = () => { logs.search = query; return model.loadLogs(); };
+      const levelLabel = { debug: "调试", info: "信息", warn: "警告", error: "错误" };
+      const runtimeRows = (logs.runtime || []).map((entry, index) => h("article", { className: "card stack", key: `${entry.ts}-${index}` },
+        h("div", { className: "section-heading" }, h("span", { className: "badge" }, t(levelLabel[entry.level] || entry.level)), h("span", { className: "muted" }, timeText(entry.ts)), entry.kind === "thinking" && h("span", { className: "badge" }, t("模型思考"))),
+        h("p", null, entry.message),
+        entry.detail && h("p", { className: "muted" }, entry.detail)));
+      const thinkingRows = (logs.thinking || []).map((item) => h("article", { className: "card stack", key: item.id },
+        h("div", { className: "section-heading" }, h("strong", null, item.label), h("span", { className: "muted" }, timeText(item.ts))),
+        h("p", { className: "muted" }, [item.model || "—", item.effort || "默认强度", `${item.chars} 字`, item.truncated ? "已截断" : "", item.context?.batchId ? `批次 ${item.context.batchId}` : "", item.context?.segmentId ? `句段 ${item.context.segmentId}` : ""].filter(Boolean).join(" · ")),
+        item.snippet && h("p", null, item.snippet),
+        h("div", { className: "button-row" },
+          h(Button, { small: true, onClick: () => model.loadThinkingText(item.id) }, t("查看思考")),
+          logs.texts[item.id] && h(Button, { small: true, quiet: true, onClick: () => navigator.clipboard?.writeText(logs.texts[item.id]) }, t("复制全文"))),
+        logs.texts[item.id] && h("pre", null, logs.texts[item.id])));
+      const rows = tab === "thinking" ? thinkingRows : runtimeRows;
+      return h("div", { className: "stack logs-view" },
+        h(PageHeading, { icon: "logs", title: "日志", description: "后台报错、任务进度，以及每次模型调用的思考，都留在这里。", t }),
+        h(LogsControls, { model, t }),
+        h("div", { className: "type-tabs section-tabs", "aria-label": t("日志分类") },
+          h("button", { type: "button", "aria-pressed": tab === "runtime", onClick: () => setTab("runtime") }, h(Glyph, { name: "logs" }), h("span", { className: "tab-copy" }, h("span", null, t("运行日志")))),
+          h("button", { type: "button", "aria-pressed": tab === "thinking", onClick: () => setTab("thinking") }, h(Glyph, { name: "model" }), h("span", { className: "tab-copy" }, h("span", null, t("模型思考"))))),
+        h("div", { className: "button-row" },
+          h("input", { "aria-label": t("搜索日志"), placeholder: t("搜索日志或思考正文"), value: query, onChange: (event) => setQuery(event.target.value), onKeyDown: (event) => { if (event.key === "Enter") search(); } }),
+          h(Button, { small: true, onClick: search }, t("搜索"))),
+        logs.error && h("div", { className: "feedback error", role: "alert" }, logs.error),
+        logs.loading && !rows.length ? h("p", { className: "muted" }, t("读取中…"))
+          : rows.length ? h("div", { className: "stack" }, ...rows)
+            : h(Empty, { title: "还没有记录", description: tab === "thinking" ? "开启「记录模型思考」后，执行一次翻译或检查就会出现。" : "执行一次翻译或检查后这里会出现记录。", t }));
+    }
     function WorkspaceBody({ model, t, scrollRef }) {
       const [tab, setTab] = useState("任务"), [binding, setBinding] = useState(false);
       useEffect(() => { scrollRef.current?.scrollTo({ top: 0 }); }, [tab, scrollRef]);
       const bound = Boolean(model.view.projectId), showBinding = !bound || binding;
-      const content = tab === "任务" ? h(TaskView, { model, t }) : tab === "资产" ? h(AssetsView, { model, t }) : tab === "学习" ? h(LearningView, { model, t }) : tab === "审校" ? h(StandaloneQa, { model, t }) : h(SettingsView, { model, t });
+      const content = tab === "任务" ? h(TaskView, { model, t }) : tab === "资产" ? h(AssetsView, { model, t }) : tab === "学习" ? h(LearningView, { model, t }) : tab === "审校" ? h(StandaloneQa, { model, t }) : tab === "日志" ? h(LogsView, { model, t }) : h(SettingsView, { model, t });
       return h(React.Fragment, null, h("div", { className: "masthead" }, h("header", { className: "brand-row" }, h(BrandMark, { size: 36 }), h("div", { className: "brand-name" }, h("h1", null, t("Kami 翻译工作台")), h("div", { className: "eyebrow" }, "KAMI · JA / ZH-CN")), h("div", { className: `connection ${model.connected ? "" : "error"}`, role: "status" }, h("span", { className: "connection-dot", "aria-hidden": true }), h("span", { className: "connection-label" }, t(model.connected ? "已连接" : model.connection.pending ? "连接中" : "连接失败")))),
         h("div", { className: "workspace-bar" }, h(Glyph, { name: "folder", size: 14 }), h("span", { className: "workspace-path", title: model.workspace?.workspace }, model.workspace?.workspace || t("当前工作区")), h("button", { type: "button", className: "project-chip quiet", title: t("更换项目"), onClick: () => setBinding(!binding) }, model.workspace?.project?.name || t("尚未绑定项目")), h("button", { type: "button", className: "icon-button quiet", title: t("刷新"), "aria-label": t("刷新"), onClick: () => model.refresh() }, h(Glyph, { name: "refresh", size: 14 }))),
-        h("nav", { className: "main-nav", "aria-label": "Kami" }, ...[["任务", "tasks"], ["资产", "assets"], ["学习", "learning"], ["审校", "check"], ["设置", "settings"]].map(([label, icon]) => h("button", { type: "button", key: label, "aria-pressed": tab === label, onClick: () => setTab(label) }, h(Glyph, { name: icon, size: 17 }), t(label)))),
+        h("nav", { className: "main-nav", "aria-label": "Kami" }, ...[["任务", "tasks"], ["资产", "assets"], ["学习", "learning"], ["审校", "check"], ["日志", "logs"], ["设置", "settings"]].map(([label, icon]) => h("button", { type: "button", key: label, "aria-pressed": tab === label, onClick: () => setTab(label) }, h(Glyph, { name: icon, size: 17 }), t(label)))),
         bound && h(AttentionBanner, { model, t, openTasks: () => setTab("任务") })),
         h("div", { className: "body" }, model.connection.error && h("div", { className: "feedback error", role: "alert" }, model.connection.error, h(Button, { small: true, onClick: () => model.refresh() }, t("重试"))),
           showBinding && model.workspace && h(BindingForm, { model, t, close: () => setBinding(false) }), bound && content));

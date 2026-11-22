@@ -80,6 +80,10 @@ export const SETTING_SPECS = Object.freeze({
   "learning.workingTermsEnabled": { type: "boolean", default: true, label: "翻译时自动学习本文件工作术语", hint: "每翻完一段，让快模型从原文/实际译文里抽取需要在本文件统一的新术语；只作用于当前文件，主术语库优先，不写正式术语表。关掉可省每段一次模型调用" },
 
   "learning.termAutoWriteReviewedTerms": { type: "boolean", default: true, label: "审校确认的术语自动入库", hint: "关联人工终稿后核对标记术语；保留的译法或经高置信对齐核实的改译可入库，已有术语冲突及证据不足转待核对" },
+
+  "logs.thinking": { type: "boolean", default: true, label: "记录模型思考", hint: "每次模型调用的思考正文写进 runtime/logs/kami-thinking.jsonl，主日志留一条可检索的索引。只写本地文件：不发额外请求，也不进入后续提示词，不增加 token 消耗" },
+  "logs.thinkingMaxKB": { min: 1, max: 256, step: 1, default: 32, label: "单次思考上限（KB）", hint: "超出部分截断，记录里标出已截断；避免单次超长思考把日志撑爆" },
+  "logs.thinkingKeepMB": { min: 8, max: 2048, step: 8, default: 128, label: "思考日志保留总量（MB）", hint: "超过后从最旧的文件开始删；按 32MB 一个文件轮转，改小会在下一次写入时立即清理" },
 });
 
 /** 作品名括号是风格约定而非语言对错，按语种单独配置。空串表示该语种不做约定检查。 */

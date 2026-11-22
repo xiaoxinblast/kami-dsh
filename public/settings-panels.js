@@ -49,7 +49,8 @@ const parameterTabs = [
   { id: "quality", title: "质量与 QA", subtitle: "通过分、权重与扣分", icon: "check" },
   { id: "retrieval", title: "检索与上下文", subtitle: "译例、反例与邻段", icon: "search" },
   { id: "learning", title: "学习与评测", subtitle: "蒸馏、提议与门禁", icon: "spark" },
-  { id: "orthography", title: "标点约定", subtitle: "作品名括号", icon: "quote" }
+  { id: "orthography", title: "标点约定", subtitle: "作品名括号", icon: "quote" },
+  { id: "logs", title: "日志", subtitle: "思考记录与清理", icon: "logs" }
 ];
 
 function icon(name) {
@@ -61,7 +62,8 @@ function icon(name) {
     check: '<path d="M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM8 12l3 3 5-6"/>',
     search: '<circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/>',
     spark: '<path d="M12 3l1.7 5.1L19 10l-5.3 1.9L12 17l-1.7-5.1L5 10l5.3-1.9zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/>',
-    quote: '<path d="M7 7h4v4H9c0 2 1 3 3 3v3c-4 0-6-2-6-6V7zM15 7h4v4h-2c0 2 1 3 3 3v3c-4 0-6-2-6-6V7z"/>'
+    quote: '<path d="M7 7h4v4H9c0 2 1 3 3 3v3c-4 0-6-2-6-6V7zM15 7h4v4h-2c0 2 1 3 3 3v3c-4 0-6-2-6-6V7z"/>',
+    logs: '<path d="M5 4h11l3 3v13H5zM8 9h8M8 13h8M8 17h5"/>'
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.check}</svg>`;
 }
@@ -247,6 +249,15 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
       render();
     }
     if (button.matches("[data-provider-probe]")) probe(button);
+    if (button.dataset.logClear) {
+      const scope = button.dataset.logClear;
+      const label = scope === "thinking" ? "模型思考" : scope === "runtime" ? "运行日志" : "日志与模型思考";
+      if (!confirm(`清空${label}？清空后无法恢复。`)) return;
+      api(scope === "runtime" ? "/api/logs" : scope === "thinking" ? "/api/logs/thinking" : "/api/logs", { method: "DELETE" })
+        .then(() => { find("[data-status]").textContent = `已清空${label}`; })
+        .catch((error) => { find("[data-status]").textContent = error.message; });
+      return;
+    }
     if (button.matches("[data-close-panel]")) dialog.close();
   });
   dialog.addEventListener("input", (event) => {
@@ -326,7 +337,9 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
       }
       const group = groups.get(tab.id);
       const sections = parameterSections(tab.id, group?.fields || []);
-      return `<section class="sp-panel" data-panel="${tab.id}" ${tab.id === active ? "" : "hidden"}><div class="sp-page-heading"><span class="sp-eyebrow">${escape(tab.subtitle)}</span><h3>${escape(tab.title)}</h3><p>${tab.id === "quality" ? "控制 AIQA 通过分、修订轮数、三维权重和扣分。" : tab.id === "retrieval" ? "控制翻译时注入多少参考译例、QA 反例和邻段上下文。" : "控制风格/画像蒸馏、自动提议和评测门禁。"}</p></div>${[...sections.entries()].map(([section, fields]) => `<div class="sp-card"><h4>${escape(section)}</h4>${renderFields(fields)}</div>`).join("")}</section>`;
+      const caption = tab.id === "quality" ? "控制 AIQA 通过分、修订轮数、三维权重和扣分。" : tab.id === "retrieval" ? "控制翻译时注入多少参考译例、QA 反例和邻段上下文。" : tab.id === "logs" ? "思考正文只写在本机，不上传，也不进入后续提示词；调大上限和保留量前先看磁盘占用。" : "控制风格/画像蒸馏、自动提议和评测门禁。";
+      const clearCard = tab.id === "logs" ? `<div class="sp-card"><h4>清理</h4><p style="margin:12px 17px 0;color:#6b7a6a;font-size:12px;line-height:1.6">清空后无法恢复；只删排查记录，不影响批次、术语和译文。</p><div class="sp-actions" style="display:flex;gap:8px;flex-wrap:wrap;padding:12px 17px 16px"><button type="button" class="sp-ghost" data-log-clear="thinking">清空模型思考</button><button type="button" class="sp-ghost" data-log-clear="runtime">清空运行日志</button><button type="button" class="sp-ghost" data-log-clear="all">全部清空</button></div></div>` : "";
+      return `<section class="sp-panel" data-panel="${tab.id}" ${tab.id === active ? "" : "hidden"}><div class="sp-page-heading"><span class="sp-eyebrow">${escape(tab.subtitle)}</span><h3>${escape(tab.title)}</h3><p>${caption}</p></div>${[...sections.entries()].map(([section, fields]) => `<div class="sp-card"><h4>${escape(section)}</h4>${renderFields(fields)}</div>`).join("")}${clearCard}</section>`;
     }).join("");
     dialog.innerHTML = panelShell({
       title: "参数设置",

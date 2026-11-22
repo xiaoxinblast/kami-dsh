@@ -48,7 +48,7 @@ import { embedSource } from "./src/embedding.mjs";
 import { countMemories, deleteBatchRun, deleteStyleProfile, deleteTranslationSkill, deleteUserProfile, learningDetailsById, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { describeReferenceWithModel } from "./src/provider.mjs";
 import { normalizeProviderProtocol } from "./src/provider-store.mjs";
-import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
+import { clearLogs, clearThinking, getLogSettings, getThinkingStats, installConsoleCapture, listLogs, listThinking, loadPreviousRunLogs, logInfo, readLogFile, readThinking, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { deleteBatchOriginal, readBatchOriginal, saveBatchOriginal } from "./src/batch-originals.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
@@ -2741,7 +2741,13 @@ async function translateBatchSegment(body, path = "/api/translate", { draft = nu
   const performance = { version: 1, events: [], ...(draft ? { groupId: draft.groupId, groupSize: draft.groupSize } : {}) };
   const qaCache = path === "/api/qa" && body.batchId && runtimeOptions().evidenceCache?.batchId !== body.batchId
     ? { evidenceCache: { batchId: body.batchId, guides: new Map(), snippets: new Map() } } : {};
-  return withRuntimeCall({ performanceTrace: performance, translationDraft: draft, ...qaCache }, async () => {
+  // 思考日志带上批次与句段，排查时能直接对到某一段，而不是只有「初译」这个标签。
+  const thinkingContext = {
+    ...(body.batchId ? { batchId: body.batchId } : {}),
+    ...(body.segmentId ? { segmentId: body.segmentId } : {}),
+    stage: path === "/api/qa" ? "recheck" : "translate"
+  };
+  return withRuntimeCall({ performanceTrace: performance, translationDraft: draft, thinkingContext, ...qaCache }, async () => {
     try {
       const result = await measureStage("segment", () => dispatchBatchSegment(body, path));
       return { ...result, performance };
@@ -4938,9 +4944,34 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     return json(res, 200, setLogLevel(body.level));
   }
+  if (req.method === "GET" && url.pathname === "/api/logs/thinking") {
+    // 模型思考：主日志里只有索引，正文按 id 现取，避免日志列表一次拉几 MB。
+    const entries = listThinking({
+      search: String(url.searchParams.get("search") || "").trim(),
+      since: String(url.searchParams.get("since") || "").trim(),
+      limit: Number(url.searchParams.get("limit")) || 100
+    });
+    return json(res, 200, { entries, stats: getThinkingStats() });
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/logs/thinking/")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/logs/thinking/".length));
+    const entry = readThinking(id);
+    if (!entry) {
+      const error = new Error("这条思考记录已不在磁盘上（可能已被清理或轮转删除）");
+      error.statusCode = 404;
+      throw error;
+    }
+    return json(res, 200, { entry });
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/logs/thinking") {
+    const stats = clearThinking();
+    logInfo("模型思考记录已清空");
+    return json(res, 200, stats);
+  }
   if (req.method === "DELETE" && url.pathname === "/api/logs") {
+    clearThinking();
     const settings = clearLogs();
-    logInfo("日志已清空");
+    logInfo("日志与模型思考已清空");
     return json(res, 200, settings);
   }
   if (req.method === "GET" && url.pathname === "/api/logs/download") {

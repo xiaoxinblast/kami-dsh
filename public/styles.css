@@ -587,6 +587,11 @@ select { min-width: 150px; }
 .log-body { min-width: 0; }
 .log-message { margin: 0; color: #34483c; font-size: 12px; line-height: 1.6; word-break: break-word; white-space: pre-wrap; }
 .log-detail { margin: 5px 0 0; color: #6d7d72; font-size: 11px; line-height: 1.6; word-break: break-word; white-space: pre-wrap; }
+.log-level.thinking { color: #285843; background: #e1f1e8; }
+.log-level-chip.active { border-color: var(--forest); color: #fff; background: var(--forest); }
+#logThinkingToggle.active { border-color: var(--forest); color: #fff; background: var(--forest); }
+.log-thinking-actions { margin-top: 8px; }
+.log-thinking-text { margin: 8px 0 0; padding: 10px 12px; border: 1px solid #e6ece4; border-radius: 8px; background: #fff; color: #33423a; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; }
 .log-previous { margin-left: 6px; color: #9aa49b; font-size: 10px; }
 .import-progress.is-failed { border-color: #e7c9c5; background: #fdf6f5; }
 .import-progress.is-failed .import-progress-head strong { color: #b4453c; }

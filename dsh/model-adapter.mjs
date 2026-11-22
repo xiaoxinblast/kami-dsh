@@ -9,6 +9,17 @@ export function sessionModelRoute(ctx, agent) {
   return pending || agent?.session?.requestHeader?.()?.config || ctx.agentDefaultModel.currentSelection();
 }
 
+/** 把已经流出的思考交给调用方；半截流拿不到块时静默跳过。 */
+function reportReasoning(options, assembler, attempt, status) {
+  if (typeof options.onReasoning !== "function" || !assembler) return;
+  try {
+    const text = assembler.blocks().filter((block) => block.type === "reasoning").map((block) => block.text).join("");
+    if (text) options.onReasoning(text, { status, attempt });
+  } catch {
+    // 未闭合的未知块会抛错：这种流本来也没有可用的思考。
+  }
+}
+
 /** Convert the existing prompt protocol to DSH's provider-neutral message stream. */
 export function createModelAdapter(ctx, llm) {
   const callConfig = (route) => {
@@ -67,10 +78,19 @@ export function createModelAdapter(ctx, llm) {
           throw Object.assign(new Error(`${label}：${failure?.message || "DSH 模型调用中断或失败"}`), { code: assembler.finish.kind === "aborted" ? "ABORTED" : failure?.code });
         }
       } catch (error) {
-        if (signal.aborted) throw new Error(`${label}${options.signal?.aborted ? "已取消" : `超过 ${Math.round((options.timeoutMs || 120_000) / 1000)} 秒，调用超时`}（${prepared?.config.model || config.model}，输出上限 ${prepared?.config.maxTokens ?? "提供商默认"}）`, { cause: error });
+        if (signal.aborted) {
+          reportReasoning(options, assembler, attempt, "failed");
+          throw new Error(`${label}${options.signal?.aborted ? "已取消" : `超过 ${Math.round((options.timeoutMs || 120_000) / 1000)} 秒，调用超时`}（${prepared?.config.model || config.model}，输出上限 ${prepared?.config.maxTokens ?? "提供商默认"}）`, { cause: error });
+        }
         const transportFailed = error?.code === "TRANSPORT" || (!error?.code && /(?:^|：)DeepSeek Messages transport failed$/u.test(error?.message));
-        if (!transportFailed) throw error;
-        if (transportRetries === retryDelays.length) throw Object.assign(new Error(`${label}传输失败，已自动重试 ${transportRetries} 次：${error.message}`, { cause: error }), { code: "TRANSPORT", transportRetriesExhausted: true });
+        if (!transportFailed) {
+          reportReasoning(options, assembler, attempt, "failed");
+          throw error;
+        }
+        if (transportRetries === retryDelays.length) {
+          reportReasoning(options, assembler, attempt, "failed");
+          throw Object.assign(new Error(`${label}传输失败，已自动重试 ${transportRetries} 次：${error.message}`, { cause: error }), { code: "TRANSPORT", transportRetriesExhausted: true });
+        }
         await delay(retryDelays[transportRetries++], undefined, { signal: options.signal });
         continue;
       } finally {
@@ -84,6 +104,7 @@ export function createModelAdapter(ctx, llm) {
       }
       const maxTokens = prepared.config.maxTokens;
       if (assembler.finish.kind === "max-tokens") {
+        reportReasoning(options, assembler, attempt, "truncated");
         const details = { requestLabel: label, provider: prepared.config.provider, model: prepared.config.model, reasoningEffort: prepared.config.reasoningEffort, maxTokens, attempts: attempt, usage };
         const canRetry = !truncated;
         truncated = Object.assign(new Error(`${label}：DSH 模型输出被截断（${details.model}，实际输出上限 ${maxTokens ?? "提供商默认"} token，已调用 ${details.attempts} 次，累计输出 ${usage?.completionTokens ?? "未知"} token）。请在 Kami「设置 → 模型」调整输出与重试上限。`), { code: "KAMI_MODEL_TRUNCATED", details });
@@ -92,9 +113,12 @@ export function createModelAdapter(ctx, llm) {
         break;
       }
       const result = assembler.blocks();
+      const reasoning = result.filter((block) => block.type === "reasoning").map((block) => block.text).join("");
+      if (reasoning) options.onReasoning?.(reasoning, { status: "ok", attempt });
       return {
         content: result.filter((block) => block.type === "text").map((block) => block.text).join(""),
         toolCalls: result.filter((block) => block.type === "tool-call").map((block) => ({ id: block.id, type: "function", function: { name: block.name, arguments: typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments) } })),
+        reasoning,
         usage
       };
     }

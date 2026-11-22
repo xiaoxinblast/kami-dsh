@@ -128,8 +128,12 @@ const state = {
   batchCancelling: false,
   logs: [],
   logLevel: "",
+  logKind: "",
   logSearch: "",
   logErrorCount: 0,
+  thinking: [],
+  thinkingStats: null,
+  thinkingTexts: {},
   reviewImportBatchId: "",
   batchHasStoredOriginal: false,
   batchSegmentFilter: "",
@@ -5995,6 +5999,7 @@ function logTimeLabel(value) {
 }
 
 function renderLogs() {
+  if (state.logKind === "thinking") return renderThinkingLogs();
   const entries = state.logs || [];
   $("#logCount").textContent = `${entries.length} 条`;
   const errors = entries.filter((entry) => entry.level === "error").length;
@@ -6011,6 +6016,35 @@ function renderLogs() {
   $$("#logLevels .log-level-chip").forEach((chip) => chip.classList.toggle("active", chip.dataset.level === (state.logLevel || "")));
 }
 
+/** 模型思考页：只列元数据，正文点开才读，避免一次拉几百条长文。 */
+function renderThinkingLogs() {
+  const entries = state.thinking || [];
+  $("#logCount").textContent = `${entries.length} 条`;
+  const stats = state.thinkingStats;
+  $("#logHint").textContent = stats
+    ? `模型思考只写在本机，不上传、也不进入后续提示词；当前占用 ${(Number(stats.totalBytes || 0) / 1024 / 1024).toFixed(1)} MB。查看全文只是读本地文件，不会调用模型。`
+    : "模型思考只写在本机，不上传、也不进入后续提示词。";
+  $("#logList").innerHTML = entries.length ? entries.map((item) => {
+    const text = state.thinkingTexts[item.id];
+    const context = item.context || {};
+    const meta = `${item.chars || 0} 字${item.truncated ? " · 已截断" : ""}${context.batchId ? ` · 批次 ${context.batchId}` : ""}${context.segmentId ? ` · 句段 ${context.segmentId}` : ""}`;
+    return `
+    <div class="log-row thinking">
+      <span class="log-time">${escapeHtml(logTimeLabel(item.ts))}</span>
+      <span class="log-level thinking">思考</span>
+      <div class="log-body">
+        <p class="log-message">${escapeHtml(item.label || "模型调用")} · ${escapeHtml(item.model || "—")}${item.effort ? ` · ${escapeHtml(item.effort)}` : ""}</p>
+        <p class="log-detail">${escapeHtml(meta)}</p>
+        ${item.snippet ? `<p class="log-detail">${escapeHtml(item.snippet)}</p>` : ""}
+        <div class="log-thinking-actions"><button class="button ghost small" type="button" data-thinking-open="${escapeHtml(item.id)}">${text ? "收起" : "查看全文"}</button></div>
+        ${text ? `<pre class="log-thinking-text">${escapeHtml(text)}</pre>` : ""}
+      </div>
+    </div>`;
+  }).join("") : '<div class="empty-list">当前筛选下没有模型思考记录</div>';
+  $$("#logLevels .log-level-chip").forEach((chip) => chip.classList.remove("active"));
+  $("#logThinkingToggle")?.classList.add("active");
+}
+
 /** 侧边栏角标：有几条错误可查。正在看日志页时不打扰。 */
 function bumpLogBadge(count) {
   state.logErrorCount = Math.max(0, Number(count) || 0);
@@ -6022,6 +6056,15 @@ function bumpLogBadge(count) {
 
 async function loadLogs() {
   if (!state.bootstrap) return;
+  if (state.logKind === "thinking") {
+    const thinkingParams = new URLSearchParams({ limit: "200" });
+    if (state.logSearch) thinkingParams.set("search", state.logSearch);
+    const payload = await api(`/api/logs/thinking?${thinkingParams}`);
+    state.thinking = payload.entries || [];
+    state.thinkingStats = payload.stats || null;
+    renderLogs();
+    return;
+  }
   const params = new URLSearchParams({ limit: "300" });
   if (state.logLevel) params.set("level", state.logLevel);
   if (state.logSearch) params.set("search", state.logSearch);
@@ -9678,7 +9721,34 @@ function bindEvents() {
     const chip = event.target.closest(".log-level-chip");
     if (!chip) return;
     state.logLevel = chip.dataset.level || "";
+    state.logKind = "";
+    $("#logThinkingToggle")?.classList.remove("active");
     loadLogs().catch((error) => toast(error.message));
+  });
+  $("#logThinkingToggle").addEventListener("click", () => {
+    state.logKind = state.logKind === "thinking" ? "" : "thinking";
+    $("#logThinkingToggle").classList.toggle("active", state.logKind === "thinking");
+    loadLogs().catch((error) => toast(error.message));
+  });
+  $("#logThinkingClear").addEventListener("click", async () => {
+    if (!confirm("清空模型思考记录？磁盘上的思考正文会一起删除。")) return;
+    try {
+      await api("/api/logs/thinking", { method: "DELETE" });
+      state.thinkingTexts = {};
+      await loadLogs();
+      toast("模型思考已清空");
+    } catch (error) { toast(error.message); }
+  });
+  $("#logList").addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-thinking-open]");
+    if (!button) return;
+    const id = button.dataset.thinkingOpen;
+    if (state.thinkingTexts[id]) { delete state.thinkingTexts[id]; renderLogs(); return; }
+    try {
+      const payload = await api(`/api/logs/thinking/${encodeURIComponent(id)}`);
+      state.thinkingTexts[id] = payload.entry?.text || "";
+      renderLogs();
+    } catch (error) { toast(error.message); }
   });
   $("#logSearch").addEventListener("input", (event) => {
     state.logSearch = event.target.value.trim();
@@ -9698,7 +9768,7 @@ function bindEvents() {
   $("#logRefresh").addEventListener("click", () => loadLogs().catch((error) => toast(error.message)));
   $("#logDownload").addEventListener("click", () => { window.open("/api/logs/download", "_blank", "noopener"); });
   $("#logClear").addEventListener("click", async () => {
-    if (!confirm("清空日志？磁盘上的日志文件也会一起删除。")) return;
+    if (!confirm("清空日志？磁盘上的日志文件（含模型思考）也会一起删除。")) return;
     try {
       await api("/api/logs", { method: "DELETE" });
       await loadLogs();

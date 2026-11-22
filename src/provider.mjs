@@ -16,6 +16,7 @@ import { translationOutputIssue } from "./translation-output.mjs";
 import { parseMicroBatchTranslations } from "./micro-batch.mjs";
 import { groupPatternLinks } from "./pattern-memory.mjs";
 import { measureStage, tokenCounts } from "./performance.mjs";
+import { recordModelThinking } from "./model-thinking.mjs";
 import { jaZhGuidance, VERIFICATION_GUIDANCE } from "./ja-zh-guidance.mjs";
 
 const loadedProvider = runtimeOptions().embedded ? { config: {}, persistence: { mode: "dsh", persisted: false } } : loadProviderConfig();
@@ -774,9 +775,14 @@ function normalizeChatResponse(protocol, payload) {
   if (protocol === "responses") {
     const texts = [];
     const toolCalls = [];
+    const reasoning = [];
     for (const item of Array.isArray(payload?.output) ? payload.output : []) {
       if (item?.type === "function_call") {
         toolCalls.push({ id: item.call_id || item.id || item.name, type: "function", function: { name: item.name, arguments: item.arguments } });
+        continue;
+      }
+      if (item?.type === "reasoning") {
+        for (const part of Array.isArray(item?.summary) ? item.summary : []) reasoning.push(String(part?.text || ""));
         continue;
       }
       for (const block of Array.isArray(item?.content) ? item.content : []) {
@@ -788,6 +794,7 @@ function normalizeChatResponse(protocol, payload) {
     return {
       content: texts.join("").trim(),
       toolCalls,
+      reasoning: reasoning.join("").trim(),
       finishReason: truncated ? "length" : "stop",
       usage: payload?.usage ? { promptTokens: Number(payload.usage.input_tokens) || 0, completionTokens: Number(payload.usage.output_tokens) || 0 } : null
     };
@@ -801,21 +808,25 @@ function normalizeChatResponse(protocol, payload) {
         type: "function",
         function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) }
       })),
+      // Anthropic 的扩展思考：thinking 块里是明文；redacted_thinking 是密文，跳过。
+      reasoning: blocks.filter((block) => block?.type === "thinking").map((block) => String(block.thinking || "")).join("").trim(),
       finishReason: payload?.stop_reason === "max_tokens" ? "length" : "stop",
       usage: payload?.usage ? { promptTokens: Number(payload.usage.input_tokens) || 0, completionTokens: Number(payload.usage.output_tokens) || 0 } : null
     };
   }
   const message = payload?.choices?.[0]?.message || {};
   let content = String(message.content || "").trim();
+  const reasoning = typeof message.reasoning_content === "string" ? message.reasoning_content.trim() : "";
   // 推理模型在“结论为空”的简单场景可能把最终 JSON 留在推理轨迹里：取轨迹尾部最后一个 JSON 片段
-  if (!content && typeof message.reasoning_content === "string") {
-    const candidates = [...(message.reasoning_content.match(/\[[\s\S]*\]/g) || []), ...(message.reasoning_content.match(/\{[\s\S]*\}/g) || [])];
+  if (!content && reasoning) {
+    const candidates = [...(reasoning.match(/\[[\s\S]*\]/g) || []), ...(reasoning.match(/\{[\s\S]*\}/g) || [])];
     const tail = candidates[candidates.length - 1];
     if (tail) content = tail.trim();
   }
   return {
     content,
     toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls.filter((call) => call?.function?.name) : [],
+    reasoning,
     finishReason: payload?.choices?.[0]?.finish_reason || "stop",
     usage: payload?.usage
       ? { promptTokens: Number(payload.usage.prompt_tokens) || 0, completionTokens: Number(payload.usage.completion_tokens) || 0 }
@@ -828,15 +839,29 @@ function normalizeChatResponse(protocol, payload) {
 async function chat(messages, config = runtimeConfig, options = {}) {
   const normalizedOptions = typeof options === "number" ? { temperature: options } : options;
   const runtime = runtimeOptions();
+  const requestLabel = normalizedOptions.requestLabel || "模型";
   if (runtime.modelAdapter) {
-    const result = await runtime.modelAdapter(messages, { ...normalizedOptions, route: runtime.modelRoute, signal: runtime.signal });
+    const result = await runtime.modelAdapter(messages, {
+      ...normalizedOptions,
+      route: runtime.modelRoute,
+      signal: runtime.signal,
+      // 适配层把流式思考累积好交回来；中断失败时也保留已经流出的部分。
+      onReasoning: (text, meta = {}) => recordModelThinking({
+        label: requestLabel,
+        model: runtime.modelRoute?.model || "",
+        effort: runtime.modelRoute?.reasoningEffort || "",
+        text,
+        status: meta.status || "ok",
+        attempt: meta.attempt || 1,
+        extra: { source: "dsh" }
+      })
+    });
     if (result.usage) normalizedOptions.onUsage?.(result.usage);
     return normalizedOptions.returnMessage ? { content: result.content, toolCalls: result.toolCalls || [] } : result.content;
   }
   const protocol = normalizeProviderProtocol(config.protocol);
   const temperature = normalizedOptions.temperature ?? 0.25;
   const timeoutMs = normalizedOptions.timeoutMs ?? 60_000;
-  const requestLabel = normalizedOptions.requestLabel || "模型";
   let maxTokens = normalizedOptions.maxTokens;
   // seed 只有 OpenAI 兼容端点认；Responses 与 Anthropic 都没有这个参数，发了就是 400。
   let seed = protocol === "openai" && Number.isInteger(normalizedOptions.seed) ? normalizedOptions.seed : undefined;
@@ -897,6 +922,15 @@ async function chat(messages, config = runtimeConfig, options = {}) {
     }
     const payload = JSON.parse(text || "{}");
     const normalized = normalizeChatResponse(protocol, payload);
+    recordModelThinking({
+      label: requestLabel,
+      model: config.model,
+      effort: String(normalizedOptions.reasoningEffort ?? config.reasoningEffort ?? "").trim(),
+      text: normalized.reasoning,
+      status: normalized.finishReason === "length" ? "truncated" : "ok",
+      attempt: attempt + 1,
+      extra: { protocol }
+    });
     if (event) {
       const u = payload.usage || {};
       const hit = u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? u.input_tokens_details?.cached_tokens ?? u.cache_read_input_tokens;

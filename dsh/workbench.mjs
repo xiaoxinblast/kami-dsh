@@ -100,6 +100,18 @@ export async function createWorkbench({ dataDirectory, modelAdapter, notifyAtten
         if (projectId) await files.bound(context, projectId);
       }
       if (operation.action === "backup") return this.backup();
+      if (operation.action === "logs") {
+        // 日志清空是用户动作：DSH 模式下 /api/logs 的非 GET 会被策略挡掉，这里直接落盘。
+        // 动态引入：logger 的目录在模块加载时按 dataDirectory 定死，必须等 configureRuntime 之后。
+        const { clearLogs, clearThinking, getLogSettings, logInfo } = await import("../src/logger.mjs");
+        const scope = ["thinking", "runtime", "all"].includes(operation.scope) ? operation.scope : "all";
+        if (scope !== "runtime") clearThinking();
+        if (scope !== "thinking") {
+          clearLogs();
+          logInfo(scope === "all" ? "日志与模型思考已清空" : "日志已清空");
+        }
+        return { cleared: scope, settings: getLogSettings() };
+      }
       if (operation.action === "model") {
         if (!modelAdapter?.describe) throw new Error("DSH 模型服务不可用");
         return withRuntimeCall({ dataDirectory }, () => modelAdapter.describe(context.modelRoute, context.signal));
