@@ -23,9 +23,9 @@ export const PROJECT_QA_RULES = Object.freeze([
   { id: "orthography", group: "语言质量", label: "简体中文标点", description: "检查译文是否残留日式「」或『』，以及作品名是否按项目约定使用《》。仅检查标点，不判断措辞。", defaultEnabled: true, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
   { id: "register", group: "语言质量", label: "语域词表提示", description: "根据翻译页选定或自动识别的内容语体，用本地词表、感叹号、表情和句式特征提示太营销、太网感或套话密集；属于启发式提示，不判断翻译对错，默认关闭。", defaultEnabled: false, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
   { id: "language_quality", group: "语言质量", label: "拼写、重复与语气启发式", description: "检查疑似重复字符、重复词、专名遗漏和语气弱化。", defaultEnabled: true, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
-  { id: "newline_count", group: "布局与标签", label: "换行数量", description: "可选检查换行数量；默认关闭，因为软换行允许自然变化。", defaultEnabled: false, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
-  { id: "newline_semantics", group: "布局与标签", label: "换行语义", description: "检查硬段落、边缘换行、换行标签顺序和布局语义。", defaultEnabled: true, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
-  { id: "newline_suspicious_break", group: "布局与标签", label: "可疑断行", description: "提示换行断在数字、英文标识或标点内部。", defaultEnabled: true, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
+  { id: "newline_count", group: "布局与标签", label: "换行数量", description: "比较原文与译文的显式换行数量；默认关闭，因为软换行允许自然变化。", defaultEnabled: false, defaultSeverity: "info", severities: ["error", "warning", "info"] },
+  { id: "newline_semantics", group: "布局与标签", label: "换行语义", description: "检查断行是否落在语义边界：行尾虚词（的、地、得、之）和只有一两个字单独成行。", defaultEnabled: true, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
+  { id: "newline_suspicious_break", group: "布局与标签", label: "可疑断行", description: "提示换行断在数字、英文标识、单位、货币或省略号、破折号内部。", defaultEnabled: true, defaultSeverity: "warning", severities: ["error", "warning", "info"] },
   { id: "non_break_tag_structure", group: "结构强制", label: "非换行标签结构", description: "非换行标签必须保留，数量、类型和顺序不能变化。", fixed: true, defaultEnabled: true, defaultSeverity: "error", severities: ["error"] },
   { id: "document_integrity", group: "结构强制", label: "文件与锁定单元完整性", description: "原文件身份、锁定单元、条目 ID、XML 写后复解析必须通过。", fixed: true, defaultEnabled: true, defaultSeverity: "error", severities: ["error"] }
 ]);
@@ -116,6 +116,14 @@ export function projectQaRule(id, settings = DEFAULT_PROJECT_SETTINGS) {
 
 export function projectRuleIdForIssue(issue = {}) {
   const type = String(issue.type || "");
+  // 行结构检查（行数、字数、标记顺序、标点禁则）始终启用，不受项目开关控制；
+  // 只有语义、短行、token 拆分和换行数量归入可配置规则。
+  if (type.startsWith("line_layout_")) {
+    if (type === "line_layout_count") return "newline_count";
+    if (type === "line_layout_token") return "newline_suspicious_break";
+    if (type === "line_layout_semantic" || type === "line_layout_short_line") return "newline_semantics";
+    return "";
+  }
   if (type === "tm_exact_target_mismatch") return "tm_exact_target_mismatch";
   if (type === "protected_token" || type.startsWith("fact_placeholder") || type.startsWith("fact_url")) return "protected_token_parity";
   if (["required_term", "preserved_term", "forbidden_term"].includes(type)) return "term_consistency";

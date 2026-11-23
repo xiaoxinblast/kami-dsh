@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { normalizeQaQuantities } from "./chinese-numbers.mjs";
+import { chineseQaLocale, normalizeQaQuantities } from "./chinese-numbers.mjs";
 
 const inlineTag = /<tag\s+[^<>]*?\/>/gu;
 const hardBreak = /\r\n|[\r\n]|<br\s*\/?>/iu;
@@ -78,12 +78,77 @@ export async function resolveLineLayout({ pack, scopeId = "", markers = [], guid
 }
 
 const graphemes = new Intl.Segmenter("zh", { granularity: "grapheme" });
+const contentGrapheme = /[\s\p{P}\p{S}]/u;
+const hanCharacter = /\p{Script=Han}/u;
+const sentenceEnd = /[。！？!?…]$/u;
+const evidenceEnd = /[。！？!?…：:]$/u;
+const anyPause = /[，。、；：！？!?,.;:…]$/u;
+const listMarker = /^\s*(?:[-*•·–—]|\d+[.、)）])\s*/u;
+const labelLine = /[：:]\s*$/u;
+const contentStart = /^[^\s\p{P}\p{S}]/u;
+const lineStartPunctuation = new Set([...'、，。：；！？．,.;:!?', ...'」』”’）］｝】〕》〉)]}']);
+const lineEndPunctuation = new Set([...'（［｛【〔《〈「『“‘([{']);
+const suffixParticles = new Set(["的", "地", "得", "之"]);
+// 这些常用词以虚词收尾，断在它们后面是正常词界，不能当成悬空的虚词。
+const wordTails = ["目的", "是的", "真的", "有的", "别的", "似的", "标的", "土地", "大地", "场地", "当地", "基地",
+  "草地", "园地", "心地", "质地", "目的地", "产地", "工地", "营地", "阵地", "领地", "属地", "特地", "猛地",
+  "获得", "取得", "觉得", "记得", "懂得", "值得", "难得", "显得", "使得", "舍得", "赢得", "心得", "总之", "反之", "换言之"];
+const percentMarks = new Set([..."%‰°℃℉％"]);
+const currencyMarks = new Set([..."¥$€£₩₽₹"]);
+const measureWords = new Set([..."个只件条张本页章节名人次天年月日元块米克升度岁层楼间套台部辆架艘颗粒片盒包瓶罐袋组对双批份项种类款期届场局盘轮波阵股笔桶杯碗碟把支根枝棵株朵束串堆排行列段篇首曲幅版集季吨公"]);
+
+function visibleLines(translation, markers = []) {
+  let visible = String(translation || "");
+  for (const marker of markers) visible = visible.replaceAll(marker, "\n");
+  return visible.replace(inlineTag, "").split(/\r\n|[\r\n]|<br\s*\/?>/iu);
+}
+
+function contentLength(line) {
+  let count = 0;
+  for (const { segment } of graphemes.segment(String(line || ""))) {
+    if (!contentGrapheme.test(segment)) count += 1;
+  }
+  return count;
+}
+
+function lastCharacter(line) {
+  const chars = [...String(line || "").trimEnd()];
+  return chars.length ? chars[chars.length - 1] : "";
+}
+
+function firstCharacter(line) {
+  const chars = [...String(line || "").trimStart()];
+  return chars.length ? chars[0] : "";
+}
+
+function textBlocks(lines) {
+  const blocks = [];
+  let current = [];
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (current.length) blocks.push(current);
+      current = [];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length) blocks.push(current);
+  return blocks;
+}
+
+// 一段连续文本被硬折行的证据：至少三行、有足够长的行，且存在不在句末的长行。
+function isWrappedBlock(lines) {
+  if (lines.length < 3) return false;
+  const lengths = lines.map(contentLength);
+  const longest = Math.max(...lengths);
+  if (longest < 10 || lengths.filter(length => length >= 8).length < 2) return false;
+  return lines.slice(0, -1).some((line, index) => lengths[index] >= 8 && !evidenceEnd.test(line.trimEnd()));
+}
+
 export function checkLineLayout(translation, layout) {
   if (!layout && !hasSourceBreak(translation)) return [];
   layout ??= { markers: [], rules: [] };
-  let visible = String(translation || "");
-  for (const marker of layout.markers) visible = visible.replaceAll(marker, "\n");
-  const lines = visible.replace(inlineTag, "").split(/\r\n|[\r\n]|<br\s*\/?>/iu);
+  const lines = visibleLines(translation, layout.markers);
   const errors = [];
   const issue = (type, message) => errors.push({ type: "line_layout_" + type, severity: "error", category: "constraint", message });
   const width = layout.rules.find(r => r.maxChars), height = layout.rules.find(r => r.maxLines);
@@ -92,7 +157,19 @@ export function checkLineLayout(translation, layout) {
     issue("lines", "译文共 " + lines.length + " 行，规定最多 " + height.maxLines + " 行（" + height.source + "）" + fixed);
   }
   for (const [i, line] of lines.entries()) {
-    if (i && /^\s*[，。,.．、]/u.test(line)) issue("punctuation", "第 " + (i + 1) + " 行以「" + line.trimStart()[0] + "」开头，请将标点留在上一行并调整断句。");
+    const first = firstCharacter(line);
+    const previousLast = i ? lastCharacter(lines[i - 1]) : "";
+    if (i && lineStartPunctuation.has(first)) {
+      // ASCII 标点只在上一行以汉字收尾时判定，避免把版本号、URL 和数字列表的换行当成标点断行。
+      const ascii = /^[\x00-\x7F]$/u.test(first);
+      if (!(ascii && /[A-Za-z0-9]/u.test(previousLast))) {
+        issue("punctuation", "第 " + (i + 1) + " 行以「" + first + "」开头，请将标点留在上一行并调整断句。");
+      }
+    }
+    const last = lastCharacter(line);
+    if (lineEndPunctuation.has(last)) {
+      issue("punctuation", "第 " + (i + 1) + " 行以「" + last + "」结尾，开括号或开引号不能留在行尾。");
+    }
     if (width) {
       const counted = width.counting === "nonspace" ? line.replace(/\s/gu, "") : line;
       const length = [...graphemes.segment(counted)].length;
@@ -105,6 +182,106 @@ export function checkLineLayout(translation, layout) {
     issue("marker", "原文的固定换行标记必须按原顺序原样保留，每个标记自身代表一次换行。");
   }
   return errors;
+}
+
+function tokenSplitIssues(lines, issue) {
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const left = lines[i].trimEnd();
+    const right = lines[i + 1].trimStart();
+    if (!left || !right) continue;
+    const leftRun = left.match(/[A-Za-z0-9]+$/u)?.[0] || "";
+    const rightRun = right.match(/^[A-Za-z0-9]+/u)?.[0] || "";
+    const rightFirst = firstCharacter(right);
+    const last = lastCharacter(left);
+    let token = "";
+    if (leftRun && rightRun) {
+      const pureList = /^[A-Za-z0-9]{1,3}$/u.test(left.trim()) && /^[A-Za-z0-9]{1,3}$/u.test(right.trim());
+      if (!pureList && (leftRun + rightRun).length >= 2) token = leftRun + rightRun;
+    }
+    if (!token && /\d$/u.test(left) && percentMarks.has(rightFirst)) token = left.match(/\d+$/u)?.[0] + rightFirst;
+    if (!token && currencyMarks.has(last) && /^\d/u.test(right)) token = last + right.match(/^\d+/u)?.[0];
+    if (!token && /\d$/u.test(left) && measureWords.has(rightFirst)) {
+      const number = left.match(/\d+$/u)?.[0] || "";
+      // 整行只有数字时更像是编号列表，不当成数量拆分。
+      if (number && !/^\d+$/u.test(left.trim())) token = number + rightFirst;
+    }
+    if (!token && last === "…" && rightFirst === "…") token = "……";
+    if (!token && last === "—" && rightFirst === "—") token = "——";
+    if (!token) continue;
+    issue("token", `第 ${i + 1} 行与第 ${i + 2} 行把「${token}」拆开了，数字、英文标识和单位应保持完整。`, `把「${token}」放在同一行，或调整断点。`);
+  }
+}
+
+function lineCountIssue({ source, lines, markers, issue }) {
+  if (!String(source || "").trim()) return;
+  const sourceLines = visibleLines(source, markers).filter(line => line.trim()).length;
+  const translationLines = lines.filter(line => line.trim()).length;
+  if (!sourceLines || sourceLines === translationLines) return;
+  issue("count", `原文 ${sourceLines} 行，译文 ${translationLines} 行；如版式不要求逐行对应可忽略。`, "", "info");
+}
+
+function semanticBreakIssues(block, issue, covered) {
+  for (let i = 0; i < block.length - 1; i += 1) {
+    const current = block[i].trimEnd();
+    const next = block[i + 1].trimStart();
+    if (contentLength(current) < 3 || !next) continue;
+    const last = lastCharacter(current);
+    if (!suffixParticles.has(last)) continue;
+    if (wordTails.some(word => current.endsWith(word))) continue;
+    if (!contentStart.test(next) || listMarker.test(next)) continue;
+    const nextFirst = firstCharacter(next);
+    issue("semantic",
+      `第 ${i + 1} 行以「${last}」结尾、第 ${i + 2} 行从「${nextFirst}」开始，断点落在一个完整的语义单元中间；建议合并两行或调整断点。`,
+      `合并第 ${i + 1}、${i + 2} 行，或在「${last}」之前断行。`);
+    covered.add(i);
+    covered.add(i + 1);
+  }
+}
+
+function shortLineIssues(block, issue, covered) {
+  const nonLast = block.slice(0, -1);
+  // 所有非末行都带停顿标点时更像韵文、列表或逐句对白，不做短行判定。
+  if (nonLast.length && nonLast.every(line => anyPause.test(line.trimEnd()))) return;
+  const repeated = new Map();
+  for (const line of block) {
+    const key = line.trim();
+    repeated.set(key, (repeated.get(key) || 0) + 1);
+  }
+  for (let i = 0; i < block.length; i += 1) {
+    if (covered.has(i)) continue;
+    const line = block[i];
+    const trimmed = line.trim();
+    if (!trimmed || listMarker.test(line) || labelLine.test(line) || !hanCharacter.test(line)) continue;
+    const length = contentLength(line);
+    if (length > 2) continue;
+    if ((repeated.get(trimmed) || 0) > 1) continue;
+    // 末行两个字只有在上一行没说完时才算悬空；「谢谢。」这类正常短结尾不报。
+    if (i === block.length - 1 && length === 2 && sentenceEnd.test(block[i - 1].trimEnd())) continue;
+    issue("short_line",
+      `第 ${i + 1} 行只有「${trimmed}」，在一段连续文本里单独成行；建议并入上一行或下一行。`,
+      `把第 ${i + 1} 行并入相邻行，或调整前面的断点。`);
+  }
+}
+
+export function checkLineSemantics(translation, { source = "", locale = "", contentType = "general", markers = [] } = {}) {
+  const text = String(translation || "");
+  if (!hasSourceBreak(text, markers)) return [];
+  const lines = visibleLines(text, markers);
+  const issues = [];
+  const issue = (type, message, suggestion = "", severity = "warning") => issues.push({
+    type: "line_layout_" + type, severity, category: "layout", message, ...(suggestion ? { suggestion } : {})
+  });
+  tokenSplitIssues(lines, issue);
+  lineCountIssue({ source, lines, markers, issue });
+  const chinese = chineseQaLocale(locale) || (!locale && hanCharacter.test(text));
+  if (!chinese || contentType === "verse") return issues;
+  for (const block of textBlocks(lines)) {
+    if (!isWrappedBlock(block)) continue;
+    const covered = new Set();
+    semanticBreakIssues(block, issue, covered);
+    shortLineIssues(block, issue, covered);
+  }
+  return issues;
 }
 
 export function layoutHint(layout, fromEntry = "") {

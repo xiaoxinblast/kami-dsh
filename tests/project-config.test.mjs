@@ -58,5 +58,17 @@ test("项目设置里的 QA 说明与实际检查边界一致", () => {
   assert.match(rules.get("orthography").description, /日式「」/);
   assert.match(rules.get("term_consistency").description, /结合当前句义判断/);
   assert.match(rules.get("term_potential").description, /模型判断/);
+  assert.match(rules.get("newline_semantics").description, /虚词/);
+  assert.match(rules.get("newline_suspicious_break").description, /数字/);
   assert.equal(projectRuleIdForIssue({ type: "aiqa_terminology_required" }), "term_consistency");
+});
+
+test("换行检查按语义、可疑断行和数量分别归属，结构检查不受开关控制", () => {
+  assert.equal(projectRuleIdForIssue({ type: "line_layout_punctuation" }), "");
+  assert.equal(projectRuleIdForIssue({ type: "line_layout_marker" }), "");
+  assert.equal(projectRuleIdForIssue({ type: "line_layout_semantic" }), "newline_semantics");
+  assert.equal(projectRuleIdForIssue({ type: "line_layout_short_line" }), "newline_semantics");
+  assert.equal(projectRuleIdForIssue({ type: "line_layout_token" }), "newline_suspicious_break");
+  assert.equal(projectRuleIdForIssue({ type: "line_layout_count" }), "newline_count");
+  assert.equal(createDefaultProjectSettings().qa.rules.newline_count.severity, "info");
 });

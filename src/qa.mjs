@@ -1,4 +1,4 @@
-import { checkLineLayout } from "./line-layout.mjs";
+import { checkLineLayout, checkLineSemantics } from "./line-layout.mjs";
 import { xliffTagProblem } from "./xliff-document.mjs";
 import { textContainsTerm } from "./asset-governance.mjs";
 import { digitSequence, digitsRecoverable, extractProtectedTokens, normalizeSource, withoutProtectedTokens } from "./text.mjs";
@@ -25,7 +25,9 @@ export function checkExactMasterTm({ translation = "", translationReferences = [
 }
 
 export function runQa({ source, translation, lineLayout = null, matches = [], translationReferences = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null, draftCheck = false }) {
-  const issues = checkLineLayout(translation, lineLayout);
+  const issues = [...checkLineLayout(translation, lineLayout), ...checkLineSemantics(translation, {
+    source, locale, contentType, markers: lineLayout?.markers || []
+  })];
   const chinese = chineseQaLocale(locale);
   if (String(source).includes("<tag ") || String(translation).includes("<tag ")) {
     const problem = xliffTagProblem(source, translation);

@@ -102,3 +102,17 @@ test("元数据注释可提供数字上限；只有换行的译文也检查行�
   assert.equal(layout.rules[0].maxLines, 2);
   assert.deepEqual(checkLineLayout("快走\n，别回头", null).map(i => i.type), ["line_layout_punctuation"]);
 });
+
+test("行首行尾禁则覆盖点号、闭合符号和行尾开括号", () => {
+  for (const text of ["甲\n？乙", "甲\n：乙", "甲\n；乙", "甲\n）乙", "甲\n」乙", "甲\n》乙", "甲\n．乙"]) {
+    assert.deepEqual(checkLineLayout(text, null).map(i => i.type), ["line_layout_punctuation"], text);
+  }
+  assert.deepEqual(checkLineLayout("甲（\n乙）", null).map(i => i.type), ["line_layout_punctuation"]);
+  assert.deepEqual(checkLineLayout("甲「\n乙」", null).map(i => i.type), ["line_layout_punctuation"]);
+});
+
+test("ASCII 标点只在上一行以汉字收尾时才判为行首禁则", () => {
+  assert.deepEqual(checkLineLayout("早上好\n.我们走", null).map(i => i.type), ["line_layout_punctuation"]);
+  assert.deepEqual(checkLineLayout("v1.2\n.3", null), []);
+  assert.deepEqual(checkLineLayout("1\n.5", null), []);
+});
