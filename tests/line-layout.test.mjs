@@ -95,6 +95,21 @@ test("复杂原件核对需要实际的工具证据，拒绝未读来源、无�
   await assert.rejects(inspect(async () => ({ content: reply({ quote: "每行十二字。" }) }), { ...file, text: quote }), /缺少可核实/u);
 });
 
+test("资料没有换行字数上限时按不设上限处理，不中断翻译", async () => {
+  const file = { path: "设定集.md", purpose: "reference", text: "本作对白共 120 句，排版按 UI 实际情况处理。\n横向每行最多 20 字，字数口径待确认。" };
+  const model = payload => async () => ({ content: JSON.stringify(payload) });
+  const inspect = (adapter, input = file, runner = null) => withRuntimeCall({ modelAdapter: adapter }, () => inspectLayoutRules([input], { type: "dialogue" }, runner));
+  // 资料没规定数字上限：模型如实返回空规则并说明原因，照常翻译。
+  assert.deepEqual(await inspect(model({ rules: [], unresolved: "资料未规定每行字数上限" })), []);
+  assert.deepEqual(await inspect(model({ rules: [], unresolved: "" })), []);
+  // 原件没有可直接读取的正文，模型判断没有适用上限时，不必先调用读取工具。
+  const runner = { tools: [{ type: "function", function: { name: "read", parameters: {} } }], maxRounds: 2, execute: async () => ({ refs: [{ path: "规格表.xlsx" }], text: "" }) };
+  assert.deepEqual(await inspect(model({ rules: [], unresolved: "资料未规定换行字数" }), { path: "规格表.xlsx", purpose: "reference", text: null }, runner), []);
+  // 已核实原文和数字的上限照常生效；口径说明只记日志，不推翻已核实的数字。
+  assert.deepEqual(await inspect(model({ rules: [{ source: file.path, quote: "横向每行最多 20 字", maxChars: 20, counting: "characters" }], unresolved: "字数口径未明确" })),
+    [{ source: file.path, quote: "横向每行最多 20 字", maxChars: 20, counting: "characters" }]);
+});
+
 test("元数据注释可提供数字上限；只有换行的译文也检查行首标点", async () => {
   const layout = await resolveLineLayout({ pack: { ...pack, neighborContext: { note: "每行最多十二字，最多两行。" } } });
   assert.equal(layout.rules[0].source, "条目注释");
