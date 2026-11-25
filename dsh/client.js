@@ -516,7 +516,7 @@ window.__ModuleLoader__.load({
       "门禁修订": "Gate revisions", "继续门禁修订": "Continue gate revision", "回归集": "Regression suite", "回归案例": "regression cases",
       "资产同步": "Assets synced", "自动学习记录": "Automation history", "尚无启用的 Gold Set": "No active Gold Set", "上次门禁": "Last gate",
       "资产已更新，需要重跑门禁": "Assets changed; rerun the gate", "下一步": "Next step",
-      "待核对": "Pending review", "处": "items", "待核对明细": "Pending items", "处待核对": "items pending review", "阶段进度": "Stage progress", "未知术语": "Unknown term", "未记录原因": "No reason recorded",
+      "待核对": "Pending review", "需要 Kami 翻译会话": "A Kami translation session is required", "当前会话不是 Kami 翻译会话。请新建或切换到 Kami 翻译会话，再打开这个标签页。": "This session is not a Kami translation session. Create or switch to one, then open this tab.", "在右侧栏打开 Kami 翻译工作台；需要先有 Kami 翻译会话。": "Open the Kami workbench in the right sidebar; a Kami translation session is required.", "新建 Kami 翻译会话": "New Kami translation session", "当前 DSH 不支持从侧栏新建会话，请在开始页选择 Kami 翻译预设。": "This DSH version cannot create a session from the sidebar. Choose the Kami translation preset on the start page.", "处": "items", "待核对明细": "Pending items", "处待核对": "items pending review", "阶段进度": "Stage progress", "未知术语": "Unknown term", "未记录原因": "No reason recorded",
       "模型 QA 未通过或修订未生效的句子保留原译文；这里给出具体原因，可逐条查看译段。": "Sentences whose model QA failed or whose revision did not apply keep the original translation. Reasons are listed here for each item.",
       "可跨页勾选句段。翻译重试会重新翻译并自动校对；校对重试只修订现有译文，本地 QA 只检查。整批补齐后自动进入一致性检查。": "Select segments across pages. Translation retry re-translates and proofreads automatically; proofreading retry only revises existing text, and local QA only checks. A completed batch starts the consistency review automatically."
     });
@@ -664,10 +664,20 @@ window.__ModuleLoader__.load({
       const label = t("打开 Kami 翻译工作台");
       return h("button", { type: "button", title: label, "aria-label": label, onClick: () => openWorkbench(sessionId), style: { width: 28, height: 28, border: 0, borderRadius: 8, cursor: "pointer", font: "inherit", color: "var(--dsw-alias-label-secondary)", background: "transparent", display: "inline-grid", placeItems: "center" } }, h(BrandMark, { size: 21, mono: true }));
     }
+    function WorkbenchGuide({ t, onStart }) {
+      const [failed, setFailed] = useState(false);
+      return h("main", { className: "kami", "aria-label": t("Kami 翻译工作台") }, h("style", null, css),
+        h("div", { className: "empty" }, h(BrandMark, { size: 58 }), h("h3", null, t("需要 Kami 翻译会话")),
+          h("p", null, t("当前会话不是 Kami 翻译会话。请新建或切换到 Kami 翻译会话，再打开这个标签页。")),
+          onStart && h(Button, { primary: true, onClick: () => { if (!onStart()) setFailed(true); } }, t("新建 Kami 翻译会话")),
+          failed && h("p", { className: "error", role: "alert" }, t("当前 DSH 不支持从侧栏新建会话，请在开始页选择 Kami 翻译预设。"))));
+    }
     function WorkbenchTab(props) {
       const preset = props.useSessions((state) => state.byId[props.sessionId]?.projectionValues?.agentPreset);
       const { tab } = props.useTabInfo();
-      return preset === "kami-translator" ? h(Workbench, { ...props, key: props.sessionId, visible: tab.visible }) : null;
+      const t = props.t || ((key) => key);
+      // 非 Kami 会话也保留右侧栏入口：给出明确引导，而不是一扇空白标签页。
+      return preset === "kami-translator" ? h(Workbench, { ...props, key: props.sessionId, visible: tab.visible }) : h(WorkbenchGuide, { t, onStart: props.startKamiSession });
     }
     function WorkbenchTitle({ useTabInfo }) {
       const { tab } = useTabInfo();
@@ -1592,6 +1602,18 @@ window.__ModuleLoader__.load({
           const selectModel = async (sessionId, selection) => {
             const result = await ctx.remote.session.selectModel({ sessionId, ...selection }); if (!result.ok) throw new Error(result.error.message); return result.value;
           };
+          const startKamiSession = () => {
+            const workspace = ctx.get?.("uiWorkspace");
+            if (typeof workspace?.startSession !== "function") return false;
+            try {
+              Promise.resolve(workspace.startSession(undefined, { agentPreset: "kami-translator", whenDraftExists: "append" }))
+                .catch((error) => console.warn("[Kami] 新建翻译会话失败", error));
+              return true;
+            } catch (error) {
+              console.warn("[Kami] 新建翻译会话失败", error);
+              return false;
+            }
+          };
           const openWorkbench = (sessionId) => {
             if (!sessionId || ctx.sidebarRight.mounted.getSnapshot() !== sessionId || ctx.sessions.list.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset !== "kami-translator") return;
             const existing = ctx.sidebarRight.openTabs.getSnapshot().find((tab) => tab.sessionId === sessionId && tab.kind === WORKBENCH_KIND);
@@ -1602,8 +1624,19 @@ window.__ModuleLoader__.load({
             if (ctx.sidebarRight.mounted.getSnapshot() !== sessionId) return;
             for (const tab of ctx.sidebarRight.openTabs.getSnapshot()) if (tab.sessionId === sessionId && tab.kind === WORKBENCH_KIND) ctx.sidebarRight.close(tab.tabId);
           };
-          ctx.effect(() => ctx.sidebarRightTabs.register({ id: WORKBENCH_TYPE, kind: WORKBENCH_KIND, title: () => ctx.locale.bind("kami-dsh")("Kami 翻译工作台"), keepMounted: true }));
-          ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({ name: "sidebar.right.pane.tab", key: WORKBENCH_TYPE, locale: "kami-dsh", inject: () => ({ call, prompt, modelCatalog, selectModel }) }, WorkbenchTab));
+          const dictionary = (key) => ctx.locale.bind("kami-dsh")(key);
+          ctx.effect(() => ctx.sidebarRightTabs.register({
+            id: WORKBENCH_TYPE, kind: WORKBENCH_KIND, priority: "extension", keepMounted: true,
+            title: () => dictionary("Kami 翻译工作台"),
+            // guide 是 DSH 右侧栏/开始页的工具入口；没有它，插件只在已打开的 Kami 会话里可见。
+            guide: [{
+              id: WORKBENCH_KIND, order: 410,
+              title: () => dictionary("Kami 翻译工作台"),
+              description: () => dictionary("在右侧栏打开 Kami 翻译工作台；需要先有 Kami 翻译会话。"),
+              icon: () => h(BrandMark, { size: 18 })
+            }]
+          }));
+          ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({ name: "sidebar.right.pane.tab", key: WORKBENCH_TYPE, locale: "kami-dsh", inject: () => ({ call, prompt, modelCatalog, selectModel, startKamiSession }) }, WorkbenchTab));
           ctx.slots.inject("sidebar.right.pane.tab.title", () => ctx.slots.register({ name: "sidebar.right.pane.tab.title", key: WORKBENCH_TYPE, locale: "kami-dsh" }, WorkbenchTitle));
           ctx.slots.inject("shell.overlay", () => ctx.slots.register({ name: "shell.overlay", id: "kami-session-panel", inject: () => ({ hooks: { kamiMounted: ctx.sidebarRight.mounted }, openWorkbench, closeWorkbench }) }, KamiPanelPresence));
           for (const name of ["conversation.hero.options", "conversation.session.header.utilities"]) ctx.slots.inject(name, () => ctx.slots.register({ name, id: "kami-workbench-open", locale: "kami-dsh", inject: () => ({ openWorkbench }) }, WorkbenchOpener));

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 test("Kami opens one session-owned right tab only for the selected Kami preset", async () => {
-  const registrations = [], definitions = [], disposers = [], opens = [], focused = [], closed = [];
+  const registrations = [], definitions = [], disposers = [], opens = [], focused = [], closed = [], started = [];
   const state = { mounted: "normal", expanded: true, tabs: [], byId: {
     normal: { projectionValues: { agentPreset: "standard" } },
     kami: { projectionValues: { agentPreset: "kami-translator" } },
@@ -28,6 +28,7 @@ test("Kami opens one session-owned right tab only for the selected Kami preset",
     locale: { register() {}, bind: () => (key) => key },
     remote: { async $mount() { return () => {}; } },
     sessions: { list: { getSnapshot: () => ({ byId: state.byId }) } },
+    get(name) { return name === "uiWorkspace" ? { startSession: (...args) => { started.push(args); return Promise.resolve(); } } : undefined; },
     sidebarRightTabs: { register(definition) { definitions.push(definition); return () => definitions.splice(definitions.indexOf(definition), 1); } },
     sidebarRight: {
       mounted: { getSnapshot: () => state.mounted }, openTabs: { getSnapshot: () => state.tabs },
@@ -43,6 +44,15 @@ test("Kami opens one session-owned right tab only for the selected Kami preset",
   };
   await plugin.apply(ctx);
   assert.equal(definitions.length, 1, "register a right-sidebar tab type");
+  const definition = definitions[0];
+  assert.equal(definition.priority, "extension");
+  assert.equal(definition.guide?.length, 1, "register the right-sidebar guide entry");
+  const guide = definition.guide[0];
+  assert.equal(guide.id, definition.kind);
+  assert.equal(guide.order, 410);
+  assert.equal(guide.title(), "Kami 翻译工作台");
+  assert.match(guide.description(), /右侧栏打开 Kami 翻译工作台/u);
+  assert.equal(typeof guide.icon, "function");
   assert.equal(registrations.some((entry) => ["main", "sidebar.panellist"].includes(entry.name)), false);
   const body = registrations.find((entry) => entry.name === "sidebar.right.pane.tab");
   assert.equal(body.key, definitions[0].id);
@@ -64,7 +74,12 @@ test("Kami opens one session-owned right tab only for the selected Kami preset",
   const tabProps = { ...body.inject(), sessionId: "otherKami", useSessions: props.useSessions, useTabInfo: () => ({ tab: { visible: true } }) };
   const view = body.component(tabProps);
   assert.equal(view.props.sessionId, "otherKami", "bind the body to its own tab session, not the main-view session");
-  assert.equal(body.component({ ...tabProps, sessionId: "normal" }), null);
+  const guideView = body.component({ ...tabProps, sessionId: "normal" });
+  assert.equal(typeof guideView?.type, "function", "non-Kami sessions see guidance instead of a blank tab");
+  assert.equal(guideView.props.t("需要 Kami 翻译会话"), "需要 Kami 翻译会话");
+  assert.equal(typeof guideView.props.onStart, "function");
+  assert.equal(guideView.props.onStart(), true);
+  assert.equal(started[0][1].agentPreset, "kami-translator", "the guide can start a Kami translation session");
   state.mounted = "normal"; props.openWorkbench("otherKami");
   assert.equal(opens.length, 1, "ignore callbacks captured before the user switched sessions");
   state.mounted = undefined; render(); assert.equal(opens.length, 1);
