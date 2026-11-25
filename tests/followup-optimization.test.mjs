@@ -103,20 +103,22 @@ test("收尾不检索资料库、外部文件或网页，只加载风格指南�
   });
 });
 
-test("数据库限制单页行数时仍查全启用的 TM，只索取对齐所需字段", async () => {
-  const offsets = [];
+test("术语普查一次取全启用的 TM，只索取对齐所需字段", async () => {
+  const requests = [];
   const store = { async request(path) {
     const query = new URL(path, "http://localhost").searchParams;
     assert.equal(query.get("filter[project_id][_eq]"), "p");
     assert.equal(query.get("filter[library_id][_in]"), "m,r");
     assert.equal(query.get("fields"), "id,source,target,source_file,library_id");
-    const offset = Number(query.get("offset"));
-    offsets.push(offset);
-    return offset < 2 ? [{id: String(offset), library_id: "m", source: "原词", target: "译词"}] : [];
+    // 大记忆库不能按 500 条一页往返；一次 limit=-1 取全量。
+    assert.equal(query.get("limit"), "-1");
+    assert.equal(query.get("offset"), null);
+    requests.push(path);
+    return [{ id: "0", library_id: "m", source: "原词", target: "译词", source_file: "m.csv" }];
   } };
-  const rows = await withRuntimeCall({store}, () => listSurveyMemoryRows("zh-CN", "p", ["m","r"]));
-  assert.deepEqual(offsets, [0, 1, 2]);
-  assert.deepEqual(rows.map(row => row.id), ["0","1"]);
+  const rows = await withRuntimeCall({ store }, () => listSurveyMemoryRows("zh-CN", "p", ["m", "r"]));
+  assert.equal(requests.length, 1);
+  assert.deepEqual(rows.map(row => [row.id, row.sourceFile]), [["0", "m.csv"]]);
 });
 
 test("标记词索引保留重叠词、全半角、大小写、次序和所有来源，排除向量与停用库",()=>{

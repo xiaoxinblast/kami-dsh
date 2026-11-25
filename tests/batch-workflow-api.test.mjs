@@ -144,6 +144,27 @@ test("术语普查部分查询失败时保留标记，不计入成功覆盖", as
   assert.equal(run.runnerOptions.termSurvey.warning, "503");
 });
 
+test("模型 QA 未通过只进待核对，不算术语普查失败", async () => {
+  let run = { batchId: "survey-pending", projectId: "project-test", filename: "story.txt", locale: "zh-CN", runnerOptions: { workingGlossary: { terms: [{ source: "甲", target: "甲" }] } }, segments: [
+    { id: "a", source: "甲", translation: "甲", selected: true }
+  ] };
+  const survey = vm.runInNewContext(`(${block("async function runTermSurvey(", "async function termSurveyMemoryEntries(").trim()})`, {
+    getBatchRun: async () => structuredClone(run), saveBatchRun: async (value) => { run = value; },
+    surveyPairs, markedSurveyTerms, restoreUnverifiedSurveyRepairs, normalizeSource, runTaskPool, CONSISTENCY_CHECK_CONCURRENCY: 1,
+    getResourceLibraries: async () => [], resolveTermMemoryWithModel: async () => [],
+    termSurveyMemoryEntries: async () => new Map([["甲", [{ source: "甲", target: "甲", libraryRole: "master", libraryId: "m", role: "master" }]]]),
+    resolveTermMemory: async () => ({ status: "matched", role: "master", target: "甲", evidence: [{ role: "master", source: "甲", target: "甲", translation: "甲" }], reason: "主 TM" }),
+    repairSurveyTerms: async (current) => ({ segments: current.segments, repair: { verifiedMemoryOnly: true, changed: [], skipped: [{ segmentId: "a", source: "甲", before: "甲", reason: "模型 QA 未通过（72 分）：数字丢失；已保留原译文" }] } }),
+    getProjectAssets: async () => ({ assets: { terms: [] } }), getProviderConfig: () => ({ model: "test" }), taskProgressReporter: () => () => {},
+  });
+  const outcome = await survey("survey-pending");
+  assert.equal(outcome.failures.length, 0, "QA 未通过不是普查失败");
+  assert.equal(outcome.coverage.failedTerms, 0);
+  assert.equal(outcome.coverage.pendingRepairs, 1);
+  assert.equal(run.runnerOptions.termSurvey.warning, "");
+  assert.match(run.runnerOptions.termSurvey.repair.skipped[0].reason, /模型 QA 未通过/u);
+});
+
 test("批次详情不会把同原文另一句段的失败 QA 覆盖到已成功句段", async () => {
   const segments = [{ id: "ok", source: "same source", translation: "已确认译文", selected: true, status: "done", result: { qaScore: 97, aiQa: { score: 97, status: "passed", used: true, fallbackReason: "" } } }];
   let result, qaTranslation = "另一句段译文";

@@ -516,6 +516,8 @@ window.__ModuleLoader__.load({
       "门禁修订": "Gate revisions", "继续门禁修订": "Continue gate revision", "回归集": "Regression suite", "回归案例": "regression cases",
       "资产同步": "Assets synced", "自动学习记录": "Automation history", "尚无启用的 Gold Set": "No active Gold Set", "上次门禁": "Last gate",
       "资产已更新，需要重跑门禁": "Assets changed; rerun the gate", "下一步": "Next step",
+      "待核对": "Pending review", "处": "items", "待核对明细": "Pending items", "处待核对": "items pending review", "阶段进度": "Stage progress", "未知术语": "Unknown term", "未记录原因": "No reason recorded",
+      "模型 QA 未通过或修订未生效的句子保留原译文；这里给出具体原因，可逐条查看译段。": "Sentences whose model QA failed or whose revision did not apply keep the original translation. Reasons are listed here for each item.",
       "可跨页勾选句段。翻译重试会重新翻译并自动校对；校对重试只修订现有译文，本地 QA 只检查。整批补齐后自动进入一致性检查。": "Select segments across pages. Translation retry re-translates and proofreads automatically; proofreading retry only revises existing text, and local QA only checks. A completed batch starts the consistency review automatically."
     });
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
@@ -577,6 +579,10 @@ window.__ModuleLoader__.load({
       .kami .context-note{display:grid;gap:4px;padding:10px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .context-note:last-child{border-bottom:0}.kami .context-note p{margin:0;font-size:12px;line-height:1.7;white-space:pre-wrap}
       .kami .learning-meta{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font-size:11px;color:var(--dsw-alias-label-secondary)}.kami .learning-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}.kami .file-chip{font-size:10px;line-height:1.6;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kami .file-chip.muted{color:var(--dsw-alias-label-tertiary)}
       .kami .metric-link{display:flex;flex-direction:column;gap:4px;align-items:flex-start;padding:12px;border-radius:10px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 35%,var(--dsw-alias-border-l2));background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 6%,var(--dsw-alias-bg-layer-1));font-size:11px;cursor:pointer;text-align:left;color:var(--dsw-alias-state-error-primary)}.kami .metric-link strong{font-size:22px;line-height:1.2;font-variant-numeric:tabular-nums}.kami .metric-link:hover{border-color:var(--dsw-alias-state-error-primary)}
+      .kami .flow-progress{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--dsw-alias-label-tertiary)}.kami .flow-progress progress{width:110px;max-width:100%;height:6px;accent-color:var(--kami-accent)}
+      .kami .survey-scroll{max-height:300px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:4px 12px;background:var(--dsw-alias-bg-layer-1)}
+      .kami .survey-pending-row{display:grid;gap:4px;padding:10px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .survey-pending-row:last-child{border-bottom:0}.kami .survey-pending-row p{margin:0;font-size:12px;line-height:1.6;white-space:pre-wrap}
+      .kami .survey-pending-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
       .kami .automation-meta{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:11px;color:var(--dsw-alias-label-secondary)}.kami .automation-history>div{display:grid;gap:0}.kami .automation-history article{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;font-size:11px;padding:6px 0;border-top:1px dashed var(--dsw-alias-border-l2)}.kami .automation-history article p{margin:0}
       @container(max-width:600px){.kami .context-hero-main{grid-template-columns:minmax(0,1fr);justify-items:start}.kami .context-section{grid-template-columns:minmax(0,1fr)}.kami .context-section>button{justify-self:start}}
     `;
@@ -737,12 +743,17 @@ window.__ModuleLoader__.load({
         const followup = needsAttention && (key === "qualityReport" || key === "termSurvey");
         const warning = followup && (key === "qualityReport" ? run.qualityReport?.warning : run.termSurvey?.warning);
         const failures = followup && (key === "qualityReport" ? run.consistencyRetryCount : surveyFailureCount(run.termSurvey));
+        // 一致性/术语普查的进度来自后台任务；待核对的术语修订单独计数，不当失败。
+        const percent = ["qualityReport", "termSurvey"].includes(key) && Number.isFinite(Number(stage.percent)) ? Math.max(0, Math.min(100, Number(stage.percent))) : null;
+        const pending = key === "termSurvey" ? Number(run.termSurvey?.coverage?.pendingRepairs ?? run.termSurvey?.repair?.skipped?.length) || 0 : 0;
         return h("button", { type: "button", className: "flow-node", key, "data-status": needsAttention ? "needs_attention" : status,
           onClick: ["translation", "draftQa", "proofreading"].includes(key) ? review : () => reports(key), "aria-label": t(`查看${label}详情`), title: stage.message || t(hint) },
           h("span", { className: "flow-node-top" }, h("span", { className: "flow-number", "aria-hidden": true }, status === "completed" ? "✓" : needsAttention ? "!" : String(index + 2).padStart(2, "0")),
             h("span", { className: "flow-status" }, needsAttention ? stateText("needs_attention", t) : status === "legacy" ? t("旧版记录") : status === "partial" ? t("部分完成") : stateText(status, t))),
           h("strong", null, t(label)), h("span", { className: "flow-hint" }, followup ? warning || stage.message || t(hint) : t(hint)),
+          percent != null && (status === "in_progress" || (percent > 0 && percent < 100)) && h("span", { className: "flow-progress" }, h("progress", { max: 100, value: percent, "aria-label": t("阶段进度") }), `${percent}%`),
           failures > 0 && h("span", { className: "flow-count" }, `${failures} ${t("项待处理")}`),
+          pending > 0 && h("span", { className: "flow-count" }, `${pending} ${t("处待核对")}`),
           index < 3 && h("span", { className: "flow-count" }, h("b", null, completed[index]), ` / ${total} ${t("段")}`),
           mixed && key === "draftQa" && h("span", { className: "flow-legacy" }, t("初稿 QA"), " ", draftCompleted, " · ", t("旧版校对后 QA"), " ", oldCompleted),
           index > 0 && index < 3 && legacy > 0 && h("span", { className: "flow-legacy" }, `${legacy} ${t("段旧版译文未记录此阶段")}`));
@@ -875,10 +886,11 @@ window.__ModuleLoader__.load({
         h("ul", { className: "issues" }, ...(report.alignmentIssues || []).map((issue, index) => h("li", { key: index }, issue.message || ""))), !issues.length && h("p", { className: "muted" }, t("暂无已记录问题")));
     }
     function surveyFailureCount(survey) {
-      return (survey?.coverage?.failedTerms || 0) + (survey?.repair?.skipped?.length || 0);
+      // 模型 QA 未通过的修订进"待核对"，不再算失败项；只有 TM 查询/对齐失败需要重试。
+      return survey?.coverage?.failedTerms || 0;
     }
     function TaskReports({ model, run, t, initial = "aiQa", review }) {
-      const [tab, setTab] = useState(initial), [offset, setOffset] = useState(0), id = run.batchId, key = `qa:${id}`;
+      const [tab, setTab] = useState(initial), [offset, setOffset] = useState(0), [skipOffset, setSkipOffset] = useState(0), id = run.batchId, key = `qa:${id}`;
       const load = (token) => model.invoke(model.path(`/api/qa/batch/${encodeURIComponent(id)}`, {}, token), "GET", undefined, token);
       const qa = useSection(model, key, load, [id, run.updatedAt]);
       const quality = run.qualityReport, report = quality?.report, survey = run.termSurvey;
@@ -892,12 +904,13 @@ window.__ModuleLoader__.load({
         await model.loadRun(token, id);
       });
       const surveyFailures = surveyFailureCount(survey);
+      const skippedRepairs = survey?.repair?.skipped || [];
       const surveyAgain = (failedOnly = false) => model.perform(surveyKey, async (token) => {
         token.view.operations[surveyKey].failedOnly = failedOnly;
         await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/term-survey`, "POST", scopeArgs(model, token, { failedOnly }), token);
         await model.loadRun(token, id);
       });
-      return h("section", { className: "stack", "aria-label": t("质量与复查详情") }, h(SectionTabs, { label: "报告类型", value: tab, onChange: (value) => { setTab(value); setOffset(0); }, t, items: [["aiQa", "质量报告", "check"], ["qualityReport", "一致性复查", "search"], ["termSurvey", "术语普查", "terms"]] }),
+      return h("section", { className: "stack", "aria-label": t("质量与复查详情") }, h(SectionTabs, { label: "报告类型", value: tab, onChange: (value) => { setTab(value); setOffset(0); setSkipOffset(0); }, t, items: [["aiQa", "质量报告", "check"], ["qualityReport", "一致性复查", "search"], ["termSurvey", "术语普查", "terms"]] }),
         tab === "aiQa" && h(React.Fragment, null, h(Feedback, { model, name: `section:${key}`, retry: () => model.loadSection(key, load), t }), qa && h(QaReport, { report: qa, t, review })),
         tab === "qualityReport" && h("section", { className: "card stack" }, h("h3", null, t("一致性复查")), h("p", { className: "muted" }, run.workflow?.qualityReport?.message || t("尚未开始")), qualityWarning && h("p", { className: "error", role: "alert" }, qualityWarning),
           h("div", { className: "button-row" }, run.consistencyRetryCount > 0 && h(Button, { primary: true, onClick: () => consistencyAgain(true), busy: model.view.operations[consistencyKey]?.pending, disabled: editingLocked(run) || model.dirty() }, `${t("仅重试一致性失败项")} (${run.consistencyRetryCount})`), h(Button, { onClick: () => consistencyAgain(), busy: model.view.operations[consistencyKey]?.pending, disabled: editingLocked(run) || model.dirty() }, t(report || qualityWarning ? "重新检查全部一致性" : "开始一致性检查"))), h(Feedback, { model, name: consistencyKey, retry: !editingLocked(run) && !model.dirty() ? () => consistencyAgain(model.view.operations[consistencyKey]?.failedOnly === true) : undefined, t }),
@@ -910,8 +923,15 @@ window.__ModuleLoader__.load({
         tab === "termSurvey" && h("section", { className: "card stack" }, h("h3", null, t("术语普查")), h("p", { className: "muted" }, run.workflow?.termSurvey?.message || t("尚未开始")), survey?.warning && h("p", { className: "error", role: "alert" }, survey.warning),
           h("div", { className: "button-row" }, surveyFailures > 0 && survey?.repair?.verifiedMemoryOnly && h(Button, { primary: true, onClick: () => surveyAgain(true), busy: model.view.operations[surveyKey]?.pending, disabled: editingLocked(run) || model.dirty() || run.segments.some(segment => segment.accepted) }, `${t("仅重试术语失败项")} (${surveyFailures})`), h(Button, { onClick: () => surveyAgain(), busy: model.view.operations[surveyKey]?.pending, disabled: editingLocked(run) || model.dirty() || run.segments.some((segment) => segment.accepted === true) }, t(survey?.generatedAt ? "重新普查全部术语" : "查 TM 并统一译法"))), h(Feedback, { model, name: surveyKey, retry: !editingLocked(run) && !model.dirty() && !run.segments.some(segment => segment.accepted) ? () => surveyAgain(model.view.operations[surveyKey]?.failedOnly === true) : undefined, t }),
           surveyFailures > 0 && !survey?.repair?.verifiedMemoryOnly && h("p", { className: "muted" }, t("旧报告未记录可安全重试的术语修订。")),
-          survey?.coverage?.markedTerms != null && h("p", { className: "muted" }, `标记 ${survey.coverage.markedTerms} 条 · 已核对 ${survey.coverage.checkedTerms} 条 · 译文统一 ${survey.repair?.changed?.length || 0} 处`),
-          ...(survey?.repair?.skipped || []).map((item, index) => h("p", { className: "error", key: index }, `${item.source} · ${item.reason}`, h(Button, { small: true, onClick: () => review(item.segmentId) }, t("查看译段")))),
+          survey?.coverage?.markedTerms != null && h("p", { className: "muted" }, `标记 ${survey.coverage.markedTerms} 条 · 已核对 ${survey.coverage.checkedTerms} 条 · 译文统一 ${survey.repair?.changed?.length || 0} 处${skippedRepairs.length ? ` · 待核对 ${skippedRepairs.length} 处` : ""}`),
+          skippedRepairs.length > 0 && h("section", { className: "card stack survey-pending" },
+            h("div", { className: "section-heading" }, h("h3", null, t("待核对")), h("span", { className: "badge" }, `${skippedRepairs.length} ${t("处")}`)),
+            h("p", { className: "muted" }, t("模型 QA 未通过或修订未生效的句子保留原译文；这里给出具体原因，可逐条查看译段。")),
+            h("div", { className: "survey-scroll", role: "region", "aria-label": t("待核对明细") },
+              ...skippedRepairs.slice(skipOffset, skipOffset + 50).map((item, index) => h("article", { className: "survey-pending-row", key: `${item.segmentId || index}:${item.source || index}` },
+                h("div", { className: "survey-pending-head" }, h("strong", null, item.source || t("未知术语")), item.segmentId && h(Button, { small: true, quiet: true, onClick: () => review(item.segmentId) }, t("查看译段"))),
+                h("p", { className: "muted" }, item.reason || t("未记录原因"))))),
+            h(Pager, { offset: skipOffset, total: skippedRepairs.length, size: 50, onChange: setSkipOffset, t })),
           ...terms.slice(offset, offset + 20).map((item) => h("article", { className: "resource-row stack term-survey-row", key: item.source }, h("strong", null, `${item.source} → ${item.suggestedTarget}`), h("p", { className: "muted" }, item.reason), h("p", null, `${t("术语库登记")} · ${item.library?.found ? item.library.target : t("尚未入库")}`),
             item.tm && h("div", { className: "stack" }, h("p", null, `${item.tm.status === "matched" ? (item.tm.role === "master" ? "主 TM 命中" : "参考 TM 命中") : "待定"} · ${item.tm.reason}`),
               h("p", { className: "muted" }, `翻译期临时译法：${item.initialTarget}`),

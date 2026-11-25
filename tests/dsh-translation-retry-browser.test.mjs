@@ -177,10 +177,20 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     run.workflow.qualityReport = { status: "needs_attention", message: "一致性初查完成 2 / 3 片" };
     run.workflow.termSurvey = { status: "needs_attention", message: "术语查库完成 2 / 3 条" };
     run.consistencyRetryCount = 1;
-    run.termSurvey = { generatedAt: new Date().toISOString(), terms: [{ source: "敵", suggestedTarget: "敌人", initialTarget: "敌方", tm: { status: "matched", role: "master", reason: "主 TM 已确认译法" } }, { source: "町", suggestedTarget: "小镇" }, { source: "民", suggestedTarget: "百姓", initialTarget: "市民", tm: { status: "failed", reason: "对齐超时" } }], warning: "1 条查询超时，1 处修订未完成", coverage: { failedTerms: 1, checkedTerms: 2, markedTerms: 3 }, repair: { verifiedMemoryOnly: true, skipped: [{ source: "敵", reason: "模型 QA 超时", segmentId: segments[6].id }] } };
+    run.termSurvey = { generatedAt: new Date().toISOString(), terms: [{ source: "敵", suggestedTarget: "敌人", initialTarget: "敌方", tm: { status: "matched", role: "master", reason: "主 TM 已确认译法" } }, { source: "町", suggestedTarget: "小镇" }, { source: "民", suggestedTarget: "百姓", initialTarget: "市民", tm: { status: "failed", reason: "对齐超时" } }], warning: "1 条查询超时", coverage: { failedTerms: 1, checkedTerms: 2, markedTerms: 3, pendingRepairs: 1 }, repair: { verifiedMemoryOnly: true, skipped: [{ source: "敵", reason: "模型 QA 未执行：请求超时；已保留原译文", segmentId: segments[6].id }] } };
+    run.workflow.termSurvey = { status: "in_progress", message: "术语查库完成 1 / 3 条", percent: 42 };
+    await page.reload();
+    const termProgress = page.getByRole("button", { name: "查看术语普查详情", exact: true });
+    await termProgress.getByText("42%", { exact: true }).waitFor();
+    assert.equal(await termProgress.locator("progress").getAttribute("value"), "42");
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.locator(".flow-group").filter({ has: termProgress }).screenshot({ path: join(process.env.KAMI_UI_SCREENSHOTS, "term-survey-progress.png") });
+    }
+    run.workflow.termSurvey = { status: "needs_attention", message: "术语查库完成 2 / 3 条" };
     for (const [verb, stageName, count, reason, label] of [
       ["consistency-check", "一致性校对", 1, run.qualityReport.warning, "仅重试一致性失败项"],
-      ["term-survey", "术语普查", 2, run.termSurvey.warning, "仅重试术语失败项"]
+      ["term-survey", "术语普查", 1, run.termSurvey.warning, "仅重试术语失败项"]
     ]) {
       attentionOverride = { verb, count, unit: "项", reason, label, failedOnly: true };
       await page.reload();
@@ -227,8 +237,13 @@ test("DSH exposes single, cross-page and all-failed retries at wide and narrow w
     await exportPanel.getByRole("button", { name: "查看译段" }).click();
     await page.locator(".segment-editor").getByRole("textbox", { name: "译文 1" }).waitFor();
     await panel("质量与复查").click();
-    for (const [tab, label, count, endpoint] of [["一致性复查", "仅重试一致性失败项", 1, "consistency-check"], ["术语普查", "仅重试术语失败项", 2, "term-survey"]]) {
+    for (const [tab, label, count, endpoint] of [["一致性复查", "仅重试一致性失败项", 1, "consistency-check"], ["术语普查", "仅重试术语失败项", 1, "term-survey"]]) {
       await page.locator('[aria-label="报告类型"]').getByRole("button", { name: tab, exact: true }).click();
+      if (tab === "术语普查") {
+        await page.getByRole("region", { name: "待核对明细", exact: true }).waitFor();
+        await page.getByText("模型 QA 未执行：请求超时；已保留原译文", { exact: true }).waitFor();
+        await page.getByText("1 处", { exact: true }).waitFor();
+      }
       const retry = page.getByRole("button", { name: label + " (" + count + ")", exact: true });
       await preview(page.locator("section.card").filter({ has: retry }), endpoint);
       await Promise.all([page.waitForResponse(res => res.url().endsWith("/invoke") && res.request().postData()?.includes(endpoint)), retry.click()]);

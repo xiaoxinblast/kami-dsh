@@ -81,7 +81,7 @@ import { buildReviewReceipt, normalizeReviewDecision } from "./src/review-receip
 import { createRegressionCandidateFromQaCase, decideRegressionCandidate, normalizeGoldSet, normalizeRegressionSuite } from "./src/gold-regression.mjs";
 import { buildGateQueue, decideReleaseGate, evaluateGoldRun, evaluateRegressionRun, gateRefreshDecision, gateRunCoversAssets, resolveGateAssets, selectGateCases, selectGateTargetSkill } from "./src/quality-gate.mjs";
 import { deriveExternalReviewCases, mergeRegressionSources, regressionCaseSetDigest } from "./src/regression-sources.mjs";
-import { alignSurveyToHumanFinal, decideTermWrite, pendingCandidateFromUnresolved, pendingReason, surveyPairs } from "./src/term-survey.mjs";
+import { alignSurveyToHumanFinal, decideTermWrite, pendingCandidateFromUnresolved, pendingReason, surveyPairs, termRepairQaFailureReason } from "./src/term-survey.mjs";
 import { buildTermSurveyView } from "./src/term-survey-view.mjs";
 import { chunkGateFailures, gateFailureCases, mergeGateReviewReports, termInputsFromReview } from "./src/gate-review.mjs";
 import { buildTrainingExport, datasetToJsonl } from "./src/training-export.mjs";
@@ -4558,11 +4558,13 @@ async function runTermSurvey(batchId, { taskId = "", failedOnly = false } = {}) 
     : markedSurveyTerms(run.runnerOptions?.workingGlossary, assets.terms || []);
   const failedPairs = failedOnly ? previous.repair.skipped || [] : null;
   const libraries = await getResourceLibraries(run.projectId, { kind: "translation_memory" });
+  // 大记忆库的准备（拉取 + 建索引）可能比逐条核对更久，先给用户一个明确的阶段提示。
+  report({ phase: "preparing", message: "正在准备主 / 参考 TM 索引…", percent: 5, completed: 0, total: marks.length });
+  const lookup = await termSurveyMemoryEntries(run, marks.map(term => term.source), libraries);
   report({ phase: "surveying", message: `正在查找标记术语的 TM 译法：0 / ${marks.length}`, percent: 10, completed: 0, total: marks.length });
   let completed = 0;
-  const lookup = termSurveyMemoryEntries(run, marks.map(term => term.source), libraries);
   const results = await runTaskPool(marks, async (term) => ({ ...term, tm: await resolveTermMemory({
-    term, entries: (await lookup).get(term.source) || [], align: resolveTermMemoryWithModel
+    term, entries: lookup.get(term.source) || [], align: resolveTermMemoryWithModel
   }) }), {
     concurrency: CONSISTENCY_CHECK_CONCURRENCY,
     onSettled: (result) => {
@@ -4585,8 +4587,9 @@ async function runTermSurvey(batchId, { taskId = "", failedOnly = false } = {}) 
   if (failedOnly) repaired.repair = { ...previous.repair, ...repaired.repair,
     changed: [...(previous.repair.changed || []), ...repaired.repair.changed] };
   const failedTerms = results.filter(result => result.status === "rejected").length;
-  const coverage = { analyzedPairs: pairs.length, totalSegments: (run.segments || []).filter((segment) => segment.selected !== false).length, markedTerms: terms.length, checkedTerms: terms.length - failedTerms, failedTerms };
-  if (repaired.repair.skipped.length) failures.push(`${repaired.repair.skipped.length} 处译文未能统一，请查看术语普查中的待核对原因`);
+  // 模型 QA 未通过属于"待核对"，不是普查失败：保留原译文并记录原因，任务照常完成。
+  const pendingRepairs = repaired.repair.skipped.length;
+  const coverage = { analyzedPairs: pairs.length, totalSegments: (run.segments || []).filter((segment) => segment.selected !== false).length, markedTerms: terms.length, checkedTerms: terms.length - failedTerms, failedTerms, pendingRepairs };
   const latest = await getBatchRun(batchId) || run;
   const glossary = latest.runnerOptions?.workingGlossary;
   if (failedOnly) {
@@ -4705,7 +4708,7 @@ async function repairSurveyTerms(run, terms, assets, { report = () => {}, failed
     try {
       if (result.error) throw result.error;
       const qa = result.value;
-      if (!qa.aiQa?.used || qa.aiQa.fallbackReason || qa.aiQa.status !== "passed") throw new Error(qa.aiQa?.fallbackReason || "术语修订未通过模型 QA，已保留原译文");
+      if (!qa.aiQa?.used || qa.aiQa.fallbackReason || qa.aiQa.status !== "passed") throw new Error(termRepairQaFailureReason(qa));
       const after = qa.translation || plan.translation;
       validate(plan, after);
       const current = { ...segment, result: { ...segment.result, matches: matchTerms(segment.source, assets, { exactOnly: true, contentType: run.contentType, domain: run.domain }) } };
@@ -4744,18 +4747,19 @@ function startTermSurvey(batchId, failedOnly = false) {
       const evidenceCache = { batchId, guides: new Map(), snippets: new Map() };
       const outcome = await withRuntimeCall({ evidenceCache, followupOnly: true }, () => runTermSurvey(batchId, { taskId: task.id, failedOnly }));
       const total = outcome.terms.length, checked = outcome.coverage?.checkedTerms ?? total;
+      const pending = Number(outcome.coverage?.pendingRepairs) || 0;
       await updateBackgroundTaskProgress(task.id, {
         status: outcome.failures.length ? "needs_attention" : "completed",
         progress: {
           phase: "completed",
           message: total
-            ? `标记术语已核对 ${checked} / ${total} 条，TM 命中 ${outcome.terms.filter((term) => term.tm?.status === "matched").length} 条${checked < total ? `，${total - checked} 条查询失败` : ""}`
+            ? `标记术语已核对 ${checked} / ${total} 条，TM 命中 ${outcome.terms.filter((term) => term.tm?.status === "matched").length} 条${pending ? `，${pending} 处待核对` : ""}${checked < total ? `，${total - checked} 条查询失败` : ""}`
             : "没有翻译期标记术语可供普查",
           percent: 100,
           completed: checked,
           total
         },
-        payload: { batchId, candidateCount: outcome.terms.length, warning: outcome.failures[0] || "" }
+        payload: { batchId, candidateCount: outcome.terms.length, pendingRepairs: pending, warning: outcome.failures[0] || "" }
       });
       await saveFollowupAttention(run, "termSurvey", task.id, outcome.failures[0]);
       return { batchId, taskId: task.id, ...outcome };
@@ -4790,8 +4794,9 @@ async function saveFollowupAttention(initial, stage, taskId, reason, wholeStage 
   const entries = { ...run.runnerOptions.followupAttention };
   const survey = run.runnerOptions.termSurvey;
   const consistency = stage === "qualityReport";
+  // 只有 TM 查询/对齐失败才算"失败项"；模型 QA 未通过的可修订项进"待核对"，不再触发失败提醒。
   const count = wholeStage ? 0 : consistency ? consistencyRetryWork(run).count
-    : (survey?.terms || []).filter(term => term.tm?.status === "failed").length + (survey?.repair?.skipped?.length || 0);
+    : (survey?.terms || []).filter(term => term.tm?.status === "failed").length;
   const failedOnly = count > 0 && (consistency || survey?.repair?.verifiedMemoryOnly === true);
   const label = consistency ? (failedOnly ? "仅重试一致性失败项" : "重新运行一致性检查") : (failedOnly ? "仅重试术语失败项" : "重新运行术语普查");
   const action = reason ? { verb: consistency ? "consistency-check" : "term-survey", label, count, unit: "项", reason: String(reason).slice(0, 220), failedOnly } : null;

@@ -136,6 +136,21 @@ export function decideTermWrite(candidate = {}, { existingTerms = [], autoWriteE
   return { auto: true, reason: "译法已由人工终稿证据确认" };
 }
 
+/**
+ * 术语修订后模型 QA 未通过时给用户看的原因。
+ * 不能只写"未通过"：要带上 QA 状态、分数和具体问题，说明原译文为什么被保留。
+ */
+export function termRepairQaFailureReason(qa = {}) {
+  const aiQa = qa?.aiQa || {};
+  const issues = (Array.isArray(qa?.issues) ? qa.issues : Array.isArray(aiQa.issues) ? aiQa.issues : [])
+    .map((issue) => text(issue?.message)).filter(Boolean).slice(0, 2);
+  const score = Number.isFinite(Number(aiQa.score)) ? `（${aiQa.score} 分）` : "";
+  if (!aiQa.used) return `模型 QA 未执行${aiQa.fallbackReason ? `：${text(aiQa.fallbackReason)}` : ""}；已保留原译文`;
+  if (aiQa.fallbackReason) return `模型 QA 未完成：${text(aiQa.fallbackReason)}；已保留原译文`;
+  if (issues.length) return `模型 QA 未通过${score}：${issues.join("；").slice(0, 180)}；已保留原译文`;
+  return `模型 QA 未通过${score}（状态：${text(aiQa.status) || "review"}）；已保留原译文`;
+}
+
 /** 待审候选的展示原因：把模型依据和入库判定合并成一句话。 */
 export function pendingReason(candidate = {}, decision = {}) {
   const parts = [text(decision.reason)].filter(Boolean);

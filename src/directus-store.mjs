@@ -393,16 +393,12 @@ function mapDirectusMemory(item, { contentType = "general", domain = "general", 
 }
 
 export async function listSurveyMemoryRows(locale, projectId, libraryIds) {
-  const params = new URLSearchParams({ limit: "500", sort: "-date_created,id", fields: "id,source,target,source_file,library_id", "filter[library_id][_in]": libraryIds.join(",") });
+  // 术语普查只需要精简字段；一次取全量，避免大记忆库按 500 条一页反复往返。
+  const params = new URLSearchParams({ limit: "-1", sort: "-date_created,id", fields: "id,source,target,source_file,library_id", "filter[library_id][_in]": libraryIds.join(",") });
   if (projectId) params.set("filter[project_id][_eq]", projectId);
   else params.set("filter[project_id][_empty]", "true");
-  const rows = [];
-  while (true) {
-    params.set("offset", String(rows.length));
-    const page = await request(`/items/${memoryCollectionFor(locale)}?${params}`, { timeoutMs: 120_000 });
-    if (!page.length) return rows;
-    rows.push(...page.map(row => ({ id: row.id, source: row.source, target: row.target, sourceFile: row.source_file, libraryId: row.library_id })));
-  }
+  const rows = await request(`/items/${memoryCollectionFor(locale)}?${params}`, { timeoutMs: 120_000 });
+  return rows.map(row => ({ id: row.id, source: row.source, target: row.target, sourceFile: row.source_file, libraryId: row.library_id }));
 }
 
 export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, offset = 0, search = "", exactContentType = false, scopeFallback = false, projectId = "" } = {}) {

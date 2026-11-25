@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { alignSurveyToHumanFinal, decideTermWrite, normalizeSurveyTerms, parseTermAlign, pendingCandidateFromUnresolved, pendingReason, surveyPairs } from "../src/term-survey.mjs";
+import { alignSurveyToHumanFinal, decideTermWrite, normalizeSurveyTerms, parseTermAlign, pendingCandidateFromUnresolved, pendingReason, surveyPairs, termRepairQaFailureReason } from "../src/term-survey.mjs";
 
 /**
  * 翻译期术语普查 + 回填确认。核心安全边界：模型只负责"哪个词像术语"，
@@ -115,4 +115,11 @@ test("人工改掉译法又没解析出来时，转成待审核候选而不是�
   assert.equal(record.evidence.targetExcerpt, "前往崩兆之隅。", "证据要带上人工终稿片段，方便核对");
   assert.equal(record.locale, "zh-CN");
   assert.equal(pendingCandidateFromUnresolved({ source: "", suggestedTarget: "x" }, { locale: "zh-CN" }), null);
+});
+
+test("术语修订的 QA 未通过要带上具体原因", () => {
+  assert.match(termRepairQaFailureReason({ aiQa: { used: false, fallbackReason: "请求超时" } }), /模型 QA 未执行：请求超时；已保留原译文/u);
+  assert.match(termRepairQaFailureReason({ aiQa: { used: true, status: "review", score: 72 }, issues: [{ message: "数字 15% 丢失" }, { message: "语气过强" }] }),
+    /模型 QA 未通过（72 分）：数字 15% 丢失；语气过强；已保留原译文/u);
+  assert.match(termRepairQaFailureReason({ aiQa: { used: true, status: "review" } }), /状态：review/u);
 });
