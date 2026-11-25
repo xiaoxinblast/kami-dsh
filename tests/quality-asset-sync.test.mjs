@@ -48,3 +48,27 @@ test("自动并入新人工终稿时新建 Gold 版本，旧版退役且内容�
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("手动运行门禁前也会先同步 Gold Set", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kami-asset-manual-gate-"));
+  const workbench = await createWorkbench({ dataDirectory: directory, modelAdapter: async () => ({ content: "译文" }) });
+  // server.mjs 在 embedded 模式启动后才会通过存储校验，所以在 createWorkbench 之后再取模块。
+  await import("../server.mjs");
+  const context = { human: true };
+  try {
+    const { project } = await workbench.invoke({ path: "/api/projects", method: "POST", body: { name: "手动门禁同步" } }, context);
+    const scope = { locale: "zh-CN", project: project.id, contentType: "general", domain: "general" };
+    for (const id of ["a", "b", "c"]) await saveLearningTrajectory({ ...scope, id, source: `原文-${id}`, initialTranslation: `机器${id}`, finalTranslation: `终稿${id}`,
+      status: "completed", humanDecision: { accepted: true, finalTranslation: `终稿${id}` }, assetRefs: { sourceFile: `资料/${id}.md` } });
+    // 没有先调用 syncQualityAssets：门禁入口必须自己同步。
+    const started = await workbench.invoke({ path: "/api/quality/runs", method: "POST", body: { locale: "zh-CN", project: project.id, contentType: "general", domain: "general" } }, context);
+    assert.ok(started.backgroundTaskId, "应进入后台门禁任务");
+    assert.equal(started.total, 3, "门禁应读取刚同步的 Gold 样本");
+    const rows = await workbench.invoke({ path: `/api/quality/assets?locale=zh-CN&projectId=${encodeURIComponent(project.id)}&contentType=general&domain=general` }, context);
+    assert.equal(rows.active.goldSampleCount, 3);
+    assert.deepEqual(rows.active.goldSetVersions, [`gold:zh-CN:general:general:${project.id}@v1`]);
+  } finally {
+    await workbench.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

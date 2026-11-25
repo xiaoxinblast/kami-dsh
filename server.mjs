@@ -621,6 +621,9 @@ const qualityGateInFlight = new Set();
  * 返回后台任务；真正跑模型的部分在后台继续。
  */
 async function startQualityGateRun({ scope, skill, triggeredBy = "manual", reason = "manual" }) {
+  // 手动和自动统一的入口：每次门禁都先同步资产，保证跑在当前 Gold/回归版本上。
+  // 自动链路已经同步过时这里通常读不到新证据，不会重复产生版本。
+  await syncQualityAssets(scope, { reason: triggeredBy || reason || "gate" });
   const assets = await loadGateAssets(scope);
   const gateCases = selectGateCases(assets.cases, getSettings().learning.gateRegressionCaseLimit);
   const total = assets.samples.length + gateCases.length;

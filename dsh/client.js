@@ -515,7 +515,7 @@ window.__ModuleLoader__.load({
       "生成于": "Created", "更新于": "Updated", "基于": "Based on",
       "门禁修订": "Gate revisions", "继续门禁修订": "Continue gate revision", "回归集": "Regression suite", "回归案例": "regression cases",
       "资产同步": "Assets synced", "自动学习记录": "Automation history", "尚无启用的 Gold Set": "No active Gold Set", "上次门禁": "Last gate",
-      "资产已更新，需要重跑门禁": "Assets changed; rerun the gate"
+      "资产已更新，需要重跑门禁": "Assets changed; rerun the gate", "下一步": "Next step"
     });
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
@@ -1249,6 +1249,10 @@ window.__ModuleLoader__.load({
       const automation = data.automation, automaticJob = (data.evaluationJobs || []).find((item) => item.jobId === automation?.jobId);
       const automationLabels = { waiting: "等待样本", proposing: "准备候选", revising: "正在修订候选", evaluating: "自动评测中", gating: "自动门禁中", blocked: "需要处理", ready: "等待确认启用" };
       const automaticStep = automation?.candidateId === candidateId ? automation.status : "";
+      // 下一步会做什么：用户不用猜自动学习停在哪儿、接下来等什么。
+      const automationNext = !automation ? "" : automation.status === "blocked"
+        ? (automation.canContinue ? (automation.continueMode === "gate" ? "可点「继续门禁修订」再自动重试" : "可点「继续修订一版」再自动重试") : "需要人工处理后再继续")
+        : ({ waiting: "补齐人工终稿后自动评测", proposing: "自动生成候选策略", revising: "生成修订稿后自动复评", evaluating: "评测完成后自动检查门禁", gating: "门禁完成后自动判断", ready: "等待你确认启用" })[automation.status];
       const evaluationKey = `evaluate-learning:${candidateId}`, gateActionKey = `run-gate:${candidateId}`, activationKey = `activate-learning:${candidateId}`;
       const canPromote = promotionReady(evaluation, gate, candidateId) && candidate?.parentId === champion?.id && evaluation?.championSkillId === champion?.id;
       const statuses = { promote: "评测通过", needs_review: "需要复核", reject: "未通过", pass: "已通过", block: "已阻断", insufficient: "证据不足", not_run: "尚未运行" };
@@ -1270,7 +1274,8 @@ window.__ModuleLoader__.load({
       const gold = model.view.sections["gold-preview"];
       return h("div", { className: "stack learning-view" }, h(PageHeading, { icon: "learning", title: "学习中心", description: "按当前项目积累人工终稿；候选通过评测和门禁后，由你启用。", t }),
         automation && h("section", { className: "card stack automation-card", "aria-label": t("自动学习状态"), "data-status": automation.status }, h("div", { className: "section-heading" }, h("h3", null, t("自动学习")), h("span", { className: "badge" }, t(automationLabels[automation.status] || "等待样本"))),
-          h("p", null, automation.message), automaticJob && h("p", { className: "muted" }, `${automaticJob.progress.completed} / ${automaticJob.progress.requested} `, t("个配对样本"), automaticJob.automaticRetryCount > 0 && ` · ${t("失败样本已自动重试")} ${automaticJob.automaticRetryCount}`),
+          h("p", null, automation.message), automationNext && h("p", { className: "muted" }, `${t("下一步")}：${automationNext}`),
+          automaticJob && h("p", { className: "muted" }, `${automaticJob.progress.completed} / ${automaticJob.progress.requested} `, t("个配对样本"), automaticJob.automaticRetryCount > 0 && ` · ${t("失败样本已自动重试")} ${automaticJob.automaticRetryCount}`),
           automation.revisionRound > 0 && h("span", { className: "muted" }, t("修订轮次"), " · ", automation.revisionRound),
           h("div", { className: "automation-meta" },
             automation.updatedAt && h("span", null, `${t("更新于")} ${timeText(automation.updatedAt)}`),
@@ -1284,7 +1289,7 @@ window.__ModuleLoader__.load({
             automation.status === "blocked" && automaticJob?.progress?.failed > 0 && h(Button, { small: true, busy: model.view.operations["retry-evaluation"]?.pending, onClick: () => operation("retry-evaluation", `/api/learning/evaluation-jobs/${encodeURIComponent(automaticJob.jobId)}/retry-failed`) }, t("重试失败样本"))),
           h(Feedback, { model, name: "continue-revision", t }), h(Feedback, { model, name: "retry-evaluation", t }),
           automation.history?.length > 0 && h("details", { className: "card automation-history" }, h("summary", null, `${t("自动学习记录")} · ${automation.history.length}`),
-            h("div", { className: "automation-history" }, ...[...automation.history].reverse().map((entry, index) => h("article", { key: index }, h("span", { className: "muted" }, timeText(entry.at)), h("p", null, entry.message)))))),
+            h("div", { className: "automation-history" }, ...[...automation.history].reverse().map((entry, index) => h("article", { key: index }, h("span", { className: "muted" }, timeText(entry.at)), h("div", { className: "stack" }, h("span", { className: "badge" }, t(automationLabels[entry.status] || entry.status)), h("p", null, entry.message))))))),
         h("div", { className: "learning-steps", "aria-label": t("学习流程") }, ...[["champion", "生效版本", champion ? `v${champion.version || 1}` : "暂无记录"], ["candidates", "候选", `${candidates.length}`], ["evaluation", "评测", automaticStep === "evaluating" ? "运行中" : evaluation ? statuses[evaluation.decision] || evaluation.decision : "尚未评测"], ["gate", "门禁", automaticStep === "gating" ? "运行中" : gate?.status ? statuses[gate.status] || gate.status : "尚未运行"], ["activate", "启用", canPromote ? "可以启用" : "等待检查"]].map(([value, label, hint], index) => h("button", { type: "button", key: value, "aria-pressed": step === value, onClick: () => setStep(value) }, h("span", { className: "muted" }, String(index + 1).padStart(2, "0")), h("strong", null, t(label)), h("span", { className: "step-hint" }, t(hint))))),
         h(Feedback, { model, name: "section:learning", hidePending: Object.hasOwn(model.view.sections, "learning"), retry: () => model.loadSection("learning", load), t }),
         step === "champion" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("当前生效版本")), champion && h("span", { className: "badge" }, `v${champion.version || 1}`)), champion ? h(React.Fragment, null, h("strong", null, skillLabel(champion, model.workspace?.project?.name || t("当前项目"), model.view.projectId)),

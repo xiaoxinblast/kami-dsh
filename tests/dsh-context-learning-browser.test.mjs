@@ -127,6 +127,10 @@ test("语境分析、失败句段跳转和学习来源信息都能在真实界�
       await page.getByText("自动学习", { exact: true }).waitFor();
       assert.equal(await page.getByText("门禁修订 2 / 5", { exact: true }).count(), 1);
       assert.equal(await page.getByText("Gold gold#v2", { exact: true }).count(), 1);
+      assert.equal(await page.getByText("下一步：可点「继续门禁修订」再自动重试", { exact: true }).count(), 1);
+      await page.getByText("自动学习记录 · 2", { exact: true }).click();
+      await page.getByText("正在修订候选", { exact: true }).waitFor();
+      assert.equal(await page.getByText("需要处理", { exact: true }).count() >= 2, true);
       await page.locator(".learning-steps").getByRole("button", { name: /门禁/u }).click();
       await page.getByText("Gold gold#v2", { exact: true }).waitFor();
       await page.locator(".learning-steps").getByRole("button", { name: /候选/u }).click();
