@@ -78,7 +78,9 @@ test("批次校对和本地 QA 重试只补对应阶段，保持其他段及历�
     const run = await saveBatchRun({ projectId: project.id, locale: "zh-CN", filename: "retry.txt", runState: "needs_attention", contentType: "ui",
       runnerOptions: { termSurvey: { generatedAt: "2026-01-01", marker: "保留普查" } }, qualityReport: { report: { generatedAt: "2026-01-01", marker: "保留报告" } },
       segments: [{ id: "one", source: "設定を保存します。", translation: "对设置进行保存。", status: "done", selected: true, result: { stages, draft: "对设置进行保存。" } },
-        { id: "human", source: "戻る", translation: "返回", status: "done", selected: true, accepted: true }] });
+        { id: "human", source: "戻る", translation: "返回", status: "done", selected: true, accepted: true },
+        // 仍有一段未开始：批次没补齐，补试阶段不能自动收尾，历史报告要保留。
+        { id: "unstarted", source: "次へ進む。", status: "pending", selected: true }] });
     const path = `/api/batch/run/${run.batchId}`;
     const settled = async () => {
       for (let i = 0; i < 200; i++) {

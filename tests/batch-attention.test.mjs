@@ -76,6 +76,8 @@ test("background stops notify once per attempt without UI, polling is silent, su
   let fail = true;
   const workbench = await createWorkbench({ dataDirectory: directory, notifyAttention: (value) => sent.push(value), modelAdapter: async (_messages, options) => {
     if (fail && options.requestLabel === "翻译") throw new Error("模拟模型输出截断");
+    if ((options.requestLabel || "").includes("一致性")) return { content: '{"findings":[]}' };
+    if ((options.requestLabel || "").includes("术语普查")) return { content: '{"terms":[]}' };
     return { content: options.requestLabel === "工作术语学习" ? '{"terms":[]}' : "保存。" };
   } });
   const invoke = (method, path, body) => workbench.invoke({ method, path, body }, { human: true, modelRoute: { provider: "test", model: "fixture" } });
@@ -101,11 +103,9 @@ test("background stops notify once per attempt without UI, polling is silent, su
     await waitFor(() => sent.length === 2);
     fail = false;
     await run("retry-translation");
-    await waitFor(async () => (await list()).attention?.verb === "retry-proofreading");
-    assert.equal(sent.length, 3);
-    await run("retry-proofreading");
+    // 翻译重试现在会连同校对一起完成，整批补齐后直接进入一致性收尾，不再留下"重试校对"提醒。
     await waitFor(async () => (await list()).runState === "completed");
-    assert.equal((await list()).attention, null); assert.equal(sent.length, 3);
+    assert.equal((await list()).attention, null); assert.equal(sent.length, 2);
     await workbench.store.request(`/items/batch_runs/${batch.batchId}`, { method: "PATCH", body: { run_state: "running", segments: [{ id: "1", source: "保存", translation: "", status: "running" }] } });
     for (const [type, stage] of [["consistency_check", "qualityReport"], ["term_survey", "termSurvey"]]) {
       const run = await saveBatchRun({ projectId, filename: type + ".txt", locale: "zh-CN", runState: "completed", segments: [{ id: "1", source: "北", translation: "北方", status: "done" }] });

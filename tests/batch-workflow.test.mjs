@@ -16,7 +16,7 @@ function fixture() {
   };
 }
 
-test("部分翻译失败不启动全批检查；重试只补翻译阶段", async () => {
+test("部分翻译失败不启动全批检查；重试补齐整批后自动收尾", async () => {
   const run = fixture();
   const translated = [];
   const finalized = [];
@@ -35,7 +35,7 @@ test("部分翻译失败不启动全批检查；重试只补翻译阶段", async
   });
   assert.equal(completed.runState, "completed");
   assert.deepEqual(translated, ["c", "c"], "成功段和 QA 未完成段都不能被重翻");
-  assert.deepEqual(finalized, [], "重试完成后不启动收尾");
+  assert.deepEqual(finalized, [3], "重试补齐整批后自动收尾");
 });
 
 test("QA 重试只检查现有译文，保留成功段与翻译失败段", async () => {

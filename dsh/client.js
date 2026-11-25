@@ -515,7 +515,8 @@ window.__ModuleLoader__.load({
       "生成于": "Created", "更新于": "Updated", "基于": "Based on",
       "门禁修订": "Gate revisions", "继续门禁修订": "Continue gate revision", "回归集": "Regression suite", "回归案例": "regression cases",
       "资产同步": "Assets synced", "自动学习记录": "Automation history", "尚无启用的 Gold Set": "No active Gold Set", "上次门禁": "Last gate",
-      "资产已更新，需要重跑门禁": "Assets changed; rerun the gate", "下一步": "Next step"
+      "资产已更新，需要重跑门禁": "Assets changed; rerun the gate", "下一步": "Next step",
+      "可跨页勾选句段。翻译重试会重新翻译并自动校对；校对重试只修订现有译文，本地 QA 只检查。整批补齐后自动进入一致性检查。": "Select segments across pages. Translation retry re-translates and proofreads automatically; proofreading retry only revises existing text, and local QA only checks. A completed batch starts the consistency review automatically."
     });
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
@@ -971,7 +972,7 @@ window.__ModuleLoader__.load({
         h("div", { className: "button-row" }, h(Button, { small: true, onClick: inspect, disabled: locked || model.dirty() || !run.segments.some((item) => item.translation?.trim()) }, t("检查本批次")), h(Button, { small: true, quiet: true, onClick: savedReport }, t("查看上次报告")),
           issueSegments.length > 0 && h(React.Fragment, null, h(Button, { small: true, quiet: true, onClick: () => locate(-1) }, t("上个问题")), h(Button, { small: true, quiet: true, onClick: () => locate(1) }, t("下个问题"))),
           failedSegments.length > 0 && h(React.Fragment, null, h(Button, { small: true, quiet: true, onClick: () => locateFailed(-1) }, t("上个失败")), h(Button, { small: true, quiet: true, onClick: () => locateFailed(1) }, t("下个失败")))),
-        h("section", { className: "card stack retry-panel", "aria-label": t("句段重试") }, h("h3", null, h(Glyph, { name: "refresh" }), t("句段重试")), h("p", { className: "muted" }, t("可跨页勾选句段。翻译重试生成初稿，校对重试修订现有译文，本地 QA 只检查；每次重试完成后即结束。")),
+        h("section", { className: "card stack retry-panel", "aria-label": t("句段重试") }, h("h3", null, h(Glyph, { name: "refresh" }), t("句段重试")), h("p", { className: "muted" }, t("可跨页勾选句段。翻译重试会重新翻译并自动校对；校对重试只修订现有译文，本地 QA 只检查。整批补齐后自动进入一致性检查。")),
           h("div", { className: "button-row" }, h(Button, { small: true, disabled: locked, onClick: () => setChecked([...new Set([...checkedIds, ...page.items.filter(({ segment }) => canRetry(segment)).map(({ segment }) => segment.id)])]) }, t("勾选本页")),
             h(Button, { small: true, quiet: true, disabled: locked || !checkedIds.length, onClick: () => setChecked([]) }, `${t("清空勾选")} (${checkedIds.length})`),
             h(Button, { small: true, disabled: locked || model.dirty() || !checkedIds.length, onClick: () => retry("retry-translation", checkedIds) }, `${t("批量重试翻译")} (${checkedIds.length})`),

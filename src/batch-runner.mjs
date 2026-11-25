@@ -199,8 +199,7 @@ export async function runServerBatch(batchId, {
         batchGroupEntries: (groupById.get(segment.id) || []).map(item => ({ id: item.id, source: item.source, context: item.context })),
         qualityTier: options.qualityTier || "auto",
         reflect: options.reflect !== false,
-        useModelClassification: false,
-        ...(retryIds ? { workflowStage: "translation" } : {})
+        useModelClassification: false
       }
     };
   };
@@ -344,14 +343,18 @@ export async function runServerBatch(batchId, {
 
   const failed = selected.filter((segment) => segment.status === "error").length;
   const incomplete = selected.some(segment => !segmentWorkflowComplete(segment.result?.stages));
-  run.runState = failed || incomplete ? "needs_attention" : retryIds && run.segments.some((segment) => segment.selected !== false && segment.status !== "done") ? "paused" : "completed";
+  // 重试只覆盖部分句段：要判断"整个批次"是否已经完整，不能只看本次重试的集合。
+  const batchComplete = !failed && !incomplete && run.segments.every((segment) => segment.selected === false || segment.accepted === true
+    || (segment.status === "done" && String(segment.translation || "").trim() && segmentWorkflowComplete(segment.result?.stages)));
+  run.runState = failed || incomplete ? "needs_attention" : retryIds && run.segments.some((segment) => segment.selected !== false && segment.accepted !== true && segment.status !== "done") ? "paused" : "completed";
   run.runnerOptions = { ...run.runnerOptions, translationCompletedAt: new Date().toISOString(), stageRetryOnly: Boolean(retryIds) };
   run.subBatches = checkpointSubBatches(subBatches, run.segments);
   await checkpoint.commit();
-  // 交付前闭环先跑：一致性核对 + 质量报告是用户翻完立刻要看的结论；
-  // 风格学习与复盘（review）会调多次模型，排在后面免得把报告拖到几分钟后。
-  if (!retryIds && !failed && !incomplete && selected.some((segment) => segment.status === "done" && segment.translation)) await finalize(run);
-  if (!retryIds && !failed && !incomplete) await review(run);
+  // 交付前闭环先跑：一致性核对 + 质量报告是用户翻完立刻要看的结论。
+  // 重试把整批补齐后也要自动收尾，否则用户还得再手动点一次一致性检查。
+  if (batchComplete && selected.some((segment) => segment.status === "done" && segment.translation)) await finalize(run);
+  // 风格学习与复盘（review）会调多次模型，只在非重试的完整跑批后执行，免得拖慢重试。
+  if (!retryIds && batchComplete) await review(run);
   return run;
 }
 

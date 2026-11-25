@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import vm from "node:vm";
 import { retryServerBatchQa } from "../src/batch-runner.mjs";
-import { batchQaRetryStage, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows, summarizeBatchSegments } from "../public/batch-status.js";
+import { batchQaRetryStage, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows, segmentWorkflowComplete, summarizeBatchSegments } from "../public/batch-status.js";
 import { runTaskPool } from "../src/task-pool.mjs";
 import { surveyPairs } from "../src/term-survey.mjs";
 import { markedSurveyTerms, restoreUnverifiedSurveyRepairs } from "../src/term-memory-survey.mjs";
@@ -27,12 +27,13 @@ const stageCode = block("function startConsistencyCheck(", "/**\n * 翻译期术
 const routeCode = block('  if (req.method === "POST" && /^\\/api\\/batch\\/run\\/[^/]+\\/(?:retry-qa|retry-proofreading)', '  if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/"))')
   + block('  if (req.method === "GET" && url.pathname === "/api/tasks")', '  if (req.method === "POST" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/export"))');
 
-test("QA 补试在任意翻译状态下都不触发一致性检查或术语普查", async () => {
+test("QA 补试把整批补齐后自动进入一致性收尾，其他翻译状态不触发", async () => {
   for (const status of ["pending", "queued", "running", "done", "error"]) {
     let finalizations = 0;
-    const batchQaWorkers = new Map(), run = { batchId: "retry", segments: [{ status, selected: true }], runnerOptions: {} };
+    const complete = { stages: { translation: { status: "completed" }, draftQa: { status: "completed" }, proofreading: { status: "completed" }, localQa: { status: "optional" } } };
+    const batchQaWorkers = new Map(), run = { batchId: "retry", segments: [{ status, selected: true, translation: status === "done" ? "译文" : "", result: status === "done" ? complete : undefined }], runnerOptions: {} };
     const retry = vm.runInNewContext(`(${block("function startBatchQaRetry(", "function startBatchWorker(").trim()})`, {
-      batchAttention, notifyBatchAttention, runtimeOptions: () => ({}),
+      batchAttention, notifyBatchAttention, runtimeOptions: () => ({}), segmentWorkflowComplete,
       beginBackgroundRun: () => ({ cancelRequested: false }), endBackgroundRun: () => {}, batchWorkers: new Map(), batchQaWorkers,
       consistencyCheckTasks: new Map(), termSurveyTasks: new Map(), attachBatchWorkflowTask: async () => {},
       retryServerBatchQa: async () => ({ completed: 1, total: 1, failed: 0 }), translateBatchSegment: async () => {},
@@ -41,7 +42,7 @@ test("QA 补试在任意翻译状态下都不触发一致性检查或术语普�
     });
     retry("retry", "task");
     await batchQaWorkers.get("retry").promise;
-    assert.equal(finalizations, 0, status);
+    assert.equal(finalizations, status === "done" ? 1 : 0, status);
     assert.equal(batchQaWorkers.size, 0);
   }
 });

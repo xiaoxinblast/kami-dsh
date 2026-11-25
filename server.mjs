@@ -92,7 +92,7 @@ import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 import { runServerBatch, retryServerBatchQa, batchNeighborContext } from "./src/batch-runner.mjs";
 import { transportRetriesExhausted } from "./src/transient-errors.mjs";
 import { runSegmentWorkflow, proofreadingHints } from "./src/segment-workflow.mjs";
-import { batchQaRetryStage, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows } from "./public/batch-status.js";
+import { batchQaRetryStage, batchQualityReportPending, buildBatchWorkflow, isIncompleteBatchQa, isIncompleteBatchStage, mergeBatchTaskRows, segmentWorkflowComplete } from "./public/batch-status.js";
 import { batchAttention, notifyBatchAttention, pendingFollowupAttention } from "./src/batch-attention.mjs";
 import { translationRetryReason } from "./src/translation-output.mjs";
 
@@ -4861,6 +4861,11 @@ function startBatchQaRetry(batchId, taskId, segmentIds, stage = null) {
       latest.runnerOptions.attentionReason = attention?.reason || "";
       if (!outcome.failed && !attention && latest.runState === "needs_attention" && latest.segments.every((s) => s.selected === false || (s.status === "done" && s.translation?.trim()))) latest.runState = "completed";
       await saveBatchRun(latest);
+      // 校对/QA 重试把整批补齐后，自动进入交付前闭环（一致性 + 术语普查），不用再手动点一次。
+      const retryFinishedBatch = !outcome.cancelled && !outcome.failed && outcome.total > 0
+        && latest.segments.every((segment) => segment.selected === false || segment.accepted === true
+          || (segment.status === "done" && String(segment.translation || "").trim() && segmentWorkflowComplete(segment.result?.stages)));
+      if (retryFinishedBatch) void finalizeBatchWorkflow(batchId).catch((error) => console.error(`[Kami] 批次 ${batchId} 重试后收尾失败`, error));
       if (outcome.failed) notifyBatchAttention(latest, runtimeOptions().notifyAttention);
     }
     await updateBackgroundTaskProgress(taskId, {
@@ -7466,7 +7471,7 @@ async function apiHandler(req, res, url) {
       if (targets.some((segment) => !segment || segment.selected === false || segment.accepted)) throw Object.assign(new Error("所选句段不存在、未参与翻译或已人工确认，不能重试"), { statusCode: 400 });
       await saveBatchRun({ ...run, runState: "queued", segments: run.segments.map((segment) => ids.includes(String(segment.id)) ? { ...segment, status: "pending", error: "" } : segment),
         runnerOptions: { ...run.runnerOptions, cancelled: false, translationError: "" } });
-      const task = await createBackgroundTask({ type: "batch_translation", title: `重试翻译 · ${run.filename}`, locale: run.locale, projectId: run.projectId,
+      const task = await createBackgroundTask({ type: "batch_translation", title: `重试翻译与校对 · ${run.filename}`, locale: run.locale, projectId: run.projectId,
         progress: { phase: "queued", message: `仅重试 ${ids.length} 个句段`, percent: 0, completed: 0, total: ids.length }, payload: { batchId, segmentIds: ids } });
       startBatchWorker(batchId, task.id, ids);
       return { batchId, count: ids.length, runState: "queued", backgroundTaskId: task.id };
