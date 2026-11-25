@@ -471,6 +471,121 @@ async function refreshRegressionSuite(scope, { reason = "", changeNote = "" } = 
   return { asset: activated, changed: true, stats, externalStats, reason: reason || "auto" };
 }
 
+/**
+ * 把新的人工终稿自动并入 Gold Set：内容不可变，永远新建版本并保留旧版。
+ * 同一原文的参考译文一经收录就不再替换，避免基准随最新一版悄悄漂移。
+ */
+async function refreshGoldSet(scope, { reason = "" } = {}) {
+  const trajectories = await listLearningSampleIndex(scope);
+  const accepted = trajectories.filter((item) => item.status === "completed"
+    && item.humanDecision?.accepted === true
+    && String(item.humanDecision?.finalTranslation || item.finalTranslation || "").trim()
+    && String(item.source || "").trim());
+  const seriesId = `gold:${scope.locale}:${scope.contentType}:${scope.domain}:${scope.project}`;
+  const existing = await listQualityAssets({ ...scope, kind: "gold_set", seriesId, limit: 500 });
+  const active = existing.filter((item) => item.enabled && item.status === "active")
+    .sort((left, right) => (Number(right.version) || 0) - (Number(left.version) || 0))[0] || null;
+  const samples = Array.isArray(active?.payload?.samples) ? active.payload.samples : [];
+  const known = new Set(samples.map((item) => String(item.source || "").trim()));
+  const fresh = [];
+  for (const item of accepted) {
+    const source = String(item.source || "").trim();
+    if (!source || known.has(source)) continue;
+    known.add(source);
+    fresh.push({ id: `gold-${item.id}`, source, referenceTargets: [String(item.humanDecision?.finalTranslation || item.finalTranslation).trim()],
+      notes: `来自人工采纳终稿 ${item.id}`, metadata: { trajectoryId: item.id, batchId: item.batchId || "", createdAt: item.createdAt || "" } });
+  }
+  if (!fresh.length) return { asset: active, changed: false, added: 0, reason: "没有新的人工终稿" };
+  // 第一版至少 3 条，避免一条样本就让门禁宣称"基准通过"。
+  if (!samples.length && accepted.length < 3) return { asset: null, changed: false, added: 0, reason: `人工终稿不足 3 条（当前 ${accepted.length} 条）` };
+  const next = [...samples, ...fresh].slice(0, 400);
+  const version = await nextQualityAssetVersion(scope, "gold_set", seriesId);
+  const payload = normalizeGoldSet({
+    id: `${seriesId}#v${version}`, seriesId, version,
+    parentVersionId: active?.id || "",
+    scope, name: `${scope.locale} 固定 Gold Set`,
+    description: "由人工采纳终稿自动累积", status: "active", enabled: true,
+    samples: next, createdAt: new Date().toISOString(),
+    changeNote: `自动并入 ${fresh.length} 条人工终稿`
+  });
+  const saved = await saveQualityAsset({ kind: "gold_set", scope, payload, status: payload.status, enabled: payload.enabled });
+  const activated = await activateQualityAsset(saved);
+  logInfo("Gold Set 已按新终稿更新", { version, added: fresh.length, total: next.length, reason });
+  return { asset: activated, changed: true, added: fresh.length, reason: "auto" };
+}
+
+/** 自动推进前同步质量资产：回归集按最新证据重建，Gold Set 并入新人工终稿。 */
+async function syncQualityAssets(scope, { reason = "auto" } = {}) {
+  const result = { at: new Date().toISOString() };
+  try {
+    const regression = await refreshRegressionSuite(scope, { reason, changeNote: "自动按最新证据重建" });
+    result.regression = { changed: Boolean(regression.changed), version: Number(regression.asset?.version) || 0, cases: Number(regression.stats?.total) || 0, reason: regression.reason || "" };
+  } catch (error) { result.regression = { error: error.message }; }
+  try {
+    const gold = await refreshGoldSet(scope, { reason });
+    result.gold = { changed: Boolean(gold.changed), version: Number(gold.asset?.version) || 0, samples: gold.asset?.payload?.samples?.length || 0, added: gold.added || 0, reason: gold.reason || "" };
+  } catch (error) { result.gold = { error: error.message }; }
+  return result;
+}
+
+/** 门禁失败复盘：读取或生成这次运行的失败模式报告。 */
+async function ensureGateReview(scope, runId, { force = false } = {}) {
+  const target = (await listQualityRuns({ ...scope, limit: 100 })).find((item) => String(item.id) === String(runId)) || null;
+  if (!target) { const error = new Error("未找到这次门禁运行"); error.statusCode = 404; throw error; }
+  const id = target.id;
+  const cases = gateFailureCases(target);
+  if (!cases.length) {
+    const empty = { summary: "这次门禁没有失败样本，不需要复盘", patterns: [], generatedAt: new Date().toISOString(), caseCount: 0, model: "" };
+    await updateQualityRun(id, { report: { review: empty } });
+    return { run: target, review: empty, cached: false };
+  }
+  const existing = target.report?.review;
+  if (existing?.patterns && !force) return { run: target, review: existing, cached: true };
+  const chunks = chunkGateFailures(cases);
+  const parts = [], failures = [];
+  for (const chunk of chunks) {
+    try {
+      parts.push(await reviewGateFailuresWithModel({
+        locale: target.locale || scope.locale,
+        scope: { contentType: target.contentType || scope.contentType, domain: target.domain || scope.domain },
+        cases: chunk.cases,
+        part: chunks.length > 1 ? { index: chunk.index, total: chunks.length } : null
+      }));
+    } catch (error) { failures.push(error.message); }
+  }
+  if (!parts.length) { const error = new Error(`复盘失败：${failures[0] || "模型不可用"}`); error.statusCode = 502; throw error; }
+  const merged = mergeGateReviewReports(parts);
+  const review = { ...merged, generatedAt: new Date().toISOString(), model: getProviderConfig().model, caseCount: cases.length, warning: failures[0] || "" };
+  await updateQualityRun(id, { report: { review } });
+  logInfo("门禁失败复盘已生成", { runId: target.id, cases: cases.length, patterns: review.patterns.length });
+  return { run: { ...target, report: { ...(target.report || {}), review } }, review, cached: false };
+}
+
+/** 用复盘报告生成候选技能；手动路由与自动门禁闭环共用。 */
+async function createCandidateFromGateReview(scope, runId, patternIds = null) {
+  const target = runId
+    ? (await listQualityRuns({ ...scope, limit: 50 })).find((item) => String(item.id) === String(runId))
+    : (await listQualityRuns({ ...scope, limit: 1 }))[0];
+  if (!target) { const error = new Error("未找到这次门禁运行"); error.statusCode = 404; throw error; }
+  const review = target.report?.review;
+  if (!review?.patterns?.length) { const error = new Error("这次运行还没有复盘报告，先生成复盘"); error.statusCode = 400; throw error; }
+  const [champion] = await listTranslationSkills({ ...scope, status: "champion", limit: 1 });
+  const usableChampion = champion || await ensureChampionTranslationSkill(scope);
+  const cases = gateFailureCases(target);
+  const selected = Array.isArray(patternIds) && patternIds.length
+    ? review.patterns.filter((pattern) => patternIds.map(String).includes(String(pattern.id)))
+    : review.patterns;
+  const selectedCaseIds = new Set(selected.flatMap((pattern) => pattern.caseIds || []));
+  const evidenceIds = [...new Set(cases
+    .filter((item) => !selectedCaseIds.size || selectedCaseIds.has(item.caseId))
+    .map((item) => String(item.sourceTrajectoryId || ""))
+    .filter(Boolean))];
+  const skill = await proposeChallengerFromGateReview({
+    scope, champion: usableChampion, review: { ...review, patterns: selected }, cases, evidenceIds, runId: String(target.id)
+  });
+  return skill;
+}
+
 /** 把一次门禁运行落成可追溯的记录。 */
 async function persistQualityRun({ scope, skill, result, triggeredBy }) {
   return saveQualityRun({
@@ -6310,14 +6425,21 @@ async function apiHandler(req, res, url) {
         } catch { return null; }
       })()
     }));
+    // 候选来自哪些文件：按候选登记的轨迹 id 回查，和风格规范的做法一致。
+    const sourceFileById = new Map(evidence.map((item) => [String(item.id), item.sourceFile]));
+    const candidateSourceFiles = (item) => {
+      const ids = (item.evidenceIds || []).map(String);
+      const files = [...new Set(ids.map((id) => sourceFileById.get(id)).filter(Boolean))];
+      return { ...item, evidenceFiles: files, ...(ids.length && !files.length ? { evidenceFilesMissing: ids.length } : {}) };
+    };
     return json(res, 200, {
       overview: { trajectoryCount: trajectories.length, skillCount: skills.length, pendingCount: candidates.filter((item) => !evaluations.some((evaluation) => evaluation.challengerSkillId === item.id)).length },
-      champion,
-      champions,
+      champion: champion ? candidateSourceFiles(champion) : null,
+      champions: champions.map(candidateSourceFiles),
       automation: champion?.metadata?.learningAutomation || null,
       evaluationJobs: evaluationJobs.list().filter((job) => sameEvaluationScope(job.scope, requestedScope)),
       skills,
-      candidates,
+      candidates: candidates.map(candidateSourceFiles),
       scopeCounts,
       batchFiles,
       evaluations: evaluations.map((item) => ({ ...item, result: item.report || {} })),
@@ -6497,9 +6619,15 @@ async function apiHandler(req, res, url) {
     if (!state?.canContinue || state.jobId !== body.jobId || state.candidateId !== body.candidateId) return json(res, 409, { error: "候选状态已变化，请刷新后查看当前进度" });
     const job = evaluationJobs.get(state.jobId);
     if (!job || job.challengerId !== state.candidateId || job.championId !== champion.id || !sameEvaluationScope(job.scope, scope)) return json(res, 409, { error: "原评测与当前候选不匹配，请刷新后重试" });
+    // 门禁轮次用尽后的手动继续：先把计数清零，避免刚触发就再次判"轮次用尽"。
+    if (state.continueMode === "gate") {
+      const current = await getTranslationSkill(champion.id);
+      await updateTranslationSkill(champion.id, { metadata: { ...current.metadata,
+        learningAutomation: { ...state, gateRound: 0, continueMode: "evaluation", canContinue: false } } });
+    }
     const route = runtimeOptions().modelRoute;
     learningAutomation.trigger(job.scope, { continueJobId: state.jobId, ...(route ? { modelRoute: { provider: route.provider, model: route.model } } : {}) }).catch((error) => console.error("继续修订候选失败", error));
-    return json(res, 202, { message: "已提交本轮修订，生成后自动复评" });
+    return json(res, 202, { message: state.continueMode === "gate" ? "已提交新一轮门禁修订，完成后自动复评" : "已提交本轮修订，生成后自动复评" });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/evaluate")) {
     const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length, -"/evaluate".length));
@@ -6882,53 +7010,8 @@ async function apiHandler(req, res, url) {
     const id = decodeURIComponent(url.pathname.slice("/api/quality/runs/".length, -"/review".length));
     const body = await readJsonBody(req).catch(() => ({}));
     const scope = learningScope(body);
-    const target = (await listQualityRuns({ ...scope, limit: 100 })).find((item) => String(item.id) === id) || null;
-    if (!target) {
-      const error = new Error("未找到这次门禁运行");
-      error.statusCode = 404;
-      throw error;
-    }
-    const cases = gateFailureCases(target);
-    if (!cases.length) {
-      const empty = { summary: "这次门禁没有失败样本，不需要复盘", patterns: [], generatedAt: new Date().toISOString(), caseCount: 0, model: "" };
-      await updateQualityRun(id, { report: { review: empty } });
-      return json(res, 200, { runId: id, review: empty, cached: false });
-    }
-    const existing = target.report?.review;
-    if (existing?.patterns && body.force !== true) {
-      return json(res, 200, { runId: id, review: existing, cached: true });
-    }
-    const chunks = chunkGateFailures(cases);
-    const parts = [];
-    const failures = [];
-    for (const chunk of chunks) {
-      try {
-        parts.push(await reviewGateFailuresWithModel({
-          locale: target.locale || scope.locale,
-          scope: { contentType: target.contentType || scope.contentType, domain: target.domain || scope.domain },
-          cases: chunk.cases,
-          part: chunks.length > 1 ? { index: chunk.index, total: chunks.length } : null
-        }));
-      } catch (error) {
-        failures.push(error.message);
-      }
-    }
-    if (!parts.length) {
-      const error = new Error(`复盘失败：${failures[0] || "模型不可用"}`);
-      error.statusCode = 502;
-      throw error;
-    }
-    const merged = mergeGateReviewReports(parts);
-    const review = {
-      ...merged,
-      generatedAt: new Date().toISOString(),
-      model: getProviderConfig().model,
-      caseCount: cases.length,
-      warning: failures[0] || ""
-    };
-    await updateQualityRun(id, { report: { review } });
-    logInfo("门禁失败复盘已生成", { runId: id, cases: cases.length, patterns: review.patterns.length });
-    return json(res, 200, { runId: id, review, cached: false });
+    const { review, cached } = await ensureGateReview(scope, id, { force: body.force === true });
+    return json(res, 200, { runId: id, review, cached });
   }
   if (req.method === "POST" && /^\/api\/quality\/runs\/[^/]+\/terms$/u.test(url.pathname)) {
     // 复盘里的术语建议 → 术语候选：期望译法取自这次失败案例的人工终稿，
@@ -6971,39 +7054,8 @@ async function apiHandler(req, res, url) {
     // 复用与「生成候选技能」完全相同的净化、合并与落库路径。
     const body = await readJsonBody(req);
     const scope = learningScope(body);
-    const runId = String(body.runId || "");
-    const target = runId ? (await listQualityRuns({ ...scope, limit: 50 })).find((item) => String(item.id) === runId) : (await listQualityRuns({ ...scope, limit: 1 }))[0];
-    if (!target) {
-      const error = new Error("未找到这次门禁运行");
-      error.statusCode = 404;
-      throw error;
-    }
-    const review = target.report?.review;
-    if (!review?.patterns?.length) {
-      const error = new Error("这次运行还没有复盘报告，先生成复盘");
-      error.statusCode = 400;
-      throw error;
-    }
-    const [champion] = await listTranslationSkills({ ...scope, status: "champion", limit: 1 });
-    const usableChampion = champion || await ensureChampionTranslationSkill(scope);
-    const cases = gateFailureCases(target);
-    // 证据口径与轨迹提炼一致：凡是喂给模型的东西都登记为证据，之后不会回流进留出集。
-    const patternIds = Array.isArray(body.patternIds) ? body.patternIds.map(String) : null;
-    const selectedPatterns = patternIds?.length ? review.patterns.filter((pattern) => patternIds.includes(String(pattern.id))) : review.patterns;
-    const selectedCaseIds = new Set(selectedPatterns.flatMap((pattern) => pattern.caseIds || []));
-    const evidenceIds = [...new Set(cases
-      .filter((item) => !selectedCaseIds.size || selectedCaseIds.has(item.caseId))
-      .map((item) => String(item.sourceTrajectoryId || ""))
-      .filter(Boolean))];
-    const skill = await proposeChallengerFromGateReview({
-      scope,
-      champion: usableChampion,
-      review: { ...review, patterns: selectedPatterns },
-      cases,
-      evidenceIds,
-      runId: String(target.id)
-    });
-    return json(res, 201, { skill, candidate: skill, runId: String(target.id) });
+    const skill = await createCandidateFromGateReview(scope, String(body.runId || ""), Array.isArray(body.patternIds) ? body.patternIds : null);
+    return json(res, 201, { skill, candidate: skill, runId: String(body.runId || skill.metadata?.gateReview?.runId || "") });
   }
   if (req.method === "POST" && url.pathname === "/api/quality/runs") {
     const body = await readJsonBody(req);
@@ -9570,21 +9622,41 @@ const createProjectLearningAutomation = () => createLearningAutomation({ deps: {
   },
   evaluate: async (candidate) => (await startSkillEvaluation(candidate.id)).value,
   resume: (id) => evaluationJobs.resume(id),
+  gateRevisionLimit: () => getSettings().learning.autoGateReviseRounds,
   gate: async (scope, candidate) => {
-    const assets = await loadGateAssets(scope);
-    const [latest] = await listQualityRuns({ ...scope, skillId: candidate.id, limit: 1 });
+    // 门禁执行期间不重建资产，否则刚跑完的结论永远覆盖不到新版本，会无谓地反复重跑。
     if (qualityGateInFlight.has(candidate.id) || autoGateScopes.has(learningScopeKeyOf(scope))) return { status: "gating", message: "正在运行固定样本门禁" };
-    if (latest && gateRunCoversAssets(latest, assets)) return latest.decision === "pass"
-      ? { status: "ready", message: "评测与门禁已通过，等待你确认启用" }
-      : { status: "blocked", message: `门禁未通过：${(latest.blocking || []).map((item) => item.message).join("；") || latest.decision}` };
-    if (!assets.samples.length && !assets.cases.length) return { status: "blocked", message: "缺少启用的固定质量样本，请先建立 Gold Set 或回归集" };
-    if (!getSettings().learning.autoGateEnabled) return { status: "blocked", message: "自动门禁已关闭，请手动运行门禁" };
+    // 自动链路先同步资产：新人工终稿并入 Gold Set、回归集按最新证据重建。
+    const synced = await syncQualityAssets(scope, { reason: "auto:learning" });
+    const assets = await loadGateAssets(scope);
+    const assetInfo = {
+      goldSetVersions: assets.goldSetVersions, regressionSuiteVersions: assets.regressionSuiteVersions,
+      goldSampleCount: assets.samples.length, regressionCaseCount: assets.cases.length, syncedAt: synced.at,
+      ...(synced.gold ? { goldSync: synced.gold } : {}), ...(synced.regression ? { regressionSync: synced.regression } : {})
+    };
+    const [latest] = await listQualityRuns({ ...scope, skillId: candidate.id, limit: 1 });
+    if (latest && gateRunCoversAssets(latest, assets)) {
+      return latest.decision === "pass"
+        ? { status: "ready", message: "评测与门禁已通过，等待你确认启用", assets: assetInfo, runId: String(latest.id) }
+        : { status: "blocked", message: `门禁未通过：${(latest.blocking || []).map((item) => item.message).join("；") || latest.decision}`,
+            assets: assetInfo, runId: String(latest.id), revisable: latest.decision === "block" && gateFailureCases(latest).length > 0 };
+    }
+    if (!assets.samples.length && !assets.cases.length) return { status: "blocked", message: "缺少启用的固定质量样本，请先建立 Gold Set 或回归集", assets: assetInfo };
+    if (!getSettings().learning.autoGateEnabled) return { status: "blocked", message: "自动门禁已关闭，请手动运行门禁", assets: assetInfo };
     const assetKey = JSON.stringify([assets.goldSetVersions, assets.regressionSuiteVersions]);
     const current = await getTranslationSkill(candidate.id);
-    if (current.metadata?.automationGateAttempt === assetKey) return { status: "blocked", message: "本轮门禁未完成，自动尝试已结束，请查看任务记录后重试" };
+    if (current.metadata?.automationGateAttempt === assetKey) return { status: "blocked", message: "本轮门禁未完成，自动尝试已结束，请查看任务记录后重试", assets: assetInfo };
     await updateTranslationSkill(candidate.id, { metadata: { ...current.metadata, automationGateAttempt: assetKey } });
     await startQualityGateRun({ scope, skill: candidate, triggeredBy: "auto:learning-evaluated", reason: "learning-evaluated" });
-    return { status: "gating", message: "正在运行固定样本门禁" };
+    return { status: "gating", message: "正在运行固定样本门禁", assets: assetInfo };
+  },
+  reviseForGate: async (scope, champion, candidate, gate) => {
+    const { run } = await ensureGateReview(scope, gate.runId, {});
+    const cases = gateFailureCases(run);
+    const evidenceIds = [...new Set(cases.map((item) => String(item.sourceTrajectoryId || "")).filter(Boolean))];
+    return proposeChallengerFromGateReview({
+      scope, champion, review: run.report?.review || {}, cases, evidenceIds, runId: String(run.id)
+    });
   }
 } });
 
@@ -9945,4 +10017,4 @@ if (!runtimeOptions().embedded) server.listen(PORT, HOST, () => {
   }
 });
 
-export { apiHandler, disposeEmbeddedWorkbench, startLearningServices, getBatchRun as getBatchRunForWorkspace, importBatchReview };
+export { apiHandler, disposeEmbeddedWorkbench, startLearningServices, getBatchRun as getBatchRunForWorkspace, importBatchReview, refreshGoldSet, syncQualityAssets };

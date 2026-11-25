@@ -100,10 +100,13 @@ window.__ModuleLoader__.load({
         !Number.isFinite(segment.qaScore) || ["", "not_run", "deterministic_only"].includes(segment.aiQaStatus || "")))) return null;
       return Number.isFinite(report.scores?.overall) ? report.scores.overall : null;
     }
+    function segmentFailed(segment) {
+      return ["error", "failed"].includes(segment?.status) || Boolean(segment?.retryTranslationReason);
+    }
     function reviewPage(segments, { filter = "all", query = "", offset = 0, selectedId = "" } = {}) {
       const search = query.trim().toLocaleLowerCase();
       const rows = segments.map((segment, index) => ({ segment, number: index + 1 })).filter(({ segment, number }) => segment.draft && segment.id === selectedId ||
-        (filter === "all" || (filter === "issues" ? issuesOf(segment).length : !segment.translation?.trim()))
+        (filter === "all" || (filter === "issues" ? issuesOf(segment).length : filter === "failed" ? segmentFailed(segment) : !segment.translation?.trim()))
         && (!search || `${number}\n${segment.id}\n${segment.source}\n${segment.translation || ""}`.toLocaleLowerCase().includes(search)));
       const start = Math.max(0, Math.min(Math.floor(offset / 20) * 20, Math.max(0, Math.floor((rows.length - 1) / 20) * 20)));
       const items = rows.slice(start, start + 20);
@@ -409,7 +412,7 @@ window.__ModuleLoader__.load({
         }, true);
       }
     }
-    return { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, chooseBatch, batchLabel, skillLabel, skillStrategyText, excludedReviewRows, finalReviewStatus, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady };
+    return { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, chooseBatch, batchLabel, skillLabel, skillStrategyText, excludedReviewRows, finalReviewStatus, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady, segmentFailed };
   }
 });
 
@@ -438,7 +441,7 @@ window.__ModuleLoader__.load({
       "文件": "File", "关闭": "Close", "将保存当前译文为人工批准的 TM，并写入学习证据。": "Save this translation as human-approved TM and learning evidence.", "处理": "Process", "总分": "Score"
     };
     const zh = Object.fromEntries(Object.keys(words).map((key) => [key, key]));
-    const { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, batchLabel, skillLabel, skillStrategyText, excludedReviewRows, finalReviewStatus, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady } = require("kami-dsh/client.workbench-state.js");
+    const { WorkbenchModel, resourceFields, linkedPaths, resourceSelection, libraryPriorityChanges, batchLabel, skillLabel, skillStrategyText, excludedReviewRows, finalReviewStatus, editingLocked, qaLabel, qaSummary, proofreadRetryable, qaRetryStage, qaRetryable, issuesOf, reportScore, reviewPage, resourcePage, promotionReady, segmentFailed } = require("kami-dsh/client.workbench-state.js");
     Object.assign(words, { "任务等待手动处理": "Action needed", "待处理任务": "Tasks needing action", "段待处理": "segments need attention", "项待处理": "items need attention", "重试校对": "Retry proofreading", "查看待处理任务": "Open task", "重试失败译段": "Retry failed segments", "重新运行一致性检查": "Rerun consistency review", "重新运行术语普查": "Rerun term survey" });
     Object.assign(words, {
       "设置分类": "Settings categories", "常规与备份": "General and backup", "QA 规则": "QA rules", "质量参数": "Quality parameters", "本地 QA 规则": "Local QA rules", "当前项目": "Current project", "始终启用": "Always enabled", "阻断": "Blocking", "警告": "Warning", "提示": "Info", "保存参数": "Save parameters", "保存 QA 规则": "Save QA rules", "已保存 QA 规则": "QA rules saved", "的严重度": " severity",
@@ -500,6 +503,20 @@ window.__ModuleLoader__.load({
       "输出目录与数据备份": "Output and backups", "规则开关与严重度": "Rules and severity", "模型选择与输出预算": "Model and output budget", "评分与质量阈值": "Quality thresholds", "原件查阅与工具轮数": "Original files and tool rounds", "样本积累与评测": "Samples and evaluation", "资源匹配与检索": "Resource retrieval", "文字与标点规范": "Text and punctuation", "任务执行参数": "Execution parameters", "分组翻译": "Translation groups", "初译与校对的分组上限": "Translation and proofreading group limits"
     });
     Object.assign(words, { "正在修订候选": "Revising candidate", "修订轮次": "Revision round", "继续修订一版": "Revise once more", "重试失败样本": "Retry failed samples" });
+    Object.assign(words, {
+      "语境分析": "Context analysis", "查看语境分析": "View context analysis", "已覆盖": "Covered", "个分区": "sections", "文档判断": "Document assessment",
+      "目标读者": "Audience", "整体语气": "Tone", "文本类型": "Text type", "内容分区": "Sections", "显示其余": "Show remaining",
+      "分区备注": "Section notes", "跨段关联": "Cross-segment links", "查看相关译段": "View related segment", "查看译段": "View segment",
+      "还没有语境分析": "No context analysis yet", "这批原文需要先完成语境分析才能开始翻译。": "This batch needs a context analysis before translation can start.",
+      "短文件可按需分析，帮助理解全文。": "Short files can be analyzed on demand for more context.", "分析中": "Analyzing", "分析未完成": "Analysis incomplete",
+      "开始语境分析": "Start context analysis", "重新分析语境": "Reanalyze context", "语境分析中": "Analyzing context",
+      "仅看失败": "Failed only", "上个失败": "Previous failure", "下个失败": "Next failure", "段失败": "segments failed", "段翻译失败": "segments failed",
+      "查看并重试": "View and retry", "查看失败句段": "View failed segments", "来源未记录": "Source not recorded", "条证据": "evidence items",
+      "生成于": "Created", "更新于": "Updated", "基于": "Based on",
+      "门禁修订": "Gate revisions", "继续门禁修订": "Continue gate revision", "回归集": "Regression suite", "回归案例": "regression cases",
+      "资产同步": "Assets synced", "自动学习记录": "Automation history", "尚无启用的 Gold Set": "No active Gold Set", "上次门禁": "Last gate",
+      "资产已更新，需要重跑门禁": "Assets changed; rerun the gate"
+    });
     Object.assign(zh, Object.fromEntries(Object.keys(words).map((key) => [key, key])));
     const css = `
       .kami .resource-row.term-survey-row{gap:6px}.kami .term-survey-row p{margin:2px 0}.kami .term-survey-row .stack{gap:6px}
@@ -549,6 +566,18 @@ window.__ModuleLoader__.load({
       .kami .qa-inputs label{gap:12px}.kami .input-heading{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}.kami .qa-inputs textarea{min-height:240px}.kami .settings-tabs{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0;border:0;background:transparent}.kami .settings-tabs>button{display:flex;justify-content:flex-start;align-items:center;text-align:left;gap:10px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-2);white-space:normal}.kami .settings-tabs>button[aria-selected=true]{border-color:#82ad98;background:var(--kami-tint);box-shadow:none;color:var(--kami-accent)}.kami .settings-tabs strong{font-size:12px;font-weight:500}.kami .settings-footer{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:12px;background:var(--dsw-alias-bg-layer-2);box-shadow:0 -3px 12px #00000005}.kami .settings-content>h3{display:flex;align-items:center;gap:8px}.kami .settings-content>h3:before{content:"";width:4px;height:14px;background:#82ad98;border-radius:4px}
       @container(min-width:800px){.kami .settings-tabs{grid-template-columns:repeat(4,minmax(0,1fr))}}
       @container(max-width:600px){.kami .main-nav>button{flex-direction:column;gap:5px;padding:8px 4px;font-size:11px}.kami .page-heading{align-items:flex-start;gap:11px}.kami .page-heading h2{font-size:19px}.kami .page-icon{width:40px;height:40px;border-radius:12px}.kami .page-heading p{font-size:11px}.kami .batch-picker{grid-template-columns:minmax(0,1fr);gap:7px}.kami .section-tabs>button{padding:8px;gap:6px;font-size:11px}.kami .assets-view>.section-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}.kami .library-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px}.kami .library-row>.library-toggle,.kami .library-row>.feedback{grid-column:1/-1}.kami .library-row>.library-actions{align-self:end}.kami .library-actions button{white-space:nowrap}.kami .settings-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}.kami .settings-tabs>button{padding:10px;gap:8px}.kami .settings-tabs small{font-size:10px}.kami .learning-steps{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.kami .learning-steps>button{padding:10px}.kami .learning-steps>button:nth-child(n+4){grid-column:span 1}.kami .context-details{flex-wrap:wrap;gap:9px}.kami .context-details>div{flex-basis:100%}.kami .flow-context-heading{flex-wrap:wrap}.kami .flow-context-heading .status-pill{margin-left:40px}.kami .flow-context-heading>div{flex-basis:calc(100% - 45px)}.kami .qa-inputs textarea{min-height:180px}.kami .section-heading{flex-wrap:wrap}.kami .settings-footer{flex-wrap:wrap}.kami .settings-footer>div{flex-basis:100%}.kami .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.kami .metrics strong{font-size:20px}.kami .resource-compile>button{margin-left:50px}}
+      .kami .context-view{gap:14px}.kami .context-hero{display:grid;gap:14px;background:linear-gradient(135deg,var(--kami-tint),var(--dsw-alias-bg-layer-2));border-color:color-mix(in srgb,#82ad98 45%,var(--dsw-alias-border-l2))}
+      .kami .context-hero-main{display:grid;grid-template-columns:auto minmax(0,1fr);gap:16px;align-items:center}.kami .context-ring{--p:0;width:84px;height:84px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--kami-accent,#174d40) calc(var(--p)*1%),var(--dsw-alias-bg-layer-3) 0);position:relative;flex:none}.kami .context-ring:after{content:"";position:absolute;inset:7px;border-radius:50%;background:var(--dsw-alias-bg-layer-2)}.kami .context-ring b{position:relative;z-index:1;font-size:16px}
+      .kami .context-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.kami .context-chips .badge{background:var(--dsw-alias-bg-layer-2)}
+      .kami .context-grid{display:grid;gap:14px;grid-template-columns:minmax(0,1fr)}.kami .context-doc dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:0;font-size:12px}.kami .context-doc dt{color:var(--dsw-alias-label-tertiary)}.kami .context-doc dd{margin:0}
+      .kami .context-summary{font-size:13px;line-height:1.8;white-space:pre-wrap;margin:0}
+      .kami .context-sections{gap:0}.kami .context-section{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .context-section:last-child{border-bottom:0}
+      .kami .context-range{font:11px/1.6 ui-monospace,Consolas,monospace;color:var(--kami-accent);background:var(--kami-tint);border-radius:7px;padding:2px 7px;white-space:nowrap}.kami .context-section-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:12px}.kami .context-section p{margin:4px 0 0;font-size:12px;line-height:1.7;white-space:pre-wrap}
+      .kami .context-note{display:grid;gap:4px;padding:10px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}.kami .context-note:last-child{border-bottom:0}.kami .context-note p{margin:0;font-size:12px;line-height:1.7;white-space:pre-wrap}
+      .kami .learning-meta{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font-size:11px;color:var(--dsw-alias-label-secondary)}.kami .learning-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}.kami .file-chip{font-size:10px;line-height:1.6;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kami .file-chip.muted{color:var(--dsw-alias-label-tertiary)}
+      .kami .metric-link{display:flex;flex-direction:column;gap:4px;align-items:flex-start;padding:12px;border-radius:10px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 35%,var(--dsw-alias-border-l2));background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 6%,var(--dsw-alias-bg-layer-1));font-size:11px;cursor:pointer;text-align:left;color:var(--dsw-alias-state-error-primary)}.kami .metric-link strong{font-size:22px;line-height:1.2;font-variant-numeric:tabular-nums}.kami .metric-link:hover{border-color:var(--dsw-alias-state-error-primary)}
+      .kami .automation-meta{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:11px;color:var(--dsw-alias-label-secondary)}.kami .automation-history>div{display:grid;gap:0}.kami .automation-history article{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;font-size:11px;padding:6px 0;border-top:1px dashed var(--dsw-alias-border-l2)}.kami .automation-history article p{margin:0}
+      @container(max-width:600px){.kami .context-hero-main{grid-template-columns:minmax(0,1fr);justify-items:start}.kami .context-section{grid-template-columns:minmax(0,1fr)}.kami .context-section>button{justify-self:start}}
     `;
     const markPaths = [
       ["M13 19h20l9 9v23a4 4 0 0 1-4 4H13a4 4 0 0 1-4-4V23a4 4 0 0 1 4-4Z", "#82ad98"],
@@ -584,6 +613,10 @@ window.__ModuleLoader__.load({
     const stateWords = { ready: "待开始", pending: "待开始", queued: "等待中", running: "运行中", in_progress: "正在处理", paused: "已暂停", completed: "已完成", done: "已完成", needs_attention: "需要处理", failed: "已失败", error: "已失败", review: "需要处理", not_started: "未开始", waiting: "等待中", disabled: "已关闭", blocked: "等待条件", abandoned: "已取消" };
     const stateText = (value, t) => t(stateWords[value] || value || "未开始");
     const timeText = (value) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+    // 语境分析里的文本类型沿用服务端 CONTENT_TYPES 的中文标签。
+    const contextPurposeLabels = { verse: "诗词 / 韵文", narrative: "故事 / 叙事", codex: "图鉴 / 设定集", marketing: "宣发文案", announcement: "正式公告", item_name: "游戏内道具名", item_description: "游戏内道具描述", store: "商店 / 商品说明", ui: "UI / 系统提示", tutorial: "教程 / 操作指引", rules: "活动规则", dialogue: "剧情对白", social: "社媒短文案", general: "待分类文本" };
+    const contextPurposeLabel = (value, t) => t(contextPurposeLabels[value] || contextPurposeLabels.general);
+    const fileLabel = (file) => String(file || "").split(/[\\/]/u).filter(Boolean).pop() || String(file || "");
     const sizeText = (bytes) => Number(bytes) >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : Number(bytes) >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${Number(bytes) || 0} B`;
     const scopeArgs = (model, token, extra = {}) => model.body(extra, token);
     function Empty({ title, description, artwork, t }) {
@@ -722,9 +755,68 @@ window.__ModuleLoader__.load({
           h("div", { className: "flow-row" }, ...rows.slice(3).map((row, index) => card(row, index + 3)))),
         h("p", { className: "flow-note" }, t("重试只执行所选阶段，完成后即结束。")));
     }
-    function TaskSummary({ model, run, t, review, exportFile, reports }) {
+    function ContextAnalysis({ model, run, t, review }) {
+      const brief = run.contextBrief, id = run.batchId;
+      const busy = run.contextBriefPending || model.view.operations[`context-brief:${id}`]?.pending;
+      const failed = brief?.status === "failed" || Boolean(brief?.warning) || Boolean(brief?.coverage && brief.coverage.covered < brief.coverage.total);
+      const command = (failedOnly = false) => model.perform(`context-brief:${id}`, async (token) => {
+        token.view.operations[`context-brief:${id}`].failedOnly = failedOnly;
+        await model.invoke(`/api/batch/run/${encodeURIComponent(id)}/context-brief`, "POST", scopeArgs(model, token, failedOnly ? { failedOnly } : {}), token);
+        await model.loadRun(token, id);
+      });
+      const [expanded, setExpanded] = useState(50);
+      const percent = Math.max(0, Math.min(100, Number(brief?.coverage?.percent) || 0));
+      const sections = [...(brief?.sections || [])].sort((left, right) => left.from - right.from);
+      const notes = brief?.notes || [], crossRefs = brief?.crossRefs || [];
+      const jump = (segmentId) => { if (segmentId) review(segmentId); };
+      const rangeText = (section) => section.from === section.to ? `#${section.from}` : `#${section.from}–#${section.to}`;
+      return h("section", { className: "stack context-view", "aria-label": t("语境分析") },
+        h("section", { className: "card context-hero" },
+          h("div", { className: "context-hero-main" },
+            h("span", { className: "context-ring", style: { "--p": String(percent) }, role: "img", "aria-label": `${percent}%` }, h("b", null, `${percent}%`)),
+            h("div", { className: "stack" },
+              h("div", { className: "section-heading" }, h("h3", null, t("语境分析")), h("span", { className: "badge" }, t(busy ? "分析中" : brief?.status === "ready" ? "已完成" : failed ? "分析未完成" : "尚未开始"))),
+              h("p", { className: "muted" }, t("通读全文，识别内容分区与跨段关联；翻译时按分区带入。")),
+              h("div", { className: "context-chips" },
+                brief?.documentType && h("span", { className: "badge" }, contextPurposeLabel(brief.documentType.purpose, t)),
+                brief?.coverage && h("span", { className: "badge" }, `${t("已覆盖")} ${brief.coverage.covered} / ${brief.coverage.total} ${t("段")}`),
+                sections.length > 0 && h("span", { className: "badge" }, `${sections.length} ${t("个分区")}`),
+                brief?.model && h("span", { className: "badge" }, brief.model),
+                brief?.version && h("span", { className: "badge" }, `v${brief.version}`),
+                brief?.generatedAt && h("span", { className: "badge" }, timeText(brief.generatedAt))))),
+          h("div", { className: "button-row" },
+            brief?.retryParts?.failed?.length > 0 && !brief.editedAt && h(Button, { small: true, primary: true, disabled: busy, onClick: () => command(true) }, `${t("仅重试失败分片")} (${brief.retryParts.failed.length})`),
+            h(Button, { small: true, busy, disabled: busy, onClick: () => command() }, t(busy ? "语境分析中" : brief?.status === "ready" ? "重新分析语境" : "开始语境分析"))),
+          brief?.warning && h("p", { className: "feedback error", role: "alert" }, brief.warning),
+          h(Feedback, { model, name: `context-brief:${id}`, retry: !busy ? () => command(model.view.operations[`context-brief:${id}`]?.failedOnly === true) : undefined, t })),
+        brief?.status === "ready" ? h("div", { className: "stack" },
+          h("div", { className: "context-grid" },
+            h("section", { className: "card stack context-doc" }, h("h3", null, t("文档判断")),
+              brief.documentType?.summary && h("p", { className: "context-summary" }, brief.documentType.summary),
+              h("dl", null,
+                brief.documentType?.audience && h(React.Fragment, null, h("dt", null, t("目标读者")), h("dd", null, brief.documentType.audience)),
+                brief.documentType?.tone && h(React.Fragment, null, h("dt", null, t("整体语气")), h("dd", null, brief.documentType.tone)),
+                h("dt", null, t("文本类型")), h("dd", null, contextPurposeLabel(brief.documentType?.purpose, t)))),
+            sections.length > 0 && h("section", { className: "card stack context-sections" },
+              h("div", { className: "section-heading" }, h("h3", null, t("内容分区")), h("span", { className: "muted" }, `${sections.length} ${t("个分区")}`)),
+              ...sections.slice(0, expanded).map((section) => h("article", { className: "context-section", key: `${section.from}-${section.to}` },
+                h("span", { className: "context-range" }, rangeText(section)),
+                h("div", null,
+                  h("div", { className: "context-section-head" }, h("strong", null, contextPurposeLabel(section.purpose, t)), section.tone && h("span", { className: "muted" }, section.tone)),
+                  section.note && h("p", null, section.note)),
+                h(Button, { small: true, quiet: true, disabled: !run.segments[section.from - 1], onClick: () => jump(run.segments[section.from - 1]?.id) }, t("查看译段")))),
+              sections.length > expanded && h(Button, { small: true, quiet: true, onClick: () => setExpanded(expanded + 100) }, `${t("显示其余")} ${sections.length - expanded} ${t("个分区")}`))),
+          (notes.length > 0 || crossRefs.length > 0) && h("div", { className: "context-grid" },
+            notes.length > 0 && h("section", { className: "card stack" }, h("h3", null, t("分区备注")),
+              ...notes.map((note, index) => h("div", { className: "context-note", key: index }, h("p", null, note.text), note.ids?.length > 0 && h(Button, { small: true, quiet: true, onClick: () => jump(note.ids[0]) }, t("查看相关译段"))))),
+            crossRefs.length > 0 && h("section", { className: "card stack" }, h("h3", null, t("跨段关联")),
+              ...crossRefs.map((ref, index) => h("div", { className: "context-note", key: index }, h("p", null, ref.note), ref.ids?.length > 0 && h(Button, { small: true, quiet: true, onClick: () => jump(ref.ids[0]) }, t("查看相关译段")))))))
+          : h("section", { className: "card stack" }, h("h3", null, t("还没有语境分析")), h("p", { className: "muted" }, t(run.requiresBrief ? "这批原文需要先完成语境分析才能开始翻译。" : "短文件可按需分析，帮助理解全文。")), h(Button, { primary: true, disabled: busy, busy, onClick: () => command() }, t("开始语境分析"))));
+    }
+    function TaskSummary({ model, run, t, review, exportFile, reports, context }) {
       const selected = run.segments.filter((segment) => segment.selected !== false), done = selected.filter((segment) => segment.status === "done" && segment.translation?.trim()).length;
-      const failed = selected.filter((segment) => ["error", "failed"].includes(segment.status)).length, problems = selected.reduce((count, segment) => count + issuesOf(segment).length, 0);
+      const failedSegments = selected.filter(segmentFailed), failed = failedSegments.length, firstFailedId = failedSegments[0]?.id || "";
+      const problems = selected.reduce((count, segment) => count + issuesOf(segment).length, 0);
       const locked = editingLocked(run), pending = model.dirty(), id = run.batchId;
       const translated = selected.filter((segment) => segment.status === "done" && segment.translation?.trim());
       const qaFailed = translated.some(item => qaRetryable(item, false)), proofreadFailed = translated.some(proofreadRetryable);
@@ -739,7 +831,9 @@ window.__ModuleLoader__.load({
       return h("section", { className: "card" }, h("div", { className: "task-status" }, h("span", { className: "muted" }, t("当前任务")), h("span", { className: "badge" }, stateText(briefBusy ? "in_progress" : briefFailed ? "needs_attention" : run.workflow?.overall?.status || run.runState || "ready", t))),
         h("h2", { className: "task-title" }, run.filename || id), h("progress", { max: Math.max(1, selected.length), value: done, "aria-label": t("翻译进度") }),
         done > 0 && ["mqxliff", "xliff"].includes(run.format) && h("p", { className: "muted" }, t(finalReviewStatus(run.runnerOptions?.reviewFinal))),
-        h("div", { className: "metrics" }, h("span", null, h("strong", null, `${done}/${selected.length}`), t("段")), h("span", null, h("strong", null, problems), t("问题")), failed > 0 && h("span", { className: "error" }, h("strong", null, failed), t("失败"))),
+        h("div", { className: "metrics" }, h("span", null, h("strong", null, `${done}/${selected.length}`), t("段")), h("span", null, h("strong", null, problems), t("问题")),
+          failed > 0 && h("button", { type: "button", className: "metric-link error", title: t("查看失败句段"), onClick: () => review(firstFailedId, "failed") }, h("strong", null, failed), t("失败"))),
+        failed > 0 && h("div", { className: "attention-banner" }, h("span", null, `${failed} ${t("段翻译失败")}`), h(Button, { small: true, onClick: () => review(firstFailedId, "failed") }, t("查看并重试"))),
         h(WorkflowGraph, { run, t, review, reports },
           h("section", { className: "flow-group flow-context", "aria-label": t("语境分析"), "data-status": briefBusy ? "in_progress" : briefFailed ? "needs_attention" : brief?.status === "ready" ? "completed" : "not_started" },
             h("div", { className: "flow-context-heading" }, h("span", { className: "flow-number", "aria-hidden": true }, briefBusy ? h(Glyph, { name: "context" }) : briefFailed ? "!" : brief?.status === "ready" ? "✓" : "01"),
@@ -749,7 +843,8 @@ window.__ModuleLoader__.load({
               brief?.coverage && h("p", { className: "context-coverage" }, `${t("已覆盖")} ${brief.coverage.covered} / ${brief.coverage.total} ${t("段")}`),
               h("p", { className: "muted" }, t(!run.requiresBrief && !brief ? "短文件可按需分析，帮助理解全文。" : brief?.retryParts?.failed?.length ? "只补失败分片时会保留其他分片的分析结果。" : "重新分析全文，保留现有译文。修改模型设置后可在这里重试。"))),
               brief?.retryParts?.failed?.length > 0 && !brief.editedAt && h(Button, { primary: true, small: true, disabled: locked || pending || briefBusy, onClick: () => command("context-brief", true) }, `${t("仅重试失败分片")} (${brief.retryParts.failed.length})`),
-              h(Button, { onClick: () => command("context-brief"), busy: briefBusy, disabled: locked || pending || briefBusy, small: true }, t(briefBusy ? "语境分析中" : briefFailed ? "重新分析全部语境" : brief?.status === "ready" ? "重新分析语境" : "开始语境分析"))),
+              h(Button, { onClick: () => command("context-brief"), busy: briefBusy, disabled: locked || pending || briefBusy, small: true }, t(briefBusy ? "语境分析中" : briefFailed ? "重新分析全部语境" : brief?.status === "ready" ? "重新分析语境" : "开始语境分析")),
+              context && h(Button, { small: true, quiet: true, onClick: context }, t("查看语境分析"))),
             brief?.warning && h("p", { className: "feedback error", role: "alert" }, brief.warning),
             briefFailed && !brief?.retryParts && !brief?.editedAt && !brief.warning?.includes("原文或分片已变化") && h("p", { className: "muted" }, t("旧报告未记录失败位置，无法单独重试。")),
             h(Feedback, { model, name: `context-brief:${id}`, retry: !locked && !pending ? () => command("context-brief", model.view.operations[`context-brief:${id}`]?.failedOnly === true) : undefined, t }))),
@@ -824,8 +919,8 @@ window.__ModuleLoader__.load({
             ...(item.machine?.samples || []).map((sample) => h("div", { className: "pairs", key: sample.id }, h("p", null, t("机器稿"), " · ", sample.machine), h("p", null, t("人工终稿"), " · ", sample.human || t("尚未关联")), h(Button, { small: true, onClick: () => review(sample.id) }, t("查看译段")))))),
           !terms.length && h(Empty, { title: survey?.generatedAt ? "尚无翻译期标记术语" : "尚无术语普查结果", t }), h(Pager, { offset, total: terms.length, onChange: setOffset, t })));
     }
-    function ReviewPanel({ model, run, t, initialSelected = "", reports }) {
-      const [filter, setFilter] = useState("all"), [offset, setOffset] = useState(Math.max(0, Math.floor(run.segments.findIndex((item) => item.id === initialSelected) / 20) * 20)), [selected, setSelected] = useState(initialSelected), [query, setQuery] = useState(""), [editing, setEditing] = useState(Boolean(initialSelected));
+    function ReviewPanel({ model, run, t, initialSelected = "", initialFilter = "all", reports }) {
+      const [filter, setFilter] = useState(initialFilter), [offset, setOffset] = useState(Math.max(0, Math.floor(run.segments.findIndex((item) => item.id === initialSelected) / 20) * 20)), [selected, setSelected] = useState(initialSelected), [query, setQuery] = useState(""), [editing, setEditing] = useState(Boolean(initialSelected));
       const id = run.batchId, qaKey = `qa:${id}`;
       const [checked, setChecked] = useState([]);
       const locked = editingLocked(run) || run.contextBriefPending || model.view.operations[qaKey]?.pending || model.view.operations.save?.pending || model.view.operations[`retry-translation:${id}`]?.pending || model.view.operations[`retry-qa:${id}`]?.pending || model.view.operations[`retry-proofreading:${id}`]?.pending;
@@ -837,9 +932,27 @@ window.__ModuleLoader__.load({
       const qaCount = run.segments.filter(item => qaRetryable(item, false)).length;
       const checkedProofread = run.segments.filter(item => checkedIds.includes(item.id) && proofreadRetryable(item)).map(item => item.id);
       const proofreadCount = run.segments.filter(proofreadRetryable).length;
-      const retry = async (verb, ids) => { const result = await model.retry(verb, ids); if (result.ok) setChecked([]); };
+      // 重试一条失败句段后，直接跳到下一条还没处理的失败句段，不用再回概览找。
+      const retry = async (verb, ids) => {
+        const result = await model.retry(verb, ids);
+        if (!result.ok) return;
+        setChecked([]);
+        const updated = model.view.run;
+        if (verb !== "retry-translation" || filter !== "failed" || !updated) return;
+        const next = updated.segments.find((item) => segmentFailed(item) && !ids.includes(item.id));
+        if (!next) return;
+        setFilter("failed"); setQuery(""); setOffset(Math.floor(updated.segments.indexOf(next) / 20) * 20); setSelected(next.id); setEditing(true);
+      };
       const page = reviewPage(run.segments, { filter, query, offset, selectedId: selected }), current = page.selected, segment = current?.segment;
       const issueSegments = run.segments.filter((item) => issuesOf(item).length);
+      const failedSegments = run.segments.filter(segmentFailed);
+      const locateFailed = (direction) => {
+        const index = failedSegments.findIndex((item) => item.id === segment?.id);
+        const origin = index < 0 ? direction > 0 ? -1 : 0 : index;
+        const next = failedSegments[(origin + direction + failedSegments.length) % failedSegments.length];
+        if (!next) return;
+        setFilter("failed"); setQuery(""); setOffset(Math.floor(run.segments.indexOf(next) / 20) * 20); setSelected(next.id); setEditing(true);
+      };
       const locate = (direction) => {
         const index = issueSegments.findIndex((item) => item.id === segment?.id);
         const origin = index < 0 ? direction > 0 ? -1 : 0 : index;
@@ -852,11 +965,12 @@ window.__ModuleLoader__.load({
         token.view.sections[qaKey] = value; await model.saveQaResults(value, token, id);
       });
       const savedReport = () => reports("aiQa");
-      return h("section", { className: "stack" }, h("div", { className: "section-heading" }, h("h3", null, t("译文检查")), h("span", { className: "muted" }, `${page.total} / ${run.segments.length} ${t("段")}`)),
+      return h("section", { className: "stack" }, h("div", { className: "section-heading" }, h("h3", null, t("译文检查")), h("span", { className: "muted" }, `${page.total} / ${run.segments.length} ${t("段")}`, failedSegments.length > 0 && ` · ${failedSegments.length} ${t("段失败")}`)),
         h("div", { className: "review-toolbar" }, h("input", { type: "search", value: query, placeholder: t("搜索原文、译文或段号"), "aria-label": t("搜索译段"), onChange: (event) => { setQuery(event.target.value); setOffset(0); setEditing(false); } }),
-          h("select", { value: filter, "aria-label": t("译段筛选"), onChange: (event) => { setFilter(event.target.value); setOffset(0); setEditing(false); } }, ...[["all", "全部译段"], ["issues", "仅看问题"], ["pending", "尚未翻译"]].map(([value, label]) => h("option", { key: value, value }, t(label))))),
+          h("select", { value: filter, "aria-label": t("译段筛选"), onChange: (event) => { setFilter(event.target.value); setOffset(0); setEditing(false); } }, ...[["all", "全部译段"], ["failed", "仅看失败"], ["issues", "仅看问题"], ["pending", "尚未翻译"]].map(([value, label]) => h("option", { key: value, value }, t(label))))),
         h("div", { className: "button-row" }, h(Button, { small: true, onClick: inspect, disabled: locked || model.dirty() || !run.segments.some((item) => item.translation?.trim()) }, t("检查本批次")), h(Button, { small: true, quiet: true, onClick: savedReport }, t("查看上次报告")),
-          issueSegments.length > 0 && h(React.Fragment, null, h(Button, { small: true, quiet: true, onClick: () => locate(-1) }, t("上个问题")), h(Button, { small: true, quiet: true, onClick: () => locate(1) }, t("下个问题")))),
+          issueSegments.length > 0 && h(React.Fragment, null, h(Button, { small: true, quiet: true, onClick: () => locate(-1) }, t("上个问题")), h(Button, { small: true, quiet: true, onClick: () => locate(1) }, t("下个问题"))),
+          failedSegments.length > 0 && h(React.Fragment, null, h(Button, { small: true, quiet: true, onClick: () => locateFailed(-1) }, t("上个失败")), h(Button, { small: true, quiet: true, onClick: () => locateFailed(1) }, t("下个失败")))),
         h("section", { className: "card stack retry-panel", "aria-label": t("句段重试") }, h("h3", null, h(Glyph, { name: "refresh" }), t("句段重试")), h("p", { className: "muted" }, t("可跨页勾选句段。翻译重试生成初稿，校对重试修订现有译文，本地 QA 只检查；每次重试完成后即结束。")),
           h("div", { className: "button-row" }, h(Button, { small: true, disabled: locked, onClick: () => setChecked([...new Set([...checkedIds, ...page.items.filter(({ segment }) => canRetry(segment)).map(({ segment }) => segment.id)])]) }, t("勾选本页")),
             h(Button, { small: true, quiet: true, disabled: locked || !checkedIds.length, onClick: () => setChecked([]) }, `${t("清空勾选")} (${checkedIds.length})`),
@@ -948,8 +1062,9 @@ window.__ModuleLoader__.load({
     function TaskView({ model, t }) {
       const run = model.displayRun(), view = model.view;
       const [panel, setPanel] = useState("overview"), [reportTab, setReportTab] = useState("aiQa"), [selectedSegment, setSelectedSegment] = useState("");
+      const [reviewFilter, setReviewFilter] = useState("all");
       const reports = (tab = "aiQa") => { setReportTab(tab); setPanel("reports"); };
-      const review = (id = "") => { setSelectedSegment(id); setPanel("review"); };
+      const review = (id = "", filter = "all") => { setSelectedSegment(id); setReviewFilter(filter); setPanel("review"); };
       const notice = model.draftNotice();
       return h("div", { className: "stack task-view" }, h(PageHeading, { icon: "tasks", title: "翻译任务", description: "从全文语境到逐段润色，再完成整批检查与交付。", t }), h("label", { className: "card batch-picker" }, t("选择翻译批次"), h("select", { className: "task-selector", value: view.selectedId, onChange: (event) => model.select(event.target.value) }, h("option", { value: "", disabled: view.files.length > 0 }, t(view.files.length ? "选择翻译批次" : "暂无翻译批次")), ...view.files.map((file) => h("option", { key: file.batchId, value: file.batchId }, batchLabel(file, stateText(file.runState || file.status, t)))))),
         h(Feedback, { model, name: "task-list", retry: () => model.refresh(), t }), h(Feedback, { model, name: "task-load", retry: () => model.activate(view.selectedId), t }),
@@ -958,8 +1073,8 @@ window.__ModuleLoader__.load({
         notice === "draft" && h("div", { className: "notice", role: "status" }, t("有未保存的译文草稿"), h("p", { className: "muted" }, t("草稿保存在当前会话中，退出应用前请保存。"))),
         !run && !view.operations["task-load"]?.pending && h(Empty, { title: "从工作区开始", description: "指定原文、关联资源，然后开始第一批翻译。", artwork: true, t }),
         (!run || panel === "overview") && h(QuickBatch, { model, t }),
-        run && h("section", { className: "stack", key: run.batchId }, h(SectionTabs, { label: "当前任务分区", value: panel, onChange: setPanel, t, items: [["overview", "任务概览", "overview"], ["review", "译文检查", "check"], ["reports", "质量与复查", "search"], ["export", "工作区导出", "export"], ["final", "终稿与学习", "learning"]] }),
-          panel === "overview" ? h(TaskSummary, { model, run, t, review: () => review(), reports, exportFile: () => setPanel("export") }) : panel === "review" ? h(ReviewPanel, { model, run, t, key: `${run.batchId}:${selectedSegment}`, initialSelected: selectedSegment, reports }) : panel === "reports" ? h(TaskReports, { model, run, t, key: `${run.batchId}:${reportTab}`, initial: reportTab, review }) : panel === "final" ? h(FinalReviewPanel, { model, run, t, key: run.batchId }) : h(ExportPanel, { model, run, t, review, key: run.batchId, onFinal: () => setPanel("final") })), h(TaskHistory, { model, t }));
+        run && h("section", { className: "stack", key: run.batchId }, h(SectionTabs, { label: "当前任务分区", value: panel, onChange: setPanel, t, items: [["overview", "任务概览", "overview"], ["context", "语境分析", "context"], ["review", "译文检查", "check"], ["reports", "质量与复查", "search"], ["export", "工作区导出", "export"], ["final", "终稿与学习", "learning"]] }),
+          panel === "overview" ? h(TaskSummary, { model, run, t, review, reports, context: () => setPanel("context"), exportFile: () => setPanel("export") }) : panel === "context" ? h(ContextAnalysis, { model, run, t, review }) : panel === "review" ? h(ReviewPanel, { model, run, t, key: `${run.batchId}:${selectedSegment}:${reviewFilter}`, initialSelected: selectedSegment, initialFilter: reviewFilter, reports }) : panel === "reports" ? h(TaskReports, { model, run, t, key: `${run.batchId}:${reportTab}`, initial: reportTab, review }) : panel === "final" ? h(FinalReviewPanel, { model, run, t, key: run.batchId }) : h(ExportPanel, { model, run, t, review, key: run.batchId, onFinal: () => setPanel("final") })), h(TaskHistory, { model, t }));
     }
     function ResourcePreview({ model, preview, t, close }) {
       const key = `agent-read:${preview.purpose}:${preview.path}`;
@@ -1099,6 +1214,15 @@ window.__ModuleLoader__.load({
         h("div", { className: "pairs qa-inputs" }, h("label", { className: "card" }, h("span", { className: "input-heading" }, h(Glyph, { name: "context" }), t("原文")), h("textarea", { value: source, onChange: (event) => setSource(event.target.value) })), h("label", { className: "card" }, h("span", { className: "input-heading" }, h(Glyph, { name: "check" }), t("译文")), h("textarea", { value: target, onChange: (event) => setTarget(event.target.value) }))),
         h("div", null, h(Button, { primary: true, disabled: !source.trim() || !target.trim(), busy: model.view.operations[withResources ? "agent-qa" : "standalone-qa"]?.pending, onClick: withResources ? agentInspect : inspect }, t(withResources ? "交给 Agent 审校" : "运行 QA")), h(Feedback, { model, name: "standalone-qa", retry: inspect, t }), h(Feedback, { model, name: "agent-qa", t })), h(QaReport, { report: model.view.sections.standaloneQa, t }));
     }
+    function FileChips({ files = [], missing = 0, t }) {
+      if (!files.length && !missing) return null;
+      // 候选传的是文件路径字符串，风格规范传的是 { name, count }：两种都按名字展示。
+      const fileInfo = (file) => typeof file === "string" ? { name: file } : { name: String(file?.name || ""), count: Number(file?.count) || 0 };
+      return h("div", { className: "learning-files" },
+        ...files.slice(0, 8).map((file) => { const info = fileInfo(file); return h("span", { className: "file-chip", key: info.name, title: info.name }, info.count ? `${fileLabel(info.name)} · ${info.count}` : fileLabel(info.name)); }),
+        files.length > 8 && h("span", { className: "file-chip muted" }, `+${files.length - 8}`),
+        !files.length && missing > 0 && h("span", { className: "file-chip muted" }, `${t("来源未记录")} · ${missing} ${t("条证据")}`));
+    }
     function LearningEvidence({ model, t, batchId = "" }) {
       const [open, setOpen] = useState(false), [offset, setOffset] = useState(0), [search, setSearch] = useState("");
       const key = `learning-evidence:${batchId}`, load = (token) => open ? model.invoke(model.path("/api/learning/evidence", { contentType: "all", domain: "all", batchId, offset, limit: 20, search }, token), "GET", undefined, token) : Promise.resolve(null);
@@ -1106,7 +1230,7 @@ window.__ModuleLoader__.load({
       return h("details", { className: "card", open, onToggle: (event) => setOpen(event.currentTarget.open) }, h("summary", null, t("学习轨迹与修改记录")), open && h("div", { className: "stack" },
         h("input", { type: "search", value: search, placeholder: t("搜索原文、译文或来源"), "aria-label": t("搜索学习证据"), onChange: (event) => { setSearch(event.target.value); setOffset(0); } }),
         h(Feedback, { model, name: `section:${key}`, retry: () => model.loadSection(key, load), t }),
-        ...(data?.items || []).map((item) => h("article", { className: "resource-row stack", key: item.id }, h("span", { className: "badge" }, t(item.humanDecision?.accepted ? "人工确认" : "机器译文")), h("p", { className: "muted" }, item.sourceFile || t("未标注来源")), h("p", { className: "source-text" }, item.source),
+        ...[...(data?.items || [])].sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))).map((item) => h("article", { className: "resource-row stack", key: item.id }, h("span", { className: "badge" }, t(item.humanDecision?.accepted ? "人工确认" : "机器译文")), h("p", { className: "muted" }, `${item.sourceFile || t("未标注来源")} · ${timeText(item.updatedAt)}`), h("p", { className: "source-text" }, item.source),
           h("div", { className: "pairs" }, h("div", null, h("strong", null, t("机器稿")), h("p", { className: "source-text" }, item.humanDecision?.machineTranslation || (!item.humanDecision?.accepted ? item.finalTranslation : "") || item.initialTranslation || t("未记录"))), h("div", null, h("strong", null, t("人工终稿")), h("p", { className: "source-text" }, item.humanDecision?.accepted ? item.humanDecision.finalTranslation || item.finalTranslation : t("尚未关联")))),
           item.humanDecision?.previousFinalTranslation && h("p", null, t("上一版人工终稿"), " · ", item.humanDecision.previousFinalTranslation),
           h("details", null, h("summary", null, t("变更与依据")), h("p", { className: "muted" }, timeText(item.updatedAt)), item.attribution?.reportZh && h("div", { className: "preview-text" }, item.attribution.reportZh), ...(item.events || []).map((event, index) => h("p", { className: "muted", key: index }, [timeText(event.at || event.createdAt), event.message || event.reason || event.type].filter(Boolean).join(" · "))), h("code", null, item.id)))),
@@ -1117,6 +1241,7 @@ window.__ModuleLoader__.load({
       const load = async (token) => { const [learning, styles] = await Promise.all([model.invoke(model.path("/api/learning", { contentType: "general", domain: "general" }, token), "GET", undefined, token), model.invoke(model.path("/api/style-profiles", {}, token), "GET", undefined, token)]); return { ...learning, styleProfiles: styles.styleProfiles || [] }; };
       const data = useSection(model, "learning", load) || {}, candidates = data.candidates || [], candidate = candidates.find((item) => item.id === selected) || candidates[0], candidateId = candidate?.id || "";
       const champion = data.champion || data.champions?.[0], scope = { contentType: candidate?.contentType || "general", domain: candidate?.domain || "general" };
+      const skillById = new Map([...(data.skills || []), champion, ...candidates].filter(Boolean).map((item) => [item.id, item]));
       const gateKey = `learning-gate:${candidateId}`, loadGate = (token) => model.invoke(model.path("/api/quality/gate", { ...scope, ...(candidateId ? { skillId: candidateId } : {}) }, token), "GET", undefined, token);
       const gate = useSection(model, gateKey, loadGate, [candidateId]);
       const evaluation = (data.evaluations || []).find((item) => item.challengerSkillId === candidateId);
@@ -1147,15 +1272,33 @@ window.__ModuleLoader__.load({
         automation && h("section", { className: "card stack automation-card", "aria-label": t("自动学习状态"), "data-status": automation.status }, h("div", { className: "section-heading" }, h("h3", null, t("自动学习")), h("span", { className: "badge" }, t(automationLabels[automation.status] || "等待样本"))),
           h("p", null, automation.message), automaticJob && h("p", { className: "muted" }, `${automaticJob.progress.completed} / ${automaticJob.progress.requested} `, t("个配对样本"), automaticJob.automaticRetryCount > 0 && ` · ${t("失败样本已自动重试")} ${automaticJob.automaticRetryCount}`),
           automation.revisionRound > 0 && h("span", { className: "muted" }, t("修订轮次"), " · ", automation.revisionRound),
+          h("div", { className: "automation-meta" },
+            automation.updatedAt && h("span", null, `${t("更新于")} ${timeText(automation.updatedAt)}`),
+            Number(automation.gateRound) > 0 && h("span", null, `${t("门禁修订")} ${automation.gateRound} / ${automation.gateRevisionLimit ?? 5}`),
+            automation.assets?.goldSetVersions?.length > 0 && h("span", null, `Gold ${automation.assets.goldSetVersions.join("、")}`),
+            automation.assets?.regressionSuiteVersions?.length > 0 && h("span", null, `${t("回归集")} ${automation.assets.regressionSuiteVersions.join("、")}`),
+            automation.assets?.goldSampleCount != null && h("span", null, `${automation.assets.goldSampleCount} Gold · ${automation.assets.regressionCaseCount} ${t("回归案例")}`),
+            automation.assets?.syncedAt && h("span", null, `${t("资产同步")} ${timeText(automation.assets.syncedAt)}`)),
           h("div", { className: "button-row" }, automation.candidateId && h(Button, { small: true, onClick: () => { setSelected(automation.candidateId); setStep(automation.status === "ready" ? "activate" : "evaluation"); } }, t("查看候选进度")),
-            automation.canContinue && h(Button, { small: true, primary: true, busy: model.view.operations["continue-revision"]?.pending, onClick: () => operation("continue-revision", "/api/learning/continue-revision", { candidateId: automation.candidateId, jobId: automation.jobId }) }, t("继续修订一版")),
+            automation.canContinue && h(Button, { small: true, primary: true, busy: model.view.operations["continue-revision"]?.pending, onClick: () => operation("continue-revision", "/api/learning/continue-revision", { candidateId: automation.candidateId, jobId: automation.jobId }) }, t(automation.continueMode === "gate" ? "继续门禁修订" : "继续修订一版")),
             automation.status === "blocked" && automaticJob?.progress?.failed > 0 && h(Button, { small: true, busy: model.view.operations["retry-evaluation"]?.pending, onClick: () => operation("retry-evaluation", `/api/learning/evaluation-jobs/${encodeURIComponent(automaticJob.jobId)}/retry-failed`) }, t("重试失败样本"))),
-          h(Feedback, { model, name: "continue-revision", t }), h(Feedback, { model, name: "retry-evaluation", t })),
+          h(Feedback, { model, name: "continue-revision", t }), h(Feedback, { model, name: "retry-evaluation", t }),
+          automation.history?.length > 0 && h("details", { className: "card automation-history" }, h("summary", null, `${t("自动学习记录")} · ${automation.history.length}`),
+            h("div", { className: "automation-history" }, ...[...automation.history].reverse().map((entry, index) => h("article", { key: index }, h("span", { className: "muted" }, timeText(entry.at)), h("p", null, entry.message)))))),
         h("div", { className: "learning-steps", "aria-label": t("学习流程") }, ...[["champion", "生效版本", champion ? `v${champion.version || 1}` : "暂无记录"], ["candidates", "候选", `${candidates.length}`], ["evaluation", "评测", automaticStep === "evaluating" ? "运行中" : evaluation ? statuses[evaluation.decision] || evaluation.decision : "尚未评测"], ["gate", "门禁", automaticStep === "gating" ? "运行中" : gate?.status ? statuses[gate.status] || gate.status : "尚未运行"], ["activate", "启用", canPromote ? "可以启用" : "等待检查"]].map(([value, label, hint], index) => h("button", { type: "button", key: value, "aria-pressed": step === value, onClick: () => setStep(value) }, h("span", { className: "muted" }, String(index + 1).padStart(2, "0")), h("strong", null, t(label)), h("span", { className: "step-hint" }, t(hint))))),
         h(Feedback, { model, name: "section:learning", hidePending: Object.hasOwn(model.view.sections, "learning"), retry: () => model.loadSection("learning", load), t }),
-        step === "champion" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("当前生效版本")), champion && h("span", { className: "badge" }, `v${champion.version || 1}`)), champion ? h(React.Fragment, null, h("strong", null, skillLabel(champion, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h("p", null, champion.description || ""), h("details", null, h("summary", null, t("策略内容")), h("div", { className: "preview-text" }, skillStrategyText(champion)))) : h(Empty, { title: "暂无条目", t }), h(Button, { onClick: () => setStep("candidates") }, t("查看候选"))),
+        step === "champion" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("当前生效版本")), champion && h("span", { className: "badge" }, `v${champion.version || 1}`)), champion ? h(React.Fragment, null, h("strong", null, skillLabel(champion, model.workspace?.project?.name || t("当前项目"), model.view.projectId)),
+            h("div", { className: "learning-meta" }, h("span", { className: "badge" }, `v${champion.version || 1}`), h("span", null, `${t("更新于")} ${timeText(champion.updatedAt)}`), h("span", null, `${(champion.evidenceIds || []).length} ${t("条证据")}`)),
+            h(FileChips, { files: champion.evidenceFiles, missing: champion.evidenceFilesMissing, t }),
+            h("p", null, champion.description || ""), h("details", null, h("summary", null, t("策略内容")), h("div", { className: "preview-text" }, skillStrategyText(champion)))) : h(Empty, { title: "暂无条目", t }), h(Button, { onClick: () => setStep("candidates") }, t("查看候选"))),
         step === "candidates" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("候选版本")), h(Button, { small: true, onClick: () => operation("generate", "/api/learning/skills/generate"), busy: model.view.operations.generate?.pending }, t("生成候选策略"))),
-          h(Feedback, { model, name: "generate", t }), ...candidates.slice(offset, offset + 20).map((item) => h("article", { className: "candidate-row", key: item.id, "data-selected": candidateId === item.id }, h("div", { className: "section-heading" }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h(Button, { small: true, primary: candidateId === item.id, onClick: () => { setSelected(item.id); setStep("evaluation"); } }, t("选择候选"))), h("p", null, item.description || ""), h("details", null, h("summary", null, t("变更内容")), h("div", { className: "preview-text" }, skillStrategyText(item, champion))))), !candidates.length && h(Empty, { title: "暂无候选", description: "从人工确认的终稿生成候选，不会自动替换生效版本。", t }), h(Pager, { offset, total: candidates.length, onChange: setOffset, t })),
+          h(Feedback, { model, name: "generate", t }), ...candidates.slice(offset, offset + 20).map((item) => h("article", { className: "candidate-row", key: item.id, "data-selected": candidateId === item.id }, h("div", { className: "section-heading" }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h(Button, { small: true, primary: candidateId === item.id, onClick: () => { setSelected(item.id); setStep("evaluation"); } }, t("选择候选"))),
+            h("div", { className: "learning-meta" }, h("span", { className: "badge" }, `v${item.version || 1}`), h("span", null, `${t("生成于")} ${timeText(item.createdAt)}`),
+              item.updatedAt && item.updatedAt !== item.createdAt && h("span", null, `${t("更新于")} ${timeText(item.updatedAt)}`),
+              item.parentId && skillById.get(item.parentId) && h("span", null, `${t("基于")} v${skillById.get(item.parentId).version || 1}`),
+              h("span", null, `${(item.evidenceIds || []).length} ${t("条证据")}`),
+              item.metadata?.evaluationRevision?.round && h("span", null, `${t("修订轮次")} ${item.metadata.evaluationRevision.round}`)),
+            h(FileChips, { files: item.evidenceFiles, missing: item.evidenceFilesMissing, t }), h("p", null, item.description || ""), h("details", null, h("summary", null, t("变更内容")), h("div", { className: "preview-text" }, skillStrategyText(item, champion))))), !candidates.length && h(Empty, { title: "暂无候选", description: "从人工确认的终稿生成候选，不会自动替换生效版本。", t }), h(Pager, { offset, total: candidates.length, onChange: setOffset, t })),
         ["evaluation", "gate", "activate"].includes(step) && h("div", { className: "candidate-picker" }, h("label", null, t("受测候选"), h("select", { value: candidateId, onChange: (event) => setSelected(event.target.value) }, !candidates.length && h("option", { value: "" }, t("先生成候选")), ...candidates.map((item) => h("option", { key: item.id, value: item.id }, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)))))),
         step === "evaluation" && h("section", { className: "card stack" }, h("h3", null, t("生效版本与候选评测")), h("p", { className: "muted" }, t("使用未参与候选学习的人工终稿做配对评测。")),
           h(Button, { disabled: !candidateId, busy: model.view.operations[evaluationKey]?.pending, onClick: () => operation(evaluationKey, `/api/learning/skills/${encodeURIComponent(candidateId)}/evaluate`) }, t("开始评测")), h(Feedback, { model, name: evaluationKey, t }),
@@ -1163,6 +1306,11 @@ window.__ModuleLoader__.load({
             h("table", { className: "metric-table" }, h("thead", null, h("tr", null, h("th", null, t("指标")), h("th", null, t("生效版本")), h("th", null, t("候选")))), h("tbody", null, ...[["qaScore", "QA 分数"], ["hardErrorCount", "硬错误"], ["mandatoryTermAccuracy", "术语准确率"]].map(([key, label]) => h("tr", { key }, h("td", null, t(label)), h("td", null, Number.isFinite(evaluation.championMetrics?.[key]) ? evaluation.championMetrics[key] : "—"), h("td", null, Number.isFinite(evaluation.challengerMetrics?.[key]) ? evaluation.challengerMetrics[key] : "—")))))) : h(Empty, { title: "尚未评测", t }), h(Button, { quiet: true, onClick: () => setStep("gate") }, t("查看门禁"))),
         step === "gate" && h("section", { className: "card stack" }, h("div", { className: "section-heading" }, h("h3", null, t("固定 Gold Set 与失败回归")), h("span", { className: "badge" }, t(statuses[gate?.status] || "尚未运行"))), h(Feedback, { model, name: `section:${gateKey}`, hidePending: Object.hasOwn(model.view.sections, gateKey), retry: () => model.loadSection(gateKey, loadGate), t }),
           h("div", { className: "gate-metrics" }, h("div", null, h("strong", null, gate?.assets?.goldSampleCount || 0), h("span", null, t("启用 Gold 样本"))), h("div", null, h("strong", null, gate?.assets?.regressionCaseCount || 0), h("span", null, t("启用回归案例")))),
+          gate?.assets && h("div", { className: "learning-meta" },
+            gate.assets.goldSetVersions?.length > 0 ? h("span", null, `Gold ${gate.assets.goldSetVersions.join("、")}`) : h("span", null, t("尚无启用的 Gold Set")),
+            gate.assets.regressionSuiteVersions?.length > 0 && h("span", null, `${t("回归集")} ${gate.assets.regressionSuiteVersions.join("、")}`),
+            gate.latestRun && h("span", null, `${t("上次门禁")} ${timeText(gate.latestRun.createdAt || gate.latestRun.updatedAt)}`),
+            gate.assets.coverage?.valid === false && h("span", null, t("资产已更新，需要重跑门禁"))),
           h("p", { className: "muted" }, gate?.assets?.coverage?.reason || t("尚未运行门禁")), ...(gate?.latestRun?.blocking || []).map((item, index) => h("p", { className: "error", key: index }, item.message)),
           h(Button, { disabled: !candidateId, busy: model.view.operations[gateActionKey]?.pending, onClick: () => operation(gateActionKey, "/api/quality/runs", { skillId: candidateId }) }, t("运行门禁")), h(Feedback, { model, name: gateActionKey, t }),
           h("details", { className: "rule" }, h("summary", null, t("管理固定质量资产")), h("div", { className: "stack" }, h(Button, { onClick: previewGold, busy: model.view.operations["section:gold-preview"]?.pending }, t("从人工终稿预览 Gold Set")), h(Feedback, { model, name: "section:gold-preview", t }),
@@ -1172,7 +1320,9 @@ window.__ModuleLoader__.load({
           h(Button, { primary: true, disabled: !canPromote, busy: model.view.operations[activationKey]?.pending, onClick: () => operation(activationKey, `/api/learning/skills/${encodeURIComponent(candidateId)}/activate`) }, t("确认启用候选")), h(Feedback, { model, name: activationKey, t })),
         h("details", { className: "card" }, h("summary", null, t("风格规范"), ` · ${data.styleProfiles?.length || 0}`), h("div", { className: "stack" }, ...(data.styleProfiles || []).slice(styleOffset, styleOffset + 20).map((item) => {
           const key = `style:${item.id}`;
-          return h("article", { className: "resource-row", key }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)), h("p", { className: "muted" }, stateText(item.status, t)), h("details", null, h("summary", null, t("规范内容")), h("div", { className: "preview-text" }, item.instruction || "")), item.status === "draft" && h("div", { className: "button-row" }, h(Button, { small: true, onClick: () => operation(`evaluate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/evaluate`), busy: model.view.operations[`evaluate:${key}`]?.pending }, t("评测")), h("details", null, h("summary", null, t("激活")), h("p", { className: "muted" }, t("人工激活后才用于后续任务。")), h(Button, { small: true, onClick: () => operation(`activate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/activate`), busy: model.view.operations[`activate:${key}`]?.pending }, t("确认启用")))), h(Feedback, { model, name: `evaluate:${key}`, t }), h(Feedback, { model, name: `activate:${key}`, t }));
+          return h("article", { className: "resource-row", key }, h("strong", null, skillLabel(item, model.workspace?.project?.name || t("当前项目"), model.view.projectId)),
+            h("div", { className: "learning-meta" }, h("span", { className: "badge" }, `v${item.version || 1}`), h("span", null, `${t("更新于")} ${timeText(item.updatedAt)}`), h("span", null, stateText(item.status, t))),
+            h(FileChips, { files: item.evidenceFiles, missing: item.evidenceFilesMissing, t }), h("details", null, h("summary", null, t("规范内容")), h("div", { className: "preview-text" }, item.instruction || "")), item.status === "draft" && h("div", { className: "button-row" }, h(Button, { small: true, onClick: () => operation(`evaluate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/evaluate`), busy: model.view.operations[`evaluate:${key}`]?.pending }, t("评测")), h("details", null, h("summary", null, t("激活")), h("p", { className: "muted" }, t("人工激活后才用于后续任务。")), h(Button, { small: true, onClick: () => operation(`activate:${key}`, `/api/style-profiles/${encodeURIComponent(item.id)}/activate`), busy: model.view.operations[`activate:${key}`]?.pending }, t("确认启用")))), h(Feedback, { model, name: `evaluate:${key}`, t }), h(Feedback, { model, name: `activate:${key}`, t }));
         }), !data.styleProfiles?.length && h(Empty, { title: "暂无条目", t }), h(Pager, { offset: styleOffset, total: data.styleProfiles?.length || 0, onChange: setStyleOffset, t }))), h(LearningEvidence, { model, t }));
     }
     function ModelSettingsStatus({ model, t, selection, setSelection }) {

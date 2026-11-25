@@ -136,3 +136,46 @@ test("未完成和不稳定的评测不触发策略修订，重复点击只提�
     assert.equal(calls, 1);
   } finally { release.resolve(); await runner.stop(); }
 });
+
+test("门禁失败按复盘自动改版复评，达到轮次上限后暂停并允许手动继续", async () => {
+  const champion = { id: "v1", status: "champion", metadata: {}, strategy: { prompting: { additionalRules: ["保留术语"] } } };
+  const candidate = { id: "v2", parentId: "v1", status: "challenger", evidenceIds: ["training"] };
+  const state = { champion, candidates: [candidate], trajectories: [accepted("training"), ...Array.from({ length: 20 }, (_, i) => accepted(`holdout-${i}`))], jobs: [] };
+  let evaluations = 0, revisions = 0, gates = 0;
+  const deps = {
+    load: async () => state,
+    save: async (_champion, value) => { champion.metadata.learningAutomation = value; },
+    propose: async () => ({ proposed: false }),
+    evaluate: async (skill) => { evaluations += 1; const job = { jobId: "job-" + evaluations, challengerId: skill.id, championId: "v1", status: "queued", progress: { failed: 0 } }; state.jobs.push(job); return { jobId: job.jobId }; },
+    revise: async () => { throw new Error("门禁失败不应走评测修订分支"); },
+    gateRevisionLimit: () => 2,
+    gate: async () => { gates += 1; return { status: "blocked", message: "Gold 术语准确率不足", revisable: true, runId: "run-" + gates,
+      assets: { goldSetVersions: ["gold#v1"], regressionSuiteVersions: ["regression#v1"], goldSampleCount: 3, regressionCaseCount: 1, syncedAt: "2026-11-25T00:00:00.000Z" } }; },
+    reviseForGate: async (_scope, _champion, previous) => { revisions += 1; const next = { ...previous, id: "gate-" + revisions, parentId: "v1", evidenceIds: ["training"] }; state.candidates.unshift(next); return next; },
+    resume: async () => undefined
+  };
+  const runner = createLearningAutomation({ deps });
+  const settle = () => { const job = state.jobs.at(-1); Object.assign(job, { status: "completed", progress: { failed: 0 }, result: { report: { promotable: true } } }); };
+
+  state.jobs.push({ jobId: "job-0", challengerId: "v2", championId: "v1", status: "completed", progress: { failed: 0 }, result: { report: { promotable: true } } });
+  await runner.trigger(scope);
+  assert.equal(revisions, 1, "门禁失败后应按复盘生成修订稿");
+  assert.equal(state.jobs.at(-1).challengerId, "gate-1");
+  assert.equal(champion.metadata.learningAutomation.status, "evaluating");
+  assert.equal(champion.metadata.learningAutomation.assets.goldSampleCount, 3);
+  assert.ok(champion.metadata.learningAutomation.history.some((entry) => entry.status === "revising"));
+
+  settle();
+  await runner.trigger(scope);
+  assert.equal(revisions, 2, "第二次仍失败应继续修订");
+  assert.equal(champion.metadata.learningAutomation.gateRound, 2);
+
+  settle();
+  await runner.trigger(scope);
+  assert.equal(revisions, 2, "达到上限后不再自动修订");
+  assert.equal(champion.metadata.learningAutomation.status, "blocked");
+  assert.equal(champion.metadata.learningAutomation.canContinue, true);
+  assert.equal(champion.metadata.learningAutomation.continueMode, "gate");
+  assert.match(champion.metadata.learningAutomation.message, /门禁连续 2 轮未通过/u);
+  await runner.stop();
+});

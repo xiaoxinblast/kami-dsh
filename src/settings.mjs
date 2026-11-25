@@ -75,6 +75,7 @@ export const SETTING_SPECS = Object.freeze({
   "learning.gateRegressionCaseLimit": { min: 0, max: 200, step: 10, default: 50, label: "门禁单次回归案例上限", hint: "每次门禁按改动幅度从大到小最多跑几条回归案例（每条一次模型调用）；0 表示不限" },
   "learning.gateRegressionPassRate": { min: 0.5, max: 1, step: 0.05, default: 1, label: "回归通过率门槛", hint: "低于此比例直接阻断发版；默认 100%，即历史失败一条都不许复发" },
   "learning.autoGateEnabled": { type: "boolean", default: true, label: "回填后自动重建回归集并跑门禁", hint: "审校回填完成后自动把改动并入回归集，并对最新候选执行一次门禁；关掉则只在面板手动触发" },
+  "learning.autoGateReviseRounds": { min: 0, max: 20, step: 1, default: 5, label: "门禁失败自动修订轮数上限", hint: "门禁未通过时按复盘报告自动改一版策略并复评；连续这么多轮仍未通过就暂停，等你确认后继续。0 表示不自动修订" },
   "learning.gateDedupeSources": { type: "boolean", default: true, label: "门禁按原文去重", hint: "同一条原文只翻一次、同时按 Gold 与回归两套规则判定；关掉则回到逐条执行（更贵，结论口径不变）" },
   "learning.termSurveyEnabled": { type: "boolean", default: true, label: "批次翻完后做术语普查", hint: "查找翻译期标记术语在主 TM 和参考 TM 中的译法；主 TM 优先，同级冲突或无匹配则待定，人工终稿确认后才入正式库" },
   "learning.workingTermsEnabled": { type: "boolean", default: true, label: "翻译时自动学习本文件工作术语", hint: "每翻完一段，让快模型从原文/实际译文里抽取需要在本文件统一的新术语；只作用于当前文件，主术语库优先，不写正式术语表。关掉可省每段一次模型调用" },

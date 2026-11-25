@@ -12,9 +12,13 @@ export function createLearningAutomation({ deps } = {}) {
     if (!data.champion) return;
     const previous = data.champion.metadata?.learningAutomation || {};
     const modelRoute = context.modelRoute || previous.modelRoute;
-    const state = { ...previous, scope, canContinue: false, ...(modelRoute ? { modelRoute } : {}) };
+    const limitValue = deps.gateRevisionLimit ? Number(deps.gateRevisionLimit()) : NaN;
+    const gateRevisionLimit = Number.isFinite(limitValue) ? Math.max(0, limitValue) : 5;
+    const state = { ...previous, scope, canContinue: false, gateRevisionLimit, ...(modelRoute ? { modelRoute } : {}) };
     const save = async (status, message, extra = {}) => {
-      Object.assign(state, extra, { status, message, updatedAt: new Date().toISOString() });
+      const entry = { at: new Date().toISOString(), status, message };
+      Object.assign(state, extra, { status, message, updatedAt: entry.at });
+      state.history = [...(state.history || []), entry].slice(-20);
       await deps.save(data.champion, state);
     };
     await withRuntimeCall({ modelRoute, workspaceSnapshot: null }, async () => {
@@ -39,25 +43,49 @@ export function createLearningAutomation({ deps } = {}) {
         if (job?.status === "failed" || job?.progress?.failed) {
           return save("blocked", job.error || job.result?.report?.conclusion || "评测执行失败，自动重试已结束，请检查失败原因", { jobId: job.jobId });
         }
+        let gateRevised = false;
         if (job?.status === "completed") {
           const report = job.result?.report;
           if (report?.promotable) {
             const gate = await deps.gate(scope, candidate);
-            return save(gate.status, gate.message, { jobId: job.jobId, missingSamples: 0 });
+            const details = { jobId: job.jobId, missingSamples: 0, ...(gate.assets ? { assets: gate.assets } : {}), ...(gate.runId ? { gateRunId: gate.runId } : {}) };
+            // 门禁失败且还有失败案例：按复盘报告改一版策略，重新评测后再次门禁。
+            if (gate.status !== "blocked" || !gate.revisable) {
+              if (gate.status === "ready") state.gateRound = 0;
+              return save(gate.status, gate.message, details);
+            }
+            const gateRound = Number(state.gateRound) || 0;
+            if (gateRound >= gateRevisionLimit) {
+              return save("blocked", `门禁连续 ${gateRound} 轮未通过：${gate.message}。可查看失败原因后手动继续。`, { ...details, canContinue: true, continueMode: "gate" });
+            }
+            await save("revising", `门禁未通过，正在按失败原因生成第 ${gateRound + 1} 份修订稿：${gate.message}`, { ...details, gateRound });
+            try {
+              candidate = await deps.reviseForGate(scope, data.champion, candidate, gate);
+            } catch (error) {
+              return save("blocked", `门禁失败后修订暂停：${error.message}`, { ...details, canContinue: true, gateRound });
+            }
+            state.gateRound = gateRound + 1;
+            state.candidateId = candidate.id;
+            state.jobId = "";
+            state.evaluationFingerprint = "";
+            state.gateRunId = "";
+            gateRevised = true;
           }
-          if (report?.status !== "reject") return save("blocked", report?.conclusion || "没有完整评测结果，无法修订候选", { jobId: job.jobId });
-          const failures = (report.gates || []).filter((item) => item.passed === false).map((item) => item.label).filter(Boolean);
-          const reason = failures.join("、") || report.conclusion || "评测未通过";
-          const manual = context.continueJobId === job.jobId;
-          if (!manual && state.revisionAttemptJobId === job.jobId) return save("blocked", previous.status === "blocked" ? previous.message : "上次生成修订稿时中断，可手动继续修订", { jobId: job.jobId, canContinue: true });
-          if (!manual && round >= 2) return save("blocked", `已自动修订 2 版，最新候选仍未通过：${reason}。可手动继续修订。`, { jobId: job.jobId, canContinue: true });
-          await save("revising", `正在分析第 ${candidate.version || 1} 版的退步项，生成第 ${round + 1} 份修订稿：${reason}`, { jobId: job.jobId, revisionAttemptJobId: job.jobId });
-          try {
-            candidate = await deps.revise(scope, data.champion, candidate, job, round + 1);
-          } catch (error) {
-            return save("blocked", `候选修订暂停：${error.message}`, { canContinue: true });
+          if (!gateRevised) {
+            if (report?.status !== "reject") return save("blocked", report?.conclusion || "没有完整评测结果，无法修订候选", { jobId: job.jobId });
+            const failures = (report.gates || []).filter((item) => item.passed === false).map((item) => item.label).filter(Boolean);
+            const reason = failures.join("、") || report.conclusion || "评测未通过";
+            const manual = context.continueJobId === job.jobId;
+            if (!manual && state.revisionAttemptJobId === job.jobId) return save("blocked", previous.status === "blocked" ? previous.message : "上次生成修订稿时中断，可手动继续修订", { jobId: job.jobId, canContinue: true });
+            if (!manual && round >= 2) return save("blocked", `已自动修订 2 版，最新候选仍未通过：${reason}。可手动继续修订。`, { jobId: job.jobId, canContinue: true });
+            await save("revising", `正在分析第 ${candidate.version || 1} 版的退步项，生成第 ${round + 1} 份修订稿：${reason}`, { jobId: job.jobId, revisionAttemptJobId: job.jobId });
+            try {
+              candidate = await deps.revise(scope, data.champion, candidate, job, round + 1);
+            } catch (error) {
+              return save("blocked", `候选修订暂停：${error.message}`, { canContinue: true });
+            }
+            Object.assign(state, { candidateId: candidate.id, revisionRound: round + 1, jobId: "", evaluationFingerprint: "" });
           }
-          Object.assign(state, { candidateId: candidate.id, revisionRound: round + 1, jobId: "", evaluationFingerprint: "" });
         }
         const samples = selectSkillHoldout(data.trajectories, { scope, candidate, limit: 60 });
         const missingSamples = Math.max(0, DEFAULT_MIN_EVALUATION_SAMPLES - samples.length);
